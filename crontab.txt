@@ -1,0 +1,6 @@
+# b24-ai-auditor: запуск в 10:00 и 17:00 МСК (07:00 и 14:00 UTC), пн-пт
+# Вариант 1: запуск на хосте (без Docker)
+# 0 7,14 * * 1-5 cd /opt/b24-ai-auditor && /opt/b24-ai-auditor/venv/bin/python src/main.py >> logs/cron.log 2>&1
+
+# Вариант 2: запуск в Docker-контейнере
+0 7,14 * * 1-5 cd /opt/b24-ai-auditor && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs b24-ai-auditor:latest >> logs/cron.log 2>&1

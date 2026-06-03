@@ -1,0 +1,10 @@
+services:
+  auditor:
+    build: .
+    container_name: b24-ai-auditor
+    restart: "no"
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+    command: ["python", "src/main.py"]
