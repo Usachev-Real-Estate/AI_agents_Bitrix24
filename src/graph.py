@@ -22,6 +22,7 @@ from tools import (
     _coerce_int,
     get_all_leads_with_timeline,
     get_deals_by_funnel_with_timeline,
+    humanize_violation_reason,
 )
 
 logger = logging.getLogger(__name__)
@@ -542,6 +543,10 @@ def _format_report(
     now: str,
     user_map: dict[int, str],
     extra: str = "",
+    *,
+    buyers_deals: list[dict[str, Any]] | None = None,
+    sellers_deals: list[dict[str, Any]] | None = None,
+    leads: list[dict[str, Any]] | None = None,
 ) -> str:
     """Format a single-domain violations report.
 
@@ -594,7 +599,12 @@ def _format_report(
         entity_id = _coerce_int(v.get("entity_id", 0))
         responsible = _coerce_int(v.get("responsible_id", 0))
         rule = v.get("rule", "?")
-        reason = v.get("reason", "—")
+        reason = humanize_violation_reason(
+            v,
+            buyers_deals=buyers_deals,
+            sellers_deals=sellers_deals,
+            leads=leads,
+        )
 
         link = _build_crm_link(entity_type, entity_id)
         prefix = entity_type[0].upper() if entity_type else "?"
@@ -678,6 +688,9 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
 
     dept_groups = _group_by_department(violations, user_map)
     seller_deals_count = len(state.get("raw_sellers_deals", []))
+    buyers_deals = state.get("raw_buyers_deals", [])
+    sellers_deals = state.get("raw_sellers_deals", [])
+    raw_leads = state.get("raw_leads", [])
     total_chunks = 0
 
     try:
@@ -742,7 +755,12 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
                 )
                 entity_type = str(v.get("entity_type", "?"))
                 entity_id = _coerce_int(v.get("entity_id", 0))
-                reason = v.get("reason", "—")
+                reason = humanize_violation_reason(
+                    v,
+                    buyers_deals=buyers_deals,
+                    sellers_deals=sellers_deals,
+                    leads=raw_leads,
+                )
                 link = _build_crm_link(entity_type, entity_id)
                 uid = _coerce_int(v.get("responsible_id", 0))
                 user_display = user_map.get(uid, f"ID:{uid}")
