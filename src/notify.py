@@ -81,7 +81,7 @@ def send_chat_message(chat_id: int, message: str) -> int:
     """
     result = _bx_call_sync(
         "im.message.add",
-        {"CHAT_ID": chat_id, "MESSAGE": message},
+        {"DIALOG_ID": f"chat{chat_id}", "MESSAGE": message},
     )
     msg_id = int(result) if result is not None else 0
     logger.info("Chat message sent: chat_id=%s msg_id=%s", chat_id, msg_id)

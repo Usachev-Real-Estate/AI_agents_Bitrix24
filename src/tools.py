@@ -14,7 +14,6 @@ from config import Settings, get_settings
 logger = logging.getLogger(__name__)
 
 _BX_EXECUTOR = ThreadPoolExecutor(max_workers=4)
-REPORT_MESSAGE_MAX_LEN = 2000
 MAX_TIMELINE_WORKERS = 10
 
 
@@ -618,45 +617,6 @@ def create_violation_task(user_id: int, deal_id: int, description: str) -> dict[
     except Exception as exc:
         logger.exception("create_violation_task failed deal_id=%s", deal_id)
         return {"error": str(exc), "deal_id": deal_id}
-
-
-@tool
-def send_management_report(chat_id: str, report_text: str) -> dict[str, Any]:
-    """Отправить сводку нарушений в чат руководителей.
-
-    Использует: im.notify.system.add
-
-    Args:
-        chat_id: ID чата в Битрикс24 (формат: "chat12345").
-        report_text: Текст сводки.
-
-    Returns:
-        Sent status, dry_run_skipped, or error dict.
-    """
-    settings = get_settings()
-    if not is_mutation_allowed(settings):
-        logger.info("DRY_RUN: skip send_management_report chat_id=%s", chat_id)
-        return {"status": "dry_run_skipped", "chat_id": chat_id}
-
-    message = report_text[:REPORT_MESSAGE_MAX_LEN]
-    if len(report_text) > REPORT_MESSAGE_MAX_LEN:
-        logger.warning(
-            "Report truncated to %d chars for chat_id=%s",
-            REPORT_MESSAGE_MAX_LEN,
-            chat_id,
-        )
-
-    try:
-        bx = _get_bitrix()
-        bx.call(
-            "im.notify.system.add",
-            {"CHAT_ID": chat_id, "MESSAGE": message},
-        )
-        logger.info("Management report sent to chat_id=%s", chat_id)
-        return {"status": "sent", "chat_id": chat_id}
-    except Exception as exc:
-        logger.exception("send_management_report failed chat_id=%s", chat_id)
-        return {"error": str(exc), "chat_id": chat_id}
 
 
 @tool
