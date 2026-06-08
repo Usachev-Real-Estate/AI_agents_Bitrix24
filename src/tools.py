@@ -149,11 +149,7 @@ def _build_deal_uf_fields(deal: dict[str, Any]) -> dict[str, Any]:
     """Map deal UF_* values to human-readable labels for the analyst prompt."""
     labeled: dict[str, Any] = {}
     for code, label in DEAL_AUDIT_UF_LABELS.items():
-        value = deal.get(code)
-        if value in (None, "", [], False):
-            labeled[label] = None
-        else:
-            labeled[label] = value
+        labeled[label] = _normalize_uf_value(deal.get(code))
     return labeled
 
 
@@ -181,6 +177,229 @@ def _fetch_funnel_stage_names(category_id: int) -> dict[str, str]:
 def _buyers_audit_rule(stage_id: str) -> int | None:
     """Return audit rule number (1–5) for buyers funnel stage, or None."""
     return BUYERS_STAGE_AUDIT_RULE.get(stage_id)
+
+
+def _normalize_uf_value(value: Any) -> Any:
+    """Treat Bitrix empty sentinels as missing UF values."""
+    if value in (None, "", [], False):
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped or stripped == "0" or stripped.startswith("0000-00-00"):
+            return None
+        return stripped
+    return value
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    """Parse Bitrix / ISO datetime strings to timezone-aware datetime."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    text = str(value).strip()
+    if not text:
+        return None
+    text = text.replace(" ", "T", 1) if " " in text and "T" not in text else text
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        pass
+    for fmt, length in (
+        ("%Y-%m-%dT%H:%M:%S", 19),
+        ("%Y-%m-%d %H:%M:%S", 19),
+        ("%Y-%m-%d", 10),
+    ):
+        try:
+            parsed = datetime.strptime(text[:length], fmt)
+            return parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def _days_between(start: Any, end: datetime) -> float:
+    """Days from start timestamp to end (24h = 1 day)."""
+    start_dt = _parse_datetime(start)
+    if start_dt is None:
+        return 0.0
+    delta = end - start_dt.astimezone(timezone.utc)
+    return max(delta.total_seconds() / 86400.0, 0.0)
+
+
+def _timeline_has_comment(timeline: list[dict[str, Any]]) -> bool:
+    """True if timeline contains at least one non-empty comment."""
+    for item in timeline:
+        if str(item.get("comment") or "").strip():
+            return True
+    return False
+
+
+def _latest_comment_from(
+    timeline: list[dict[str, Any]],
+    author_id: int,
+) -> dict[str, Any] | None:
+    """Return the most recent timeline comment from author_id."""
+    authored = [
+        item for item in timeline
+        if _coerce_int(item.get("author_id")) == author_id
+        and str(item.get("comment") or "").strip()
+    ]
+    if not authored:
+        return None
+    return max(authored, key=lambda item: str(item.get("created") or ""))
+
+
+def _days_since_last_comment(
+    timeline: list[dict[str, Any]],
+    author_id: int,
+    current: datetime,
+) -> int:
+    """Days since the latest comment from author_id, or 999 if none."""
+    latest = _latest_comment_from(timeline, author_id)
+    if latest is None:
+        return 999
+    created = _parse_datetime(latest.get("created"))
+    if created is None:
+        return 999
+    return int(_days_between(created, current))
+
+
+def _show_date_from_uf(uf_fields: dict[str, Any]) -> datetime | None:
+    """Parse show/meeting date from labeled uf_fields."""
+    return _parse_datetime(uf_fields.get("Дата встречи"))
+
+
+def _violation(
+    deal: dict[str, Any],
+    rule: str,
+    reason: str,
+    details: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a buyer deal violation record."""
+    return {
+        "entity_type": "deal",
+        "entity_id": _coerce_int(deal.get("deal_id")),
+        "responsible_id": _coerce_int(deal.get("assigned_by_id")),
+        "severity": "medium",
+        "rule": rule,
+        "reason": reason,
+        "details": details,
+    }
+
+
+def check_buyer_deal_violations(
+    deals: list[dict[str, Any]],
+    current_time: str,
+) -> list[dict[str, Any]]:
+    """Deterministic audit of buyer funnel deals (rules 1–5 by audit_rule).
+
+    Each deal is checked against exactly one rule matching its audit_rule field.
+    """
+    now = _parse_datetime(current_time) or datetime.now(timezone.utc)
+    violations: list[dict[str, Any]] = []
+
+    for deal in deals:
+        audit_rule = deal.get("audit_rule")
+        if audit_rule is None:
+            continue
+
+        rule_num = int(audit_rule)
+        stage_name = str(deal.get("stage_name") or BUYERS_STAGE_NAMES.get(
+            str(deal.get("stage_id") or ""), "—",
+        ))
+        stage_id = str(deal.get("stage_id") or "")
+        days_on_stage = round(_days_between(deal.get("date_create"), now), 2)
+        timeline = deal.get("timeline") or []
+        uf_fields = deal.get("uf_fields") or {}
+        assigned_by_id = _coerce_int(deal.get("assigned_by_id"))
+        base_details = {
+            "deal_id": _coerce_int(deal.get("deal_id")),
+            "title": str(deal.get("title") or ""),
+            "stage_id": stage_id,
+            "stage_name": stage_name,
+        }
+
+        if rule_num == 1:
+            if days_on_stage > 1:
+                violations.append(_violation(
+                    deal,
+                    "buyer_stage_1",
+                    f"Сделка находится на этапе «{stage_name}» более 1 дня. ({days_on_stage} дн.)",
+                    {**base_details, "days_on_stage": days_on_stage},
+                ))
+
+        elif rule_num == 2:
+            if days_on_stage > 2 and not _timeline_has_comment(timeline):
+                violations.append(_violation(
+                    deal,
+                    "buyer_stage_2",
+                    f"Сделка находится на этапе «{stage_name}» более 2 дней. ({days_on_stage} дн.)",
+                    {**base_details, "days_on_stage": days_on_stage},
+                ))
+
+        elif rule_num == 3:
+            show_date = _show_date_from_uf(uf_fields)
+            if show_date is None:
+                violations.append(_violation(
+                    deal,
+                    "buyer_stage_3",
+                    "На этапе «Показ» отсутствует запланированная дата показа в пользовательских полях.",
+                    {
+                        **base_details,
+                        "has_show_date": False,
+                        "is_overdue": False,
+                    },
+                ))
+            elif show_date.astimezone(timezone.utc) < now.astimezone(timezone.utc):
+                violations.append(_violation(
+                    deal,
+                    "buyer_stage_3",
+                    f"На этапе «Показ» просрочена дата показа (запланировано: {uf_fields.get('Дата встречи')}).",
+                    {
+                        **base_details,
+                        "has_show_date": True,
+                        "is_overdue": True,
+                    },
+                ))
+
+        elif rule_num == 4:
+            if days_on_stage <= 1:
+                continue
+            show_result = str(uf_fields.get("Результат показа") or "").strip()
+            if len(show_result) >= 30:
+                continue
+            latest = _latest_comment_from(timeline, assigned_by_id)
+            if latest and len(str(latest.get("comment") or "")) > 20:
+                continue
+            violations.append(_violation(
+                deal,
+                "buyer_stage_4",
+                f"Сделка на этапе «{stage_name}» более 1 дня без результата показа или комментария.",
+                {
+                    **base_details,
+                    "days_on_stage": days_on_stage,
+                    "has_detailed_comment": False,
+                },
+            ))
+
+        elif rule_num == 5:
+            days_since = _days_since_last_comment(timeline, assigned_by_id, now)
+            if days_since > 7:
+                violations.append(_violation(
+                    deal,
+                    "buyer_stage_5",
+                    f"На этапе «{stage_name}» нет комментария ответственного более 7 дней.",
+                    {
+                        **base_details,
+                        "days_since_last_comment": days_since,
+                    },
+                ))
+
+    return violations
 
 
 def humanize_violation_reason(

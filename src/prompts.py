@@ -120,7 +120,9 @@ details: deal_id, title, stage_id, stage_name, days_on_stage (float)
 ПРАВИЛО 2 — audit_rule = 2, «Подбор» > 2 дней
 Severity: medium
 ═══════════════════════════════════════
-Триггер: audit_rule = 2 И с date_create прошло > 2 дней.
+Триггер: audit_rule = 2 И с date_create прошло > 2 дней
+И в timeline нет ни одного комментария (timeline пуст или все comment пустые).
+Если в timeline есть хотя бы один комментарий — нарушения НЕТ.
 details: deal_id, title, stage_id, stage_name, days_on_stage (float)
 
 ═══════════════════════════════════════

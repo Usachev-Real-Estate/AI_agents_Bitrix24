@@ -13,13 +13,13 @@ from config import Settings
 from notify import _bx_call_sync, send_chat_message_chunked
 from prompts import (
     BUYER_CALLS_PROMPT,
-    BUYER_DEAL_ANALYST_PROMPT,
     LEAD_ANALYST_PROMPT,
     MISSED_CALLS_PROMPT,
 )
 from tools import (
     _build_crm_link,
     _coerce_int,
+    check_buyer_deal_violations,
     get_all_leads_with_timeline,
     get_deals_by_funnel_with_timeline,
     humanize_violation_reason,
@@ -227,48 +227,15 @@ async def lead_analyst(state: AuditState, settings: Settings) -> AuditState:
 
 
 async def buyer_deal_analyst(state: AuditState, settings: Settings) -> AuditState:
-    """Agent 5: analyze buyer deals for stage violations (chunked by 100)."""
+    """Agent 5: analyze buyer deals for stage violations (deterministic rules 1–5)."""
     deals = state.get("raw_buyers_deals", [])
-    logger.info(
-        "Agent 5 (Buyer Deal Analyst): analyzing %d deals in chunks of %d",
-        len(deals),
-        ANALYST_CHUNK_SIZE,
-    )
+    logger.info("Agent 5 (Buyer Deal Analyst): checking %d deals", len(deals))
 
     if not deals:
         return {"violations": []}
 
-    llm = _make_r1_llm(settings)
     current_time = state.get("current_time", "")
-    all_violations: list[dict[str, Any]] = []
-
-    for i in range(0, len(deals), ANALYST_CHUNK_SIZE):
-        chunk = deals[i:i + ANALYST_CHUNK_SIZE]
-        payload = {"deals": chunk, "current_time": current_time}
-
-        try:
-            response = await llm.ainvoke([
-                SystemMessage(content=BUYER_DEAL_ANALYST_PROMPT),
-                HumanMessage(
-                    content=json.dumps(payload, ensure_ascii=False, default=str),
-                ),
-            ])
-            content = _message_content_to_str(response.content)
-            new_violations = _parse_violations_json(content)
-            all_violations.extend(new_violations)
-            logger.debug(
-                "Agent 5 chunk %d-%d: %d violations",
-                i,
-                min(i + ANALYST_CHUNK_SIZE, len(deals)),
-                len(new_violations),
-            )
-        except Exception as exc:
-            logger.warning(
-                "Agent 5 chunk %d-%d failed: %s",
-                i,
-                min(i + ANALYST_CHUNK_SIZE, len(deals)),
-                exc,
-            )
+    all_violations = check_buyer_deal_violations(deals, current_time)
 
     logger.info("Agent 5: found %d buyer deal violations total", len(all_violations))
     return {"violations": all_violations}
