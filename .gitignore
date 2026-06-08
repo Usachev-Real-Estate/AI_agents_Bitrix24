@@ -31,6 +31,10 @@ env/
 logs/
 *.log
 
+# MCP test artifacts
+mcp_tools_list.json
+mcp_test_output.txt
+
 # Testing
 .pytest_cache/
 .coverage
