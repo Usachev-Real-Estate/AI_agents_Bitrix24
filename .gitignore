@@ -55,3 +55,6 @@ Desktop.ini
 
 # Jupyter
 .ipynb_checkpoints/
+
+# MCP dev artifacts
+mcp_tools_list.json

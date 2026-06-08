@@ -16,6 +16,32 @@ logger = logging.getLogger(__name__)
 _BX_EXECUTOR = ThreadPoolExecutor(max_workers=4)
 MAX_TIMELINE_WORKERS = 10
 
+# Поля сделки для аудита воронки «Покупатели» (портал b24-po7frr)
+DEAL_AUDIT_UF_FIELD_CODES = (
+    "UF_CRM_1659375809326",  # Дата встречи
+    "UF_CRM_1774361998551",  # Результат показа
+)
+DEAL_AUDIT_UF_LABELS: dict[str, str] = {
+    "UF_CRM_1659375809326": "Дата встречи",
+    "UF_CRM_1774361998551": "Результат показа",
+}
+
+# Воронка «Покупатели» (category_id=18): точные stage_id → правило аудита (1–5)
+BUYERS_STAGE_AUDIT_RULE: dict[str, int] = {
+    "C18:NEW": 1,
+    "C18:UC_V0DMMX": 2,
+    "C18:UC_UFPFKK": 3,
+    "C18:UC_A15GLR": 4,
+    "C18:LOSE": 5,
+}
+BUYERS_STAGE_NAMES: dict[str, str] = {
+    "C18:NEW": "Первый контакт",
+    "C18:UC_V0DMMX": "Подбор",
+    "C18:UC_UFPFKK": "Показ",
+    "C18:UC_A15GLR": "Показ проведен",
+    "C18:LOSE": "Отложенный спрос",
+}
+
 
 def is_mutation_allowed(settings: Settings) -> bool:
     """Check whether mutating Bitrix24 API calls are permitted.
@@ -117,6 +143,100 @@ def _clean_str(value: Any) -> str:
     """Clean string from encoding artifacts."""
     s = str(value) if value is not None else ""
     return s.encode("utf-8", errors="replace").decode("utf-8")
+
+
+def _build_deal_uf_fields(deal: dict[str, Any]) -> dict[str, Any]:
+    """Map deal UF_* values to human-readable labels for the analyst prompt."""
+    labeled: dict[str, Any] = {}
+    for code, label in DEAL_AUDIT_UF_LABELS.items():
+        value = deal.get(code)
+        if value in (None, "", [], False):
+            labeled[label] = None
+        else:
+            labeled[label] = value
+    return labeled
+
+
+def _fetch_funnel_stage_names(category_id: int) -> dict[str, str]:
+    """Load stage_id → Russian name map for a deal category."""
+    try:
+        raw = _get_bitrix().call(
+            "crm.dealcategory.stage.list",
+            {"entityTypeId": 2, "id": category_id},
+        )
+        stages = raw if isinstance(raw, list) else _as_list(raw)
+        return {
+            _clean_str(item.get("STATUS_ID")): _clean_str(item.get("NAME"))
+            for item in stages
+            if item.get("STATUS_ID")
+        }
+    except Exception:
+        logger.warning(
+            "Failed to load stage names for category_id=%s",
+            category_id,
+        )
+        return {}
+
+
+def _buyers_audit_rule(stage_id: str) -> int | None:
+    """Return audit rule number (1–5) for buyers funnel stage, or None."""
+    return BUYERS_STAGE_AUDIT_RULE.get(stage_id)
+
+
+def humanize_violation_reason(
+    violation: dict[str, Any],
+    *,
+    buyers_deals: list[dict[str, Any]] | None = None,
+    sellers_deals: list[dict[str, Any]] | None = None,
+    leads: list[dict[str, Any]] | None = None,
+) -> str:
+    """Replace CRM stage/status codes in violation reason with Russian names."""
+    reason = str(violation.get("reason") or "—")
+    code_to_name: dict[str, str] = dict(BUYERS_STAGE_NAMES)
+
+    for deals in (buyers_deals or []), (sellers_deals or []):
+        for deal in deals:
+            stage_id = str(deal.get("stage_id") or "")
+            stage_name = str(deal.get("stage_name") or "")
+            if stage_id and stage_name:
+                code_to_name[stage_id] = stage_name
+
+    for lead in leads or []:
+        status_id = str(lead.get("status_id") or "")
+        status_name = str(lead.get("status_name") or "")
+        if status_id and status_name:
+            code_to_name[status_id] = status_name
+
+    details = violation.get("details")
+    if isinstance(details, dict):
+        stage_name = details.get("stage_name") or details.get("status_name")
+        stage_id = str(details.get("stage_id") or details.get("status_id") or "")
+        if stage_id and stage_name:
+            code_to_name[stage_id] = str(stage_name)
+
+    entity_id = _coerce_int(violation.get("entity_id", 0))
+    entity_type = violation.get("entity_type")
+    if entity_type == "deal":
+        for deals in (buyers_deals or []), (sellers_deals or []):
+            for deal in deals:
+                if _coerce_int(deal.get("deal_id")) == entity_id:
+                    sid = str(deal.get("stage_id") or "")
+                    sname = str(deal.get("stage_name") or "")
+                    if sid and sname:
+                        code_to_name[sid] = sname
+    elif entity_type == "lead":
+        for lead in leads or []:
+            if _coerce_int(lead.get("lead_id")) == entity_id:
+                sid = str(lead.get("status_id") or "")
+                sname = str(lead.get("status_name") or "")
+                if sid and sname:
+                    code_to_name[sid] = sname
+
+    for code in sorted(code_to_name, key=len, reverse=True):
+        if code and code in reason:
+            reason = reason.replace(code, f"«{code_to_name[code]}»")
+
+    return reason
 
 
 def _extract_comments(raw: Any) -> list[dict[str, Any]]:
@@ -794,29 +914,37 @@ def get_deals_by_funnel_with_timeline(category_id: int) -> dict[str, Any]:
                     "DATE_CREATE",
                     "OPPORTUNITY",
                     "CATEGORY_ID",
+                    *DEAL_AUDIT_UF_FIELD_CODES,
                 ],
             },
         )
         deals = deals_raw if isinstance(deals_raw, list) else _as_list(deals_raw)
+        stage_names = _fetch_funnel_stage_names(category_id)
         deal_records: dict[int, dict[str, Any]] = {}
         for deal in deals:
             if not isinstance(deal, dict):
                 continue
             deal_id = _coerce_int(deal.get("ID"))
+            stage_id = _clean_str(deal.get("STAGE_ID"))
+            stage_name = stage_names.get(stage_id, stage_id)
+            audit_rule = (
+                _buyers_audit_rule(stage_id)
+                if category_id == settings.buyers_category_id
+                else None
+            )
             deal_records[deal_id] = {
                 "deal_id": deal_id,
                 "title": _clean_str(deal.get("TITLE")),
-                "stage_id": _clean_str(deal.get("STAGE_ID")),
+                "stage_id": stage_id,
+                "stage_name": stage_name,
+                "audit_rule": audit_rule,
                 "assigned_by_id": _coerce_int(deal.get("ASSIGNED_BY_ID")),
                 "date_create": _clean_str(deal.get("DATE_CREATE")),
                 "opportunity": _coerce_float(deal.get("OPPORTUNITY")),
                 "category_id": category_id,
                 "timeline": [],
                 "calls": [],
-                "uf_fields": {
-                    k: v for k, v in deal.items()
-                    if str(k).startswith("UF_") and v is not None
-                },
+                "uf_fields": _build_deal_uf_fields(deal),
             }
 
         with ThreadPoolExecutor(max_workers=MAX_TIMELINE_WORKERS) as pool:
