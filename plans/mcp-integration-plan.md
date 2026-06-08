@@ -20,9 +20,8 @@
 | `tools.py:421` | `crm.timeline.comment.list` | Комментарии таймлайна |
 | `tools.py:367` | `crm.status.list` | Статусы лидов |
 | `tools.py:598` | `tasks.task.add` | Создать задачу |
-| `tools.py:650` | `im.notify.system.add` | Системное уведомление |
 | `notify.py:63` | `im.notify.personal.add` | Персональное уведомление |
-| `notify.py:82` | `im.message.add` | Сообщение в чат |
+| `notify.py:82` | `im.message.add` | Сообщение в чат (`DIALOG_ID: chat{id}`) |
 | `graph.py:453` | `user.get` | Информация о пользователе |
 | `graph.py:460` | `user.search` | Поиск пользователя |
 | `graph.py:481` | `department.get` | Информация об отделе |
@@ -151,24 +150,23 @@ flowchart TD
 
 ## Аудит API: результаты (выполнено)
 
-**Отчёт Cursor**: 10✅, 4⚠️, 1❌
+**Отчёт Cursor**: 11✅, 3⚠️ (после правок)
 
 | Статус | Метод | Детали |
 |---|---|---|
-| ✅ | `crm.deal.get`, `crm.deal.list`, `crm.lead.list`, `crm.activity.list`, `crm.timeline.comment.list`, `crm.status.list`, `im.notify.personal.add`, `department.get`, `tasks.task.add` | Параметры корректны |
-| ❌ | `im.notify.system.add` | `CHAT_ID` вместо `USER_ID` — мертвый код, v2 dispatcher не использует |
-| ⚠️ | `im.message.add` | `CHAT_ID` → должно быть `DIALOG_ID: "chat{id}"` |
-| ⚠️ | `voximplant.statistic.get` | lowercase `filter/sort/order` → uppercase `FILTER/SORT/ORDER` |
-| ⚠️ | `user.get` | `{"ID": uid}` → `{"filter": {"ID": uid}}` |
-| ⚠️ | `user.search` | `FILTER.ID` не документирован |
+| ✅ | `crm.deal.get`, `crm.deal.list`, `crm.lead.list`, `crm.activity.list`, `crm.timeline.comment.list`, `crm.status.list`, `im.notify.personal.add`, `im.message.add`, `department.get`, `tasks.task.add` | Параметры корректны |
+| ✅ | `im.notify.system.add` | Удалён вместе с `send_management_report` (коммит `290400a`) |
+| ⚠️ | `voximplant.statistic.get` | lowercase `filter/sort/order` → uppercase `FILTER/SORT/ORDER` — не трогаем, работает |
+| ⚠️ | `user.get` | `{"ID": uid}` → `{"filter": {"ID": uid}}` — не трогаем, работает |
+| ⚠️ | `user.search` | `FILTER.ID` не документирован — fallback, работает |
 
-**Решение**: исправить только безопасное (❌ + ⚠️ `im.message.add`). Остальное не трогать — работает в проде.
+**Правки (выполнено, коммит `290400a`)**: удалён `send_management_report`; `im.message.add` → `DIALOG_ID: f"chat{chat_id}"`.
 
 ---
 
-## Промпт для Cursor: исправление ❌ и ⚠️ (безопасные правки)
+## Промпт для Cursor: исправление ❌ и ⚠️ (безопасные правки) — выполнено
 
-Скопируй текст ниже в чат Cursor:
+Скопируй текст ниже в чат Cursor (уже применено в `290400a`):
 
 ---
 
@@ -211,6 +209,62 @@ result = _bx_call_sync(
 
 ---
 
+## Промпт для Cursor: проверка метода получения таймлайна
+
+Скопируй текст ниже в чат Cursor:
+
+---
+
+**Задача**: Используя MCP `bitrix-search` и `bitrix-method-details`, проверь, какой метод REST API правильно использовать для получения таймлайна (истории комментариев) лидов и сделок в Bitrix24.
+
+**Контекст**: Сейчас в проекте `src/tools.py` используется метод `crm.timeline.comment.list` с параметрами:
+```python
+bx.get_all(
+    "crm.timeline.comment.list",
+    {
+        "filter": {
+            "ENTITY_ID": entity_id,
+            "ENTITY_TYPE": entity_type,  # "lead" или "deal"
+        },
+        "select": ["ID", "AUTHOR_ID", "COMMENT", "CREATED"],
+    },
+)
+```
+
+**Шаги:**
+1. Используй MCP `bitrix-search` с запросом «таймлайн сделки лида» или «timeline lead deal comments»
+2. Используй MCP `bitrix-method-details` для метода `crm.timeline.comment.list`
+3. Используй MCP `bitrix-search` чтобы найти альтернативные методы: есть ли `crm.timeline.list` или `crm.timeline.get`?
+4. Если есть альтернативы — запроси `bitrix-method-details` для них
+
+**Ожидаемый ответ:**
+- ✅ `crm.timeline.comment.list` — правильный метод, параметры корректны
+- ИЛИ ⚠️ есть лучший метод (укажи какой, с параметрами)
+- Нужно ли использовать `ENTITY_TYPE: "lead"` или `ENTITY_TYPE: "LEAD"` (регистр)?
+
+---
+
+## Проверка таймлайна через MCP (выполнено)
+
+**Вывод**: `crm.timeline.comment.list` — правильный метод, менять не нужно.
+
+| Метод | Назначение | Подходит? |
+|---|---|---|
+| `crm.timeline.comment.list` | Комментарии в таймлайне | ✅ Используется в проекте |
+| `crm.timeline.logmessage.list` | Кастомные лог-записи | ❌ Не подходит для аудита |
+| `crm.timeline.logmessage.get` | Одна лог-запись по ID | ❌ |
+| `crm.activity.list` | Дела/активности (звонки) | ✅ Уже отдельно в проекте |
+| `crm.timeline.list` / `crm.timeline.get` | — | ❌ Нет в REST API |
+
+**Параметры в коде — корректны**:
+- `ENTITY_ID` ✅
+- `ENTITY_TYPE` ✅ — нижний регистр (`"lead"`, `"deal"`) как в примерах MCP
+- `select` ✅ — `ID, AUTHOR_ID, COMMENT, CREATED`
+
+**Ограничение**: `crm.timeline.comment.list` возвращает только комментарии (не звонки, не смены стадий). Это учтено в v2: звонки — через `crm.activity.list` / `voximplant.statistic.get`.
+
+---
+
 ## Промпт для Cursor: аудит вызовов API через MCP
 
 Скопируй текст ниже в чат Cursor (убедись, что MCP-сервер подключён через `mcp.json.example`):
@@ -241,9 +295,8 @@ result = _bx_call_sync(
 | `crm.status.list` | `tools.py:367` — `_bx_get_all_sync("crm.status.list", {filter})` |
 | `voximplant.statistic.get` | `tools.py:221` — `bx.call("voximplant.statistic.get", {filter, sort, order})` |
 | `tasks.task.add` | `tools.py:598` — `bx.call("tasks.task.add", {fields})` |
-| `im.notify.system.add` | `tools.py:651` — `bx.call("im.notify.system.add", {CHAT_ID, MESSAGE})` |
 | `im.notify.personal.add` | `notify.py:63` — `_bx_call_sync("im.notify.personal.add", {USER_ID, MESSAGE})` |
-| `im.message.add` | `notify.py:82` — `_bx_call_sync("im.message.add", {CHAT_ID, MESSAGE})` |
+| `im.message.add` | `notify.py:82` — `_bx_call_sync("im.message.add", {DIALOG_ID, MESSAGE})` |
 | `user.get` | `graph.py:453` — `_bx_call_sync("user.get", {ID: uid})` |
 | `user.search` | `graph.py:460` — `_bx_call_sync("user.search", {FILTER: {ID: uid}})` |
 | `department.get` | `graph.py:481` — `_bx_call_sync("department.get", {ID: dept_id})` |
