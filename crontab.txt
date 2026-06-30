@@ -1,6 +1,19 @@
-# b24-ai-auditor: запуск в 10:00 и 17:00 МСК (07:00 и 14:00 UTC), пн-пт
-# Вариант 1: запуск на хосте (без Docker)
-# 0 7,14 * * 1-5 cd /opt/b24-ai-auditor && /opt/b24-ai-auditor/venv/bin/python src/main.py >> logs/cron.log 2>&1
+# b24-ai-auditor: расписание отчётов
 
 # Вариант 2: запуск в Docker-контейнере
-0 7,14 * * 1-5 cd /opt/b24-ai-auditor && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs b24-ai-auditor:latest >> logs/cron.log 2>&1
+
+# 1. Аудит нарушений (лиды/сделки): ежедневно в 10:00 и 17:00 МСК (07:00 и 14:00 UTC), пн-пт (в чаты отделов)
+0 7,14 * * 1-5 cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest >> logs/cron.log 2>&1
+
+# 2. Аудит просроченных задач: каждую пятницу в 17:00 МСК (14:00 UTC) (в чат 22358)
+0 14 * * 5 cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/task_auditor.py >> logs/cron.log 2>&1
+
+# 3. Еженедельный отчёт по брокерам: каждую пятницу в 18:00 МСК (15:00 UTC) (в чаты отделов)
+0 15 * * 5 cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/weekly_report.py >> logs/cron.log 2>&1
+
+# 4. Отчёт KPI по собственникам: каждую пятницу в 18:00 МСК (15:00 UTC) (в чат 22358)
+0 15 * * 5 cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/owner_tracker.py >> logs/cron.log 2>&1
+
+# 5. Чат-команды (скоринг брокеров): каждую минуту
+* * * * * cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/chat_poller.py >> logs/cron.log 2>&1
+

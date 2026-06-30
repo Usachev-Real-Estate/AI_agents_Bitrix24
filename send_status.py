@@ -14,7 +14,7 @@ STATUS_MESSAGE = """\
 b24-ai-auditor — статус проекта
 
 Bitrix24 API: подключение работает
-RouterAI (DeepSeek-v4-flash): 3/3 вызова 200 OK
+DeepSeek API (deepseek-v4-flash): подключение настроено
 Auditor: сбор данных через get_all() (все страницы)
 Analyst: поиск нарушений по 4 правилам
 Dispatcher: создание задач + отчёт руководству

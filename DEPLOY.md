@@ -27,7 +27,7 @@ nano .env  # Вставить реальные ключи и URL
 - `DRY_RUN=false` — для боевого запуска (сообщения в чаты)
 - `LOG_LEVEL=INFO`
 - `REPORT_SINCE=2026-06-02` (или актуальную дату начала контроля)
-- `B24_WEBHOOK_URL`, `ROUTERAI_API_KEY`, `BUYERS_CATEGORY_ID`, `SELLERS_CATEGORY_ID`
+- `B24_WEBHOOK_URL`, `DEEPSEEK_API_KEY`, `BUYERS_CATEGORY_ID`, `SELLERS_CATEGORY_ID`
 
 Файл `.env` не коммитится в git — храните только на сервере.
 
@@ -103,7 +103,6 @@ docker build -t b24-ai-auditor:latest .
 |------------|---------|
 | Кретов (60) | 17710 |
 | Горяинов (46) | 17712 |
-| Каратевский (42) | 17716 |
 | Трофимова (44) | 17708 |
 | Волкова (50) | 17714 |
 | Шпырная (66) | 23130 |

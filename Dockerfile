@@ -16,7 +16,7 @@ COPY src/ ./src/
 
 # Run as non-root user
 RUN useradd -m auditor && chown -R auditor:auditor /app && \
-    mkdir -p /app/logs && chown auditor:auditor /app/logs
+    mkdir -p /app/logs /app/data && chown auditor:auditor /app/logs /app/data
 USER auditor
 
 CMD ["python", "src/main.py"]

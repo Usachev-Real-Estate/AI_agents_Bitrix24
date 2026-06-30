@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "b24-ai-auditor"
+version = "0.1.0"
+description = "AI-аудитор для Битрикс24 на LangGraph + DeepSeek API"
+authors = [
+    {name = "Your Name"}
+]
+requires-python = ">=3.11"
+dependencies = [
+    "langgraph>=0.2.0",
+    "langchain-openai>=0.2.0",
+    "fast-bitrix24>=1.0.0",
+    "python-dotenv>=1.0.0",
+    "pydantic-settings>=2.0.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.0.0",
+    "black>=24.1.0",
+    "flake8>=7.0.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0"
+]

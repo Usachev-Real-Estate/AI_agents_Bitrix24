@@ -2,17 +2,15 @@
 
 import asyncio
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from fast_bitrix24 import Bitrix
 
-from config import get_settings
+from config import BX_EXECUTOR, get_settings
 
 logger = logging.getLogger(__name__)
 
 MESSAGE_MAX_LEN = 2000
-_EXECUTOR = ThreadPoolExecutor(max_workers=1)
 
 
 def _bx_call_sync(method: str, params: dict[str, Any]) -> Any:
@@ -38,7 +36,7 @@ def _bx_call_sync(method: str, params: dict[str, Any]) -> Any:
     except RuntimeError:
         return _run()
 
-    return _EXECUTOR.submit(_run).result()
+    return BX_EXECUTOR.submit(_run).result()
 
 
 def send_personal_notification(user_id: int, message: str) -> int:

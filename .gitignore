@@ -50,6 +50,9 @@ Thumbs.db
 .DS_Store
 Desktop.ini
 
+# Database
+data/
+
 # Docker
 .docker/
 

@@ -1,48 +1,67 @@
 @echo off
-setlocal
+set PYTHON=venv\Scripts\python
+set PIP=venv\Scripts\pip
 
-if "%~1"=="" goto usage
+if "%1"=="install" (
+    python -m venv venv
+    %PIP% install -e .[dev]
+    %PIP% install pre-commit
+    venv\Scripts\pre-commit install
+    exit /b
+)
 
-if /i "%~1"=="install" goto install
-if /i "%~1"=="lint" goto lint
-if /i "%~1"=="test" goto test
-if /i "%~1"=="test-b24" goto testb24
-if /i "%~1"=="run" goto run
-if /i "%~1"=="dry-run" goto dryrun
-if /i "%~1"=="docker-build" goto dockerbuild
+if "%1"=="run" (
+    %PYTHON% src\main.py
+    exit /b
+)
 
-:usage
-echo Usage: make.cmd ^<install^|lint^|test^|test-b24^|run^|dry-run^|docker-build^>
-exit /b 1
+if "%1"=="test" (
+    %PYTHON% -m pytest
+    exit /b
+)
 
-:install
-python -m venv venv
-call venv\Scripts\pip install -r requirements.txt
-call venv\Scripts\pip install -r requirements-dev.txt
-call venv\Scripts\pip install -e .
-exit /b %errorlevel%
+if "%1"=="lint" (
+    %PYTHON% -m flake8 src\ tests\
+    exit /b
+)
 
-:lint
-call venv\Scripts\flake8 src/ tests/
-exit /b %errorlevel%
+if "%1"=="dry-run" (
+    set DRY_RUN=true && %PYTHON% src\main.py
+    exit /b
+)
 
-:test
-call venv\Scripts\pytest tests/ -v
-exit /b %errorlevel%
+if "%1"=="weekly-report" (
+    %PYTHON% src\weekly_report.py
+    exit /b
+)
 
-:testb24
-call venv\Scripts\python src/test_b24.py
-exit /b %errorlevel%
+if "%1"=="task-check" (
+    %PYTHON% src\task_auditor.py
+    exit /b
+)
 
-:run
-call venv\Scripts\python src/main.py
-exit /b %errorlevel%
+if "%1"=="owner-track" (
+    %PYTHON% src\owner_tracker.py
+    exit /b
+)
 
-:dryrun
-set DRY_RUN=true
-call venv\Scripts\python src/main.py
-exit /b %errorlevel%
+if "%1"=="broker-score" (
+    if "%2"=="" (
+        echo Error: BROKER_ID is required. Usage: make.cmd broker-score 123
+        exit /b
+    )
+    %PYTHON% src\broker_score.py %2
+    exit /b
+)
 
-:dockerbuild
-docker build -t b24-ai-auditor:latest .
-exit /b %errorlevel%
+if "%1"=="chat-poll" (
+    %PYTHON% src\chat_poller.py
+    exit /b
+)
+
+if "%1"=="docker-build" (
+    docker build -t b24-ai-auditor:latest .
+    exit /b
+)
+
+echo Usage: make.cmd [install^|run^|test^|lint^|dry-run^|docker-build]

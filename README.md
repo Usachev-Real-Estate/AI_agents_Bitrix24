@@ -1,6 +1,6 @@
 # b24-ai-auditor
 
-AI-аудитор для Битрикс24 на базе LangGraph + DeepSeek (через RouterAI).
+AI-аудитор для Битрикс24 на базе LangGraph + DeepSeek API.
 
 Автоматический контроль соблюдения регламента работы с CRM: лиды, сделки покупателей и продавцов, уведомления о нарушениях в чаты РОПов и сводный отчёт руководству.
 
@@ -33,17 +33,17 @@ flowchart TB
     MERGE --> RD
 
     B24["Bitrix24 API\ncrm + voximplant + im"] --> Collectors
-    RA["RouterAI\nDeepSeek-R1"] --> Analysts
+    DS["DeepSeek API\ndeepseek-v4-flash"] --> Analysts
     RD --> CHATS["Чаты РОПов\n(6 отделов)"]
 ```
 
-**Маршрутизация отчётов:** сводка уходит в общий чат (`REPORT_CHAT_ID = 22358` в `graph.py`). Отчёты по отделам — в чаты РОПов (`DEPT_CHAT_MAP`: Кретов, Горяинов, Каратевский, Трофимова, Волкова, Шпырная). Отделы без маппинга пропускаются.
+**Маршрутизация отчётов:** сводка уходит в общий чат (`REPORT_CHAT_ID = 22358` в `graph.py`). Отчёты по отделам — в чаты РОПов (`DEPT_CHAT_MAP`: Кретов, Горяинов, Трофимова, Волкова, Шпырная). Отделы без маппинга пропускаются.
 
 ## Стек
 
 - **Язык:** Python 3.11+
 - **Оркестрация:** LangGraph
-- **LLM:** DeepSeek-R1 через RouterAI (аналитики)
+- **LLM:** DeepSeek API (`deepseek-v4-flash`, аналитики лидов и звонков)
 - **CRM:** fast_bitrix24
 - **Конфигурация:** pydantic-settings + `.env`
 - **Деплой:** Docker + cron (пн–пт, 10:00 и 17:00 МСК)
@@ -70,7 +70,7 @@ copy .env.example .env      # Windows
 # cp .env.example .env      # Linux
 ```
 
-Заполните `.env`: webhook Битрикс24, ключ RouterAI, `REPORT_SINCE`, ID воронок.
+Заполните `.env`: webhook Битрикс24, ключ DeepSeek API, `REPORT_SINCE`, ID воронок.
 
 ### 3. Проверка подключения
 
@@ -127,10 +127,10 @@ crontab -l
 | `BUYERS_CATEGORY_ID` | ID воронки покупателей (по умолчанию 18) |
 | `SELLERS_CATEGORY_ID` | ID воронки продавцов (по умолчанию 0) |
 | `REPORT_SINCE` | Дата начала отчётного периода (YYYY-MM-DD) |
-| `ROUTERAI_API_KEY` | API-ключ RouterAI |
-| `ROUTERAI_BASE_URL` | Базовый URL RouterAI |
-| `ROUTERAI_R1_MODEL` | Модель для аналитиков (`deepseek/deepseek-v4-flash`) |
-| `ROUTERAI_V3_MODEL` | Модель (`deepseek/deepseek-v4-flash`) |
+| `DEEPSEEK_API_KEY` | API-ключ DeepSeek ([platform.deepseek.com](https://platform.deepseek.com)) |
+| `DEEPSEEK_BASE_URL` | Базовый URL API (по умолчанию `https://api.deepseek.com`) |
+| `DEEPSEEK_MODEL` | Модель для аналитиков (по умолчанию `deepseek-v4-flash`) |
+| `DEEPSEEK_V3_MODEL` | Резервная модель (по умолчанию `deepseek-v4-flash`) |
 | `DRY_RUN` | `true` — только чтение, без мутаций в CRM |
 | `LOG_LEVEL` | Уровень логирования (INFO, DEBUG) |
 | `MANAGEMENT_CHAT_ID` | ID чата для сводных отчётов (зарезервировано; сводка сейчас в `graph.py`: 22358) |

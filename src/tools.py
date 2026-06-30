@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -9,11 +10,10 @@ from typing import Any
 from fast_bitrix24 import Bitrix
 from langchain_core.tools import tool
 
-from config import Settings, get_settings
+from config import BX_EXECUTOR, Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
-_BX_EXECUTOR = ThreadPoolExecutor(max_workers=4)
 MAX_TIMELINE_WORKERS = 10
 
 # Поля сделки для аудита воронки «Покупатели» (портал b24-po7frr)
@@ -26,21 +26,71 @@ DEAL_AUDIT_UF_LABELS: dict[str, str] = {
     "UF_CRM_1774361998551": "Результат показа",
 }
 
-# Воронка «Покупатели» (category_id=18): точные stage_id → правило аудита (1–5)
+# Воронка «Покупатели» (category_id=18): stage_id → правило аудита (1–5)
+# Обновлено под воронку 2026-06: Подбор → Показ → Переговоры → … → Отложенный спрос
 BUYERS_STAGE_AUDIT_RULE: dict[str, int] = {
-    "C18:NEW": 1,
-    "C18:UC_V0DMMX": 2,
-    "C18:UC_UFPFKK": 3,
-    "C18:UC_A15GLR": 4,
-    "C18:LOSE": 5,
+    "C18:NEW": 2,           # Подбор — >5 дней без комментария (бывш. UC_V0DMMX)
+    "C18:UC_UFPFKK": 3,     # Показ — >3 дней без комментария
+    "C18:UC_DVW1P9": 4,     # Переговоры — >5 дней без комментария
+    "C18:UC_L8NX87": 4,     # Дожим!!! — >5 дней без комментария
+    "C18:UC_8Z3SP6": 4,     # Офер
+    "C18:LOSE": 5,          # Отложенный спрос — >7 дней без коммент. ответственного
 }
+# Закрытые / служебные стадии — без аудита
+BUYERS_SKIP_AUDIT_STAGES = frozenset({
+    "C18:UC_RUCRAH",  # Задаток
+    "C18:UC_8X12HI",  # Сделка
+    "C18:WON",        # Договор закрыт
+    "C18:APOLOGY",    # Сделка проиграна
+    "C18:UC_2ZBA0G",  # Агент
+})
 BUYERS_STAGE_NAMES: dict[str, str] = {
-    "C18:NEW": "Первый контакт",
-    "C18:UC_V0DMMX": "Подбор",
+    "C18:NEW": "Подбор",
     "C18:UC_UFPFKK": "Показ",
-    "C18:UC_A15GLR": "Показ проведен",
+    "C18:UC_DVW1P9": "Переговоры",
+    "C18:UC_L8NX87": "Дожим!!!",
+    "C18:UC_8Z3SP6": "Офер",
+    "C18:UC_RUCRAH": "Задаток",
+    "C18:UC_8X12HI": "Сделка",
+    "C18:WON": "Договор закрыт",
     "C18:LOSE": "Отложенный спрос",
+    "C18:APOLOGY": "Сделка проиграна",
+    "C18:UC_2ZBA0G": "Агент",
 }
+
+# Стадии лидов (ENTITY_ID=STATUS), портал b24-po7frr
+LEAD_STATUS_NEW = "NEW"
+LEAD_STATUS_CONVERTED = "CONVERTED"  # «Квалифицирован»
+LEAD_STATUS_JUNK = "JUNK"  # «Спам»
+LEAD_STATUS_NECELEVOY = "UC_A7I8DK"  # «Нецелевой»
+LEAD_STATUS_SHARED = "1"  # «Общие Лиды» — общая очередь (b24-po7frr)
+LEAD_STATUS_AGENT = "UC_52VG81"  # «Агент»
+
+# Стадии без LLM-аудита (rule_2 / rule_3)
+LEAD_SKIP_LLM_STATUS_IDS = frozenset({
+    LEAD_STATUS_NEW,
+    LEAD_STATUS_CONVERTED,
+    LEAD_STATUS_SHARED,
+    LEAD_STATUS_AGENT,
+    "WON",
+    "LOSE",
+})
+
+# Стадии без проверки пропущенных звонков
+LEAD_SKIP_MISSED_CALL_STATUS_IDS = frozenset({
+    LEAD_STATUS_CONVERTED,
+    LEAD_STATUS_SHARED,
+})
+
+
+def _lead_status_id(lead: dict[str, Any]) -> str:
+    """Normalize lead status_id from collector or API record."""
+    return _clean_str(lead.get("status_id") or lead.get("STATUS_ID")).upper()
+
+
+def _is_lead_spam_status(status_id: str) -> bool:
+    """True if lead is in spam stage (JUNK on portal, or legacy SPAM code)."""
+    return status_id == LEAD_STATUS_JUNK or "SPAM" in status_id
 
 
 def is_mutation_allowed(settings: Settings) -> bool:
@@ -85,37 +135,7 @@ def _bx_get_all_sync(method: str, params: dict[str, Any]) -> Any:
     except RuntimeError:
         return _run()
 
-    return _BX_EXECUTOR.submit(_run).result()
-
-
-def _parse_b24_datetime(value: str | None) -> datetime | None:
-    """Parse Bitrix24 datetime string to timezone-aware datetime.
-
-    Args:
-        value: Raw date string from API.
-
-    Returns:
-        Parsed datetime in UTC, or None if parsing failed.
-    """
-    if not value:
-        return None
-    normalized = value.replace(" ", "T")
-    if normalized.endswith("Z"):
-        normalized = normalized[:-1] + "+00:00"
-    try:
-        dt = datetime.fromisoformat(normalized)
-    except ValueError:
-        for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
-            try:
-                dt = datetime.strptime(value, fmt)
-                break
-            except ValueError:
-                continue
-        else:
-            return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+    return BX_EXECUTOR.submit(_run).result()
 
 
 def _as_list(payload: Any) -> list[dict[str, Any]]:
@@ -176,6 +196,8 @@ def _fetch_funnel_stage_names(category_id: int) -> dict[str, str]:
 
 def _buyers_audit_rule(stage_id: str) -> int | None:
     """Return audit rule number (1–5) for buyers funnel stage, or None."""
+    if stage_id in BUYERS_SKIP_AUDIT_STAGES:
+        return None
     return BUYERS_STAGE_AUDIT_RULE.get(stage_id)
 
 
@@ -268,9 +290,224 @@ def _days_since_last_comment(
     return int(_days_between(created, current))
 
 
+def _days_since_last_any_comment(
+    timeline: list[dict[str, Any]],
+    current: datetime,
+) -> int:
+    """Days since the latest timeline comment from ANY author, or 999 if none."""
+    all_comments = [
+        item for item in timeline
+        if str(item.get("comment") or "").strip()
+    ]
+    if not all_comments:
+        return 999
+    latest = max(all_comments, key=lambda item: str(item.get("created") or ""))
+    created = _parse_datetime(latest.get("created"))
+    if created is None:
+        return 999
+    return int(_days_between(created, current))
+
+
+def _days_since_last_comment_by_authors(
+    timeline: list[dict[str, Any]],
+    current: datetime,
+    allowed_author_ids: set[int],
+) -> int:
+    """Days since last comment from allowed authors, or 999 if none."""
+    authored = [
+        item for item in timeline
+        if _coerce_int(item.get("author_id")) in allowed_author_ids
+        and str(item.get("comment") or "").strip()
+    ]
+    if not authored:
+        return 999
+    latest = max(authored, key=lambda item: str(item.get("created") or ""))
+    created = _parse_datetime(latest.get("created"))
+    if created is None:
+        return 999
+    return int(_days_between(created, current))
+
+
+def _build_rop_map() -> dict[int, int]:
+    """Build department_id → ROP user_id mapping."""
+    try:
+        rop_users = _bx_get_all_sync("user.get", {
+            "FILTER": {
+                "WORK_POSITION": "Руководитель отдела продаж (РОП)",
+                "ACTIVE": True,
+            },
+        })
+        rop_map: dict[int, int] = {}
+        for user in _as_list(rop_users):
+            if not isinstance(user, dict):
+                continue
+            uid = _coerce_int(user.get("ID"))
+            depts = user.get("UF_DEPARTMENT", [])
+            if isinstance(depts, list) and depts:
+                dept_id = _coerce_int(depts[0])
+                if dept_id:
+                    rop_map[dept_id] = uid
+        return rop_map
+    except Exception:
+        logger.warning("Failed to build ROP map, ROP comments won't be counted")
+        return {}
+
+
+def _build_broker_dept_map(broker_ids: set[int]) -> dict[int, int]:
+    """Build broker user_id → primary department_id mapping."""
+    if not broker_ids:
+        return {}
+    broker_dept_map: dict[int, int] = {}
+    try:
+        for bid in broker_ids:
+            user_raw = _bx_get_all_sync("user.get", {"ID": bid})
+            user = user_raw[0] if isinstance(user_raw, list) and user_raw else user_raw
+            if isinstance(user, dict):
+                depts = user.get("UF_DEPARTMENT", [])
+                if isinstance(depts, list) and depts:
+                    broker_dept_map[bid] = _coerce_int(depts[0])
+    except Exception:
+        logger.warning("Failed to load broker departments for ROP check")
+    return broker_dept_map
+
+
+def _allowed_comment_authors(
+    broker_id: int,
+    broker_dept_map: dict[int, int],
+    rop_map: dict[int, int],
+) -> set[int]:
+    """Authors whose timeline comments count: broker and their ROP."""
+    allowed = {broker_id} if broker_id else set()
+    broker_dept = broker_dept_map.get(broker_id)
+    if broker_dept and rop_map:
+        rop_id = rop_map.get(broker_dept)
+        if rop_id:
+            allowed.add(rop_id)
+    return allowed
+
+
 def _show_date_from_uf(uf_fields: dict[str, Any]) -> datetime | None:
     """Parse show/meeting date from labeled uf_fields."""
     return _parse_datetime(uf_fields.get("Дата встречи"))
+
+
+def _show_date_from_timeline_comments(
+    timeline: list[dict[str, Any]],
+    now: datetime,
+    allowed_author_ids: set[int] | None = None,
+) -> datetime | None:
+    """Try to parse show date from timeline comments text."""
+    month_map = {
+        "январ": 1,
+        "феврал": 2,
+        "март": 3,
+        "апрел": 4,
+        "мая": 5,
+        "май": 5,
+        "июн": 6,
+        "июл": 7,
+        "август": 8,
+        "сентябр": 9,
+        "октябр": 10,
+        "ноябр": 11,
+        "декабр": 12,
+    }
+    parsed: list[datetime] = []
+
+    for item in timeline:
+        if allowed_author_ids is not None:
+            if _coerce_int(item.get("author_id")) not in allowed_author_ids:
+                continue
+        text = str(item.get("comment") or "").lower()
+        if not text:
+            continue
+
+        for m in re.finditer(r"(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?", text):
+            day = int(m.group(1))
+            month = int(m.group(2))
+            year_raw = m.group(3)
+            year = now.year if not year_raw else int(year_raw)
+            if year < 100:
+                year += 2000
+            try:
+                parsed.append(now.replace(year=year, month=month, day=day))
+            except ValueError:
+                continue
+
+        for m in re.finditer(
+            r"(\d{1,2})\s+(январ\w*|феврал\w*|март\w*|апрел\w*|ма[йя]\w*|июн\w*|июл\w*|август\w*|сентябр\w*|октябр\w*|ноябр\w*|декабр\w*)(?:\s+(\d{4}))?",
+            text,
+        ):
+            day = int(m.group(1))
+            month_word = m.group(2)
+            year = int(m.group(3)) if m.group(3) else now.year
+            month = 0
+            for key, value in month_map.items():
+                if key in month_word:
+                    month = value
+                    break
+            if month == 0:
+                continue
+            try:
+                parsed.append(now.replace(year=year, month=month, day=day))
+            except ValueError:
+                continue
+
+    return max(parsed) if parsed else None
+
+
+def _has_show_plan_comment(
+    timeline: list[dict[str, Any]],
+    allowed_author_ids: set[int] | None = None,
+) -> bool:
+    """True when timeline contains a meaningful comment about a planned showing."""
+    plan_markers = ("показ", "договарива", "назнач", "встреч")
+    for item in timeline:
+        if allowed_author_ids is not None:
+            if _coerce_int(item.get("author_id")) not in allowed_author_ids:
+                continue
+        text = str(item.get("comment") or "").strip().lower()
+        if len(text) < 12:
+            continue
+        if "показ" in text and any(marker in text for marker in plan_markers):
+            return True
+    return False
+
+
+def _open_activity_due_datetime(activity: dict[str, Any]) -> datetime | None:
+    """Return due datetime for an open activity."""
+    for key in ("DEADLINE", "END_TIME", "START_TIME"):
+        dt = _parse_datetime(activity.get(key))
+        if dt is not None:
+            return dt
+    return None
+
+
+def _activity_text(activity: dict[str, Any]) -> str:
+    """Build normalized text from activity fields."""
+    subject = str(activity.get("SUBJECT") or "")
+    description = str(activity.get("DESCRIPTION") or "")
+    return f"{subject} {description}".strip().lower()
+
+
+def _is_contact_plan_activity(activity: dict[str, Any]) -> bool:
+    """True when activity text describes planned client contact."""
+    text = _activity_text(activity)
+    if not text:
+        return False
+    contact_keywords = (
+        "связ",
+        "связат",
+        "созвон",
+        "звон",
+        "позвон",
+        "контакт",
+        "клиент",
+        "напис",
+        "whatsapp",
+        "telegram",
+    )
+    return any(keyword in text for keyword in contact_keywords)
 
 
 def _violation(
@@ -278,29 +515,161 @@ def _violation(
     rule: str,
     reason: str,
     details: dict[str, Any],
+    severity: str = "medium",
 ) -> dict[str, Any]:
     """Build a buyer deal violation record."""
     return {
         "entity_type": "deal",
         "entity_id": _coerce_int(deal.get("deal_id")),
         "responsible_id": _coerce_int(deal.get("assigned_by_id")),
-        "severity": "medium",
+        "severity": severity,
         "rule": rule,
         "reason": reason,
         "details": details,
     }
 
 
+def check_missed_callback_violations(
+    entities: list[dict[str, Any]],
+    entity_type: str,
+) -> list[dict[str, Any]]:
+    """Детерминированная проверка: последний пропущенный без обратного."""
+    violations = []
+    id_field = f"{entity_type}_id"
+
+    for entity in entities:
+        if entity_type == "lead":
+            status_id = _lead_status_id(entity)
+            if status_id in LEAD_SKIP_MISSED_CALL_STATUS_IDS:
+                continue
+
+        calls = entity.get("calls", [])
+        if not calls:
+            continue
+
+        # 1. Сортируем звонки по start_date
+        sorted_calls = sorted(calls, key=lambda c: c.get("start_date", ""))
+
+        # 2. Находим последний missed
+        last_missed_idx = -1
+        for i in range(len(sorted_calls) - 1, -1, -1):
+            if sorted_calls[i].get("status") == "missed":
+                last_missed_idx = i
+                break
+
+        if last_missed_idx == -1:
+            continue  # Нет пропущенных
+
+        # 3. Проверяем, есть ли исходящий после последнего пропущенного
+        has_callback = any(
+            c.get("call_type") == "outgoing"
+            for c in sorted_calls[last_missed_idx + 1:]
+        )
+
+        if not has_callback:
+            violations.append({
+                "entity_type": entity_type,
+                "entity_id": entity.get(id_field),
+                "responsible_id": entity.get("assigned_by_id"),
+                "severity": "very high",
+                "rule": f"{entity_type}_missed_callback",
+                "reason": "Пропущенный звонок без обратного",
+                "details": {},
+            })
+
+    return violations
+
+
+def _lead_needs_llm_check(lead: dict[str, Any]) -> bool:
+    """Возвращает True, если лид требует LLM-анализа (rule_2 или rule_3)."""
+    status_id = _lead_status_id(lead)
+
+    # rule_2 (Спам / JUNK) — LLM проверяет обоснование
+    if _is_lead_spam_status(status_id):
+        return True
+
+    # rule_3 (Нецелевой и прочие промежуточные стадии)
+    if status_id in LEAD_SKIP_LLM_STATUS_IDS:
+        return False
+
+    return True
+
+
+def check_lead_rule1_violations(
+    leads: list[dict[str, Any]],
+    current_time: datetime,
+) -> list[dict[str, Any]]:
+    """Детерминированная проверка: лид NEW > 2 часов без комментария."""
+    violations = []
+    for lead in leads:
+        status_id = _lead_status_id(lead)
+        if status_id != LEAD_STATUS_NEW:
+            continue
+
+        date_create = _parse_datetime(lead.get("date_create"))
+        if date_create is None:
+            continue
+
+        hours = (current_time - date_create).total_seconds() / 3600
+        if hours <= 2:
+            continue
+
+        # Проверяем, есть ли комментарий от ответственного в timeline
+        assigned_id = lead.get("assigned_by_id")
+        timeline = lead.get("timeline", [])
+        has_broker_comment = any(
+            _coerce_int(item.get("author_id")) == assigned_id
+            and str(item.get("comment", "")).strip()
+            for item in timeline
+        )
+
+        if not has_broker_comment:
+            reason = (
+                "Лид находится в статусе «Новый» более 2 часов, "
+                f"необходимо квалифицировать лида. (прошло {hours:.0f} часов)"
+            )
+            violations.append({
+                "entity_type": "lead",
+                "entity_id": _coerce_int(lead.get("lead_id")),
+                "responsible_id": assigned_id,
+                "severity": "high",
+                "rule": "lead_rule_1",
+                "reason": reason,
+                "details": {
+                    "lead_id": lead.get("lead_id"),
+                    "title": lead.get("title"),
+                    "status_name": lead.get("status_name"),
+                    "hours_since_creation": round(hours, 2),
+                    "has_broker_comment": False,
+                },
+            })
+    return violations
+
+
 def check_buyer_deal_violations(
     deals: list[dict[str, Any]],
     current_time: str,
+    rop_map: dict[int, int] | None = None,
+    broker_dept_map: dict[int, int] | None = None,
 ) -> list[dict[str, Any]]:
     """Deterministic audit of buyer funnel deals (rules 1–5 by audit_rule).
 
     Each deal is checked against exactly one rule matching its audit_rule field.
+    Comments count only from the responsible broker or their ROP.
     """
     now = _parse_datetime(current_time) or datetime.now(timezone.utc)
     violations: list[dict[str, Any]] = []
+
+    if rop_map is None:
+        rop_map = _build_rop_map()
+
+    if broker_dept_map is None:
+        broker_ids = {
+            _coerce_int(deal.get("assigned_by_id"))
+            for deal in deals
+            if _coerce_int(deal.get("assigned_by_id"))
+        }
+        broker_dept_map = _build_broker_dept_map(broker_ids)
 
     for deal in deals:
         audit_rule = deal.get("audit_rule")
@@ -314,8 +683,12 @@ def check_buyer_deal_violations(
         stage_id = str(deal.get("stage_id") or "")
         days_on_stage = round(_days_between(deal.get("date_create"), now), 2)
         timeline = deal.get("timeline") or []
-        uf_fields = deal.get("uf_fields") or {}
         assigned_by_id = _coerce_int(deal.get("assigned_by_id"))
+        allowed_comment_authors = _allowed_comment_authors(
+            assigned_by_id,
+            broker_dept_map,
+            rop_map,
+        )
         base_details = {
             "deal_id": _coerce_int(deal.get("deal_id")),
             "title": str(deal.get("title") or ""),
@@ -328,71 +701,174 @@ def check_buyer_deal_violations(
                 violations.append(_violation(
                     deal,
                     "buyer_stage_1",
-                    f"Сделка находится на этапе «{stage_name}» более 1 дня. ({days_on_stage} дн.)",
+                    f"Сделка находится на этапе «{stage_name}» более 1 дня.",
                     {**base_details, "days_on_stage": days_on_stage},
                 ))
 
         elif rule_num == 2:
-            if days_on_stage > 2 and not _timeline_has_comment(timeline):
+            days_since_comment = _days_since_last_comment_by_authors(
+                timeline, now, allowed_comment_authors,
+            )
+            if days_since_comment > 2:
+                deal_open_activities = deal.get("open_activities") or []
+                if not isinstance(deal_open_activities, list):
+                    deal_open_activities = []
+                responsible_open_activities = deal.get("responsible_open_activities") or []
+                if not isinstance(responsible_open_activities, list):
+                    responsible_open_activities = []
+
+                contact_activities = [
+                    activity for activity in (deal_open_activities + responsible_open_activities)
+                    if _is_contact_plan_activity(activity)
+                ]
+                has_contact_plan = bool(contact_activities)
+                has_non_overdue_contact_plan = False
+                has_overdue_contact_plan = False
+                for activity in contact_activities:
+                    due = _open_activity_due_datetime(activity)
+                    if due is not None and due <= now:
+                        has_overdue_contact_plan = True
+                    else:
+                        has_non_overdue_contact_plan = True
+
+                # Если есть живое запланированное дело по связи с клиентом,
+                # отсутствие свежего комментария не считаем нарушением.
+                if has_non_overdue_contact_plan:
+                    continue
+
+                if days_since_comment >= 999:
+                    if has_overdue_contact_plan:
+                        reason = (
+                            f"На этапе «{stage_name}» нет комментария более 2 дней, "
+                            "а запланированное дело по связи с клиентом просрочено."
+                        )
+                    else:
+                        reason = (
+                            f"Сделка находится на этапе «{stage_name}» более 2 дней "
+                            "без комментария."
+                        )
+                else:
+                    if has_overdue_contact_plan:
+                        reason = (
+                            f"Сделка находится на этапе «{stage_name}», последний комментарий "
+                            f"более {days_since_comment} дней назад, "
+                            "а запланированное дело по связи с клиентом просрочено."
+                        )
+                    else:
+                        reason = (
+                            f"Сделка находится на этапе «{stage_name}», последний комментарий "
+                            f"более {days_since_comment} дней назад."
+                        )
                 violations.append(_violation(
                     deal,
                     "buyer_stage_2",
-                    f"Сделка находится на этапе «{stage_name}» более 2 дней. ({days_on_stage} дн.)",
-                    {**base_details, "days_on_stage": days_on_stage},
+                    reason,
+                    {
+                        **base_details,
+                        "days_since_last_comment": days_since_comment,
+                        "has_contact_plan_activity": has_contact_plan,
+                        "has_overdue_contact_plan_activity": has_overdue_contact_plan,
+                    },
                 ))
 
         elif rule_num == 3:
-            show_date = _show_date_from_uf(uf_fields)
-            if show_date is None:
+            uf_fields = deal.get("uf_fields") if isinstance(deal.get("uf_fields"), dict) else {}
+            show_date_uf = _show_date_from_uf(uf_fields)
+            show_date_comment = _show_date_from_timeline_comments(
+                timeline, now, allowed_comment_authors,
+            )
+            show_date = show_date_uf or show_date_comment
+            has_show_plan_comment = _has_show_plan_comment(
+                timeline, allowed_comment_authors,
+            )
+            open_activities = deal.get("open_activities") or []
+            if not isinstance(open_activities, list):
+                open_activities = []
+            has_planned_activity = bool(open_activities)
+            has_show_date = show_date is not None
+            is_show_date_passed = bool(show_date and show_date <= now)
+            overdue_activities = [
+                activity for activity in open_activities
+                if (due := _open_activity_due_datetime(activity)) is not None and due <= now
+            ]
+            has_overdue_activity = bool(overdue_activities)
+            has_active_planned_activity = has_planned_activity and not has_overdue_activity
+
+            should_flag = False
+            if has_overdue_activity:
+                should_flag = True
+            elif not has_show_date and not has_active_planned_activity:
+                should_flag = not has_show_plan_comment
+            elif is_show_date_passed and not has_active_planned_activity:
+                should_flag = True
+
+            if should_flag:
+                reason_parts: list[str] = []
+                if not has_planned_activity:
+                    reason_parts.append("нет запланированного дела")
+                if not has_show_date:
+                    reason_parts.append("не заполнена дата показа")
+                if has_overdue_activity:
+                    reason_parts.append("запланированное дело просрочено")
+                if is_show_date_passed:
+                    reason_parts.append("дата показа уже прошла")
+                reasons_text = "; ".join(reason_parts)
+                reason = (
+                    f"На этапе «{stage_name}» {reasons_text}. "
+                    "Сделку нужно перенести на другой этап."
+                )
                 violations.append(_violation(
                     deal,
                     "buyer_stage_3",
-                    "На этапе «Показ» отсутствует запланированная дата показа в пользовательских полях.",
+                    reason,
                     {
                         **base_details,
-                        "has_show_date": False,
-                        "is_overdue": False,
+                        "has_planned_activity": has_planned_activity,
+                        "has_show_date": has_show_date,
+                        "has_overdue_activity": has_overdue_activity,
+                        "is_show_date_passed": is_show_date_passed,
+                        "has_active_planned_activity": has_active_planned_activity,
+                        "show_date_source": (
+                            "uf_fields"
+                            if show_date_uf is not None
+                            else "timeline_comment"
+                            if show_date_comment is not None
+                            else "missing"
+                        ),
+                        "has_show_plan_comment": has_show_plan_comment,
                     },
-                ))
-            elif show_date.astimezone(timezone.utc) < now.astimezone(timezone.utc):
-                violations.append(_violation(
-                    deal,
-                    "buyer_stage_3",
-                    f"На этапе «Показ» просрочена дата показа (запланировано: {uf_fields.get('Дата встречи')}).",
-                    {
-                        **base_details,
-                        "has_show_date": True,
-                        "is_overdue": True,
-                    },
+                    severity="high",
                 ))
 
         elif rule_num == 4:
-            if days_on_stage <= 1:
-                continue
-            show_result = str(uf_fields.get("Результат показа") or "").strip()
-            if len(show_result) >= 30:
-                continue
-            latest = _latest_comment_from(timeline, assigned_by_id)
-            if latest and len(str(latest.get("comment") or "")) > 20:
-                continue
-            violations.append(_violation(
-                deal,
-                "buyer_stage_4",
-                f"Сделка на этапе «{stage_name}» более 1 дня без результата показа или комментария.",
-                {
-                    **base_details,
-                    "days_on_stage": days_on_stage,
-                    "has_detailed_comment": False,
-                },
-            ))
+            days_since_comment = _days_since_last_comment_by_authors(
+                timeline, now, allowed_comment_authors,
+            )
+            if days_since_comment > 5:
+                if days_since_comment >= 999:
+                    reason = f"На этапе «{stage_name}» нет комментариев."
+                else:
+                    reason = (
+                        f"На этапе «{stage_name}» последний комментарий "
+                        f"более {days_since_comment} дней назад."
+                    )
+                violations.append(_violation(
+                    deal,
+                    "buyer_stage_4",
+                    reason,
+                    {**base_details,
+                     "days_since_last_comment": days_since_comment},
+                ))
 
         elif rule_num == 5:
-            days_since = _days_since_last_comment(timeline, assigned_by_id, now)
+            days_since = _days_since_last_comment_by_authors(
+                timeline, now, allowed_comment_authors,
+            )
             if days_since > 7:
                 violations.append(_violation(
                     deal,
                     "buyer_stage_5",
-                    f"На этапе «{stage_name}» нет комментария ответственного более 7 дней.",
+                    f"На этапе «{stage_name}» нет комментария брокера или РОП более 7 дней.",
                     {
                         **base_details,
                         "days_since_last_comment": days_since,
@@ -417,20 +893,20 @@ def humanize_violation_reason(
         for deal in deals:
             stage_id = str(deal.get("stage_id") or "")
             stage_name = str(deal.get("stage_name") or "")
-            if stage_id and stage_name:
+            if stage_id and stage_name and stage_id != stage_name:
                 code_to_name[stage_id] = stage_name
 
     for lead in leads or []:
         status_id = str(lead.get("status_id") or "")
         status_name = str(lead.get("status_name") or "")
-        if status_id and status_name:
+        if status_id and status_name and status_id != status_name:
             code_to_name[status_id] = status_name
 
     details = violation.get("details")
     if isinstance(details, dict):
         stage_name = details.get("stage_name") or details.get("status_name")
         stage_id = str(details.get("stage_id") or details.get("status_id") or "")
-        if stage_id and stage_name:
+        if stage_id and stage_name and stage_id != stage_name:
             code_to_name[stage_id] = str(stage_name)
 
     entity_id = _coerce_int(violation.get("entity_id", 0))
@@ -441,19 +917,37 @@ def humanize_violation_reason(
                 if _coerce_int(deal.get("deal_id")) == entity_id:
                     sid = str(deal.get("stage_id") or "")
                     sname = str(deal.get("stage_name") or "")
-                    if sid and sname:
+                    if sid and sname and sid != sname:
                         code_to_name[sid] = sname
     elif entity_type == "lead":
         for lead in leads or []:
             if _coerce_int(lead.get("lead_id")) == entity_id:
                 sid = str(lead.get("status_id") or "")
                 sname = str(lead.get("status_name") or "")
-                if sid and sname:
+                if sid and sname and sid != sname:
                     code_to_name[sid] = sname
 
     for code in sorted(code_to_name, key=len, reverse=True):
-        if code and code in reason:
-            reason = reason.replace(code, f"«{code_to_name[code]}»")
+        if not code:
+            continue
+        # Numeric status IDs (e.g. "1" for "Общие Лиды") must never be replaced
+        # in free text, otherwise numbers in durations ("44 часов") get corrupted.
+        if code.isdigit():
+            continue
+        if code not in reason:
+            continue
+
+        name = code_to_name[code]
+        quoted_name = name if name.startswith("«") else f"«{name}»"
+
+        # First replace explicit quoted codes.
+        reason = reason.replace(f"«{code}»", quoted_name)
+        # Then replace standalone unquoted code tokens.
+        reason = re.sub(
+            rf"(?<![\w]){re.escape(code)}(?![\w])",
+            quoted_name,
+            reason,
+        )
 
     return reason
 
@@ -884,7 +1378,7 @@ def check_lead_qualification(max_hours: int = 1) -> dict[str, Any]:
         violations: list[dict[str, Any]] = []
 
         for lead in leads:
-            created = _parse_b24_datetime(str(lead.get("DATE_CREATE") or ""))
+            created = _parse_datetime(lead.get("DATE_CREATE"))
             if created is None:
                 continue
             hours_since = (now - created).total_seconds() / 3600
@@ -1035,6 +1529,7 @@ def get_all_leads_with_timeline() -> dict[str, Any]:
                 "DATE_CREATE",
                 "COMMENTS",
                 "SOURCE_ID",
+                "OPENED",
             ],
         }
         if settings.report_since:
@@ -1060,6 +1555,7 @@ def get_all_leads_with_timeline() -> dict[str, Any]:
                 "date_create": _clean_str(lead.get("DATE_CREATE")),
                 "comments_field": _clean_str(lead.get("COMMENTS")),
                 "source_id": _clean_str(lead.get("SOURCE_ID")),
+                "opened": _clean_str(lead.get("OPENED")).upper(),
                 "timeline": [],
                 "calls": [],
             }
@@ -1179,17 +1675,92 @@ def get_deals_by_funnel_with_timeline(category_id: int) -> dict[str, Any]:
                 except Exception:
                     pass
 
+        open_activities_map: dict[int, list[dict[str, Any]]] = {}
+        try:
+            activities_raw = _bx_get_all_sync(
+                "crm.activity.list",
+                {
+                    "filter": {
+                        "COMPLETED": "N",
+                    },
+                    "select": [
+                        "ID",
+                        "OWNER_ID",
+                        "SUBJECT",
+                        "DESCRIPTION",
+                        "TYPE_ID",
+                        "OWNER_TYPE_ID",
+                        "START_TIME",
+                        "END_TIME",
+                        "DEADLINE",
+                        "COMPLETED",
+                        "COMMUNICATIONS",
+                    ],
+                },
+            )
+            for activity in _as_list(activities_raw):
+                owner_id = _coerce_int(activity.get("OWNER_ID"))
+                owner_type_id = _coerce_int(activity.get("OWNER_TYPE_ID"))
+                if owner_type_id == 2 and owner_id > 0:
+                    open_activities_map.setdefault(owner_id, []).append(activity)
+
+                comms = activity.get("COMMUNICATIONS")
+                if isinstance(comms, list):
+                    for comm in comms:
+                        if not isinstance(comm, dict):
+                            continue
+                        etype = str(comm.get("ENTITY_TYPE_ID") or "").upper()
+                        eid = _coerce_int(comm.get("ENTITY_ID"))
+                        if etype == "DEAL" and eid > 0:
+                            open_activities_map.setdefault(eid, []).append(activity)
+        except Exception as exc:
+            logger.warning("Failed to load open activities for deals: %s", exc)
+
+        for did, record in deal_records.items():
+            record["open_activities"] = open_activities_map.get(did, [])
+
+        calls_cache: dict[int, list[dict[str, Any]]] = {}
+        responsible_activities_cache: dict[int, list[dict[str, Any]]] = {}
         for did, record in deal_records.items():
             assigned_id = _coerce_int(record.get("assigned_by_id"))
             if not assigned_id:
                 continue
-            try:
-                record["calls"] = _fetch_user_calls_for_audit(
-                    assigned_id,
-                    hours_ago=720,
-                )
-            except Exception:
-                record["calls"] = []
+            if assigned_id not in calls_cache:
+                try:
+                    calls_cache[assigned_id] = _fetch_user_calls_for_audit(
+                        assigned_id,
+                        hours_ago=720,
+                    )
+                except Exception:
+                    calls_cache[assigned_id] = []
+            record["calls"] = calls_cache[assigned_id]
+
+            if assigned_id not in responsible_activities_cache:
+                try:
+                    acts_raw = _bx_get_all_sync(
+                        "crm.activity.list",
+                        {
+                            "filter": {
+                                "RESPONSIBLE_ID": assigned_id,
+                                "COMPLETED": "N",
+                            },
+                            "select": [
+                                "ID",
+                                "OWNER_ID",
+                                "OWNER_TYPE_ID",
+                                "SUBJECT",
+                                "DESCRIPTION",
+                                "START_TIME",
+                                "END_TIME",
+                                "DEADLINE",
+                                "COMPLETED",
+                            ],
+                        },
+                    )
+                    responsible_activities_cache[assigned_id] = _as_list(acts_raw)
+                except Exception:
+                    responsible_activities_cache[assigned_id] = []
+            record["responsible_open_activities"] = responsible_activities_cache[assigned_id]
 
         result = list(deal_records.values())
         return {
