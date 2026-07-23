@@ -14,7 +14,6 @@ if str(_SRC_DIR) not in sys.path:
 from fast_bitrix24 import Bitrix
 from config import get_settings
 from db import get_connection, init_db
-from weekly_report import RULE_ADVICE
 
 logger = logging.getLogger(__name__)
 
@@ -138,10 +137,11 @@ def score_broker(violations: dict, owners: dict, kpi_target: int) -> dict:
     else:
         overall = "🟡 СРЕДНЕ"
 
-    # Recommendations
+    # Recommendations (from Settings.rules_advice / RULES_ADVICE_JSON)
+    advice_map = get_settings().rules_advice
     advices = []
     for rule in violations["by_rule"].keys():
-        advice = RULE_ADVICE.get(rule)
+        advice = advice_map.get(rule)
         if advice and advice not in advices:
             advices.append(advice)
 

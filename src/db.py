@@ -6,7 +6,11 @@ from typing import Any
 
 DB_PATH = Path("data/violations.db")
 ROUTINE_AUDIT_SINCE_CUTOFF = "2026-06-01"
-ROUTINE_AUDIT_MAX_LEADS = 500
+# Lead volume must not gate routine runs: production already exceeds 500–1000 leads.
+# Keep the arg for call-site compatibility / future diagnostics.
+ROUTINE_AUDIT_MAX_LEADS = 10_000
+# Cron fires at :00; allow a few minutes of container/startup skew.
+ROUTINE_AUDIT_MINUTE_MAX = 5
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +29,12 @@ def _parse_iso_datetime(value: str) -> datetime | None:
 
 
 def is_routine_audit_run(report_since: str, total_leads: int, run_time: str = "") -> bool:
-    """Определить, является ли запуск штатным cron-аудитом."""
+    """Определить, является ли запуск штатным cron-аудитом.
+
+    Criteria: report_since not earlier than cutoff, weekday, hour in {7, 14} UTC,
+    minute within startup skew. Lead count is only a safety ceiling for pathological
+    full-history dumps — not a normal production filter.
+    """
     since = (report_since or "").strip()
     if since and since < ROUTINE_AUDIT_SINCE_CUTOFF:
         return False
@@ -37,7 +46,7 @@ def is_routine_audit_run(report_since: str, total_leads: int, run_time: str = ""
         return False
     if dt.hour not in {7, 14}:
         return False
-    if dt.minute != 0:
+    if dt.minute > ROUTINE_AUDIT_MINUTE_MAX:
         return False
     return True
 
