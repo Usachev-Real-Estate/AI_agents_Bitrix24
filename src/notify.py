@@ -39,34 +39,6 @@ def _bx_call_sync(method: str, params: dict[str, Any]) -> Any:
     return BX_EXECUTOR.submit(_run).result()
 
 
-def send_personal_notification(user_id: int, message: str) -> int:
-    """Send a personal notification to a Bitrix24 user.
-
-    Uses im.notify.personal.add (USER_ID + MESSAGE).
-
-    Args:
-        user_id: Recipient user ID.
-        message: Notification text (truncated to 2000 chars).
-
-    Returns:
-        Notification ID from Bitrix24.
-
-    Raises:
-        Exception: On API errors.
-    """
-    msg = message
-    if len(msg) > MESSAGE_MAX_LEN:
-        msg = msg[:1990] + "...[обрезано]"
-
-    result = _bx_call_sync(
-        "im.notify.personal.add",
-        {"USER_ID": user_id, "MESSAGE": msg},
-    )
-    notify_id = int(result) if result is not None else 0
-    logger.info("Personal notification sent: user_id=%s notify_id=%s", user_id, notify_id)
-    return notify_id
-
-
 def send_chat_message(chat_id: int, message: str) -> int:
     """Send message to a Bitrix24 chat via im.message.add.
 
