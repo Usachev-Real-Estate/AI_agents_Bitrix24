@@ -75,7 +75,7 @@ copy .env.example .env      # Windows
 ### 3. Проверка подключения
 
 ```bash
-python src/test_b24.py
+python scripts/test_b24.py
 ```
 
 ### 4. Запуск аудита
@@ -148,6 +148,7 @@ crontab -l
 | `.\make.cmd test-b24` | проверка Bitrix24 |
 | `.\make.cmd run` | полный аудит |
 | `.\make.cmd dry-run` | только чтение |
+| `.\make.cmd exclusive-expiry` | напоминания по эксклюзивам |
 | `.\make.cmd docker-build` | сборка образа |
 
 ## Структура проекта
@@ -155,17 +156,26 @@ crontab -l
 ```
 b24-ai-auditor/
 ├── src/
-│   ├── config.py          # Pydantic Settings
-│   ├── main.py            # Точка входа
-│   ├── tools.py           # Инструменты (Bitrix24 API + звонки)
-│   ├── graph.py           # LangGraph граф v2
-│   ├── prompts.py         # Системные промпты
-│   └── notify.py          # Отправка уведомлений в Bitrix24
+│   ├── config.py              # Pydantic Settings
+│   ├── main.py                # Точка входа аудита
+│   ├── tools.py               # Bitrix24 API + правила аудита
+│   ├── graph.py               # LangGraph граф v2
+│   ├── prompts.py             # Системные промпты LLM
+│   ├── notify.py              # Отправка в чаты Bitrix24
+│   ├── db.py                  # SQLite (violations, brokers, exclusive)
+│   ├── weekly_report.py       # Недельный отчёт по брокерам
+│   ├── task_auditor.py        # Просроченные задачи
+│   ├── owner_tracker.py       # KPI собственников
+│   ├── broker_score.py        # Скоринг брокера
+│   ├── chat_poller.py         # Чат-команды
+│   └── exclusive_expiry.py    # Напоминания по эксклюзивам
 ├── tests/
 ├── logs/
-├── plans/prompts/         # Промпты для Cursor (step-01..47)
+├── data/                      # SQLite + runtime (gitignored)
+├── plans/                     # Планы и промпты разработки
 ├── scripts/
-│   └── list_departments.py
+│   ├── list_departments.py
+│   └── test_b24.py
 ├── Dockerfile
 ├── docker-compose.yml
 ├── crontab.txt

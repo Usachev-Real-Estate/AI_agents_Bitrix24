@@ -82,7 +82,7 @@ def _get_rule_advice() -> dict[str, str]:
     return advice
 
 
-def format_weekly_report(violators: list[dict], clean: list[dict], week_start: str, now: datetime, dept_name: str = None, prev_violators_count: int = 0, prev_total_violations: int = 0) -> str:
+def format_weekly_report(violators: list[dict], clean: list[dict], week_start: str, now: datetime, dept_name: str = None, prev_total_violations: int = 0) -> str:
     """Format the weekly report message."""
     start_date = datetime.fromisoformat(week_start).strftime("%d.%m.%Y")
     end_date = now.strftime("%d.%m.%Y")
@@ -210,7 +210,6 @@ def main():
     # 1. Main report (all departments)
     main_report = format_weekly_report(
         violators, clean, week_start, now,
-        prev_violators_count=len(prev_violators),
         prev_total_violations=prev_total,
     )
     print("Generated MAIN report:")
@@ -258,7 +257,6 @@ def main():
 
         dept_report = format_weekly_report(
             dept_violators, dept_clean, week_start, now, dept_name=dept_name,
-            prev_violators_count=len(dept_prev_violators),
             prev_total_violations=dept_prev_total,
         )
         print(f"Generated report for DEPT {dept_name} (chat {chat_id}):")
