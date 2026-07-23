@@ -69,6 +69,49 @@ class Settings(BaseSettings):
         default='["Агентство Недвижимости", "Вера Волкова", "Светлана Щербакова", "Марина Володина"]',
         validation_alias="TASK_AUDITOR_EXCLUDE_USERS_JSON",
     )
+    # Exclusive (smart process) expiry reminders
+    exclusive_entity_type_id: int = Field(
+        default=1080,
+        validation_alias="EXCLUSIVE_ENTITY_TYPE_ID",
+    )
+    exclusive_end_date_field: str = Field(
+        default="ufCrm20_1784712129125",
+        validation_alias="EXCLUSIVE_END_DATE_FIELD",
+    )
+    exclusive_address_field: str = Field(
+        default="ufCrm20_1784712031409",
+        validation_alias="EXCLUSIVE_ADDRESS_FIELD",
+    )
+    exclusive_expiry_days: int = Field(
+        default=7,
+        validation_alias="EXCLUSIVE_EXPIRY_DAYS",
+    )
+    # Reminder milestones before end date: 7 days, then 3, then 1.
+    exclusive_expiry_milestones_json: str = Field(
+        default="[7, 3, 1]",
+        validation_alias="EXCLUSIVE_EXPIRY_MILESTONES_JSON",
+    )
+    exclusive_skip_stage_ids_json: str = Field(
+        default='["DT1080_26:SUCCESS", "DT1080_26:FAIL"]',
+        validation_alias="EXCLUSIVE_SKIP_STAGE_IDS_JSON",
+    )
+    exclusive_expiry_catch_up: bool = Field(
+        default=True,
+        validation_alias="EXCLUSIVE_EXPIRY_CATCH_UP",
+    )
+    exclusive_notify_user_ids_json: str = Field(
+        default="[32, 154, 378]",
+        validation_alias="EXCLUSIVE_NOTIFY_USER_IDS_JSON",
+    )
+    exclusive_notify_from_user_id: int = Field(
+        default=154,
+        validation_alias="EXCLUSIVE_NOTIFY_FROM_USER_ID",
+    )
+    # Optional dedicated webhook for chat sends. Empty → B24_WEBHOOK_URL.
+    exclusive_notify_webhook_url: str = Field(
+        default="",
+        validation_alias="EXCLUSIVE_NOTIFY_WEBHOOK_URL",
+    )
 
     @property
     def rules_advice(self) -> dict[str, str]:
@@ -97,6 +140,33 @@ class Settings(BaseSettings):
             return set(json.loads(self.owner_exclude_user_ids_json))
         except Exception:
             return set()
+
+    @property
+    def exclusive_skip_stage_ids(self) -> set[str]:
+        try:
+            return {str(x) for x in json.loads(self.exclusive_skip_stage_ids_json)}
+        except Exception:
+            return {"DT1080_26:SUCCESS", "DT1080_26:FAIL"}
+
+    @property
+    def exclusive_expiry_milestones(self) -> list[int]:
+        try:
+            values = [int(x) for x in json.loads(self.exclusive_expiry_milestones_json)]
+            return sorted({v for v in values if v >= 0}, reverse=True)
+        except Exception:
+            return [7, 3, 1]
+
+    @property
+    def exclusive_notify_user_ids(self) -> list[int]:
+        try:
+            return [int(x) for x in json.loads(self.exclusive_notify_user_ids_json)]
+        except Exception:
+            return [32, 154, 378]
+
+    @property
+    def exclusive_notify_webhook(self) -> str:
+        """Webhook used to send chat messages (must belong to FROM user)."""
+        return (self.exclusive_notify_webhook_url or self.b24_webhook_url).strip()
 
     @property
     def dept_chat_map(self) -> dict[int, int]:

@@ -17,3 +17,5 @@
 # 5. Чат-команды (скоринг брокеров): каждую минуту
 * * * * * cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/chat_poller.py >> logs/cron.log 2>&1
 
+# 6. Напоминания по эксклюзивам (за 7 / 3 / 1 день): ежедневно в 10:00 МСК (07:00 UTC)
+0 7 * * * cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/exclusive_expiry.py >> logs/cron.log 2>&1

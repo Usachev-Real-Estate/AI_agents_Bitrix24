@@ -21,7 +21,7 @@ if "%1"=="test" (
 )
 
 if "%1"=="lint" (
-    %PYTHON% -m flake8 src\ tests\
+    %PYTHON% -m flake8 src\ tests\ scripts\
     exit /b
 )
 
@@ -59,9 +59,14 @@ if "%1"=="chat-poll" (
     exit /b
 )
 
+if "%1"=="exclusive-expiry" (
+    %PYTHON% src\exclusive_expiry.py
+    exit /b
+)
+
 if "%1"=="docker-build" (
     docker build -t b24-ai-auditor:latest .
     exit /b
 )
 
-echo Usage: make.cmd [install^|run^|test^|lint^|dry-run^|docker-build]
+echo Usage: make.cmd [install^|run^|test^|lint^|dry-run^|exclusive-expiry^|docker-build]

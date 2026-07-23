@@ -14,7 +14,7 @@ test:
 	$(PYTHON) -m pytest
 
 lint:
-	$(PYTHON) -m flake8 src/ tests/
+	$(PYTHON) -m flake8 src/ tests/ scripts/
 
 dry-run:
 	DRY_RUN=true $(PYTHON) src/main.py
@@ -37,6 +37,9 @@ broker-score:
 
 chat-poll:
 	$(PYTHON) src/chat_poller.py
+
+exclusive-expiry:
+	$(PYTHON) src/exclusive_expiry.py
 
 docker-build:
 	docker build -t b24-ai-auditor:latest .

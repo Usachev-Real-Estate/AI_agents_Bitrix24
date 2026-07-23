@@ -124,6 +124,57 @@ def init_db() -> None:
         );
         """)
 
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS exclusive_expiry_notifications (
+            item_id INTEGER NOT NULL,
+            end_date TEXT NOT NULL,
+            days_before INTEGER NOT NULL,
+            assigned_by_id INTEGER NOT NULL,
+            notified_at TEXT NOT NULL,
+            PRIMARY KEY (item_id, end_date, days_before)
+        );
+        """)
+        _migrate_exclusive_expiry_notifications(conn)
+
+
+def _migrate_exclusive_expiry_notifications(conn: sqlite3.Connection) -> None:
+    """Upgrade PK to (item_id, end_date, days_before) for 7/3/1 milestones."""
+    rows = conn.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE type='table' AND name='exclusive_expiry_notifications'"
+    ).fetchone()
+    ddl = (rows[0] or "") if rows else ""
+    if "days_before" in ddl and "PRIMARY KEY (item_id, end_date, days_before)" in ddl:
+        return
+    if "exclusive_expiry_notifications" not in ddl:
+        return
+
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS exclusive_expiry_notifications_new (
+        item_id INTEGER NOT NULL,
+        end_date TEXT NOT NULL,
+        days_before INTEGER NOT NULL,
+        assigned_by_id INTEGER NOT NULL,
+        notified_at TEXT NOT NULL,
+        PRIMARY KEY (item_id, end_date, days_before)
+    );
+    """)
+    try:
+        conn.execute("""
+        INSERT OR IGNORE INTO exclusive_expiry_notifications_new (
+            item_id, end_date, days_before, assigned_by_id, notified_at
+        )
+        SELECT item_id, end_date, days_before, assigned_by_id, notified_at
+        FROM exclusive_expiry_notifications
+        """)
+    except sqlite3.OperationalError:
+        pass
+    conn.execute("DROP TABLE IF EXISTS exclusive_expiry_notifications")
+    conn.execute(
+        "ALTER TABLE exclusive_expiry_notifications_new "
+        "RENAME TO exclusive_expiry_notifications"
+    )
+
 
 def _migrate_audit_runs(conn: sqlite3.Connection) -> None:
     """Add routine/full-scan columns and purge big-report violations once."""
@@ -411,3 +462,41 @@ def get_weekly_stats(
             clean = [dict(r) for r in clean_cur.fetchall()]
 
         return violators, clean
+
+
+def was_exclusive_expiry_notified(
+    item_id: int,
+    end_date: str,
+    days_before: int,
+) -> bool:
+    """Return True if this milestone reminder was already sent."""
+    init_db()
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT 1 FROM exclusive_expiry_notifications
+            WHERE item_id = ? AND end_date = ? AND days_before = ?
+            """,
+            (item_id, end_date, days_before),
+        ).fetchone()
+        return row is not None
+
+
+def mark_exclusive_expiry_notified(
+    item_id: int,
+    end_date: str,
+    assigned_by_id: int,
+    days_before: int,
+    notified_at: str,
+) -> None:
+    """Persist that a milestone expiry reminder was sent (idempotent)."""
+    init_db()
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO exclusive_expiry_notifications (
+                item_id, end_date, days_before, assigned_by_id, notified_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (item_id, end_date, days_before, assigned_by_id, notified_at),
+        )

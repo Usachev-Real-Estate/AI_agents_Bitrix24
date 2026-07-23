@@ -58,6 +58,56 @@ def send_chat_message(chat_id: int, message: str) -> int:
     return msg_id
 
 
+def send_user_chat_message(
+    user_id: int,
+    message: str,
+    *,
+    system: bool = True,
+    webhook_url: str | None = None,
+) -> int:
+    """Send a message to a user's personal Bitrix24 chat.
+
+    Args:
+        user_id: Recipient user ID (DIALOG_ID without chat prefix).
+        message: Message text (BB-codes supported).
+        system: If True, send as SYSTEM message (more prominent).
+        webhook_url: Optional webhook URL. Message is sent as that webhook's owner.
+            If omitted, uses B24_WEBHOOK_URL.
+
+    Returns:
+        Message ID from Bitrix24.
+    """
+    params = {
+        "DIALOG_ID": str(user_id),
+        "MESSAGE": message,
+        "SYSTEM": "Y" if system else "N",
+    }
+    if webhook_url:
+        import httpx
+
+        url = webhook_url.rstrip("/") + "/im.message.add"
+        response = httpx.post(url, json=params, timeout=60.0)
+        response.raise_for_status()
+        data = response.json()
+        if data.get("error"):
+            raise RuntimeError(
+                f"im.message.add failed: {data.get('error')} "
+                f"{data.get('error_description')}"
+            )
+        result = data.get("result")
+    else:
+        result = _bx_call_sync("im.message.add", params)
+
+    msg_id = int(result) if result is not None else 0
+    logger.info(
+        "User chat message sent: user_id=%s msg_id=%s system=%s",
+        user_id,
+        msg_id,
+        system,
+    )
+    return msg_id
+
+
 def send_chat_message_chunked(chat_id: int, message: str, chunk_size: int = 4000) -> int:
     """Send a long message to chat, splitting into chunks.
 
