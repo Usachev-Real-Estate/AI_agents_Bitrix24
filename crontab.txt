@@ -19,3 +19,9 @@
 
 # 6. Напоминания по эксклюзивам (за 7 / 3 / 1 день): ежедневно в 10:00 МСК (07:00 UTC)
 0 7 * * * cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/exclusive_expiry.py >> logs/cron.log 2>&1
+
+# 7. Запрет смены «Источник» у контактов брокерами/РОПами: каждые 5 минут
+*/5 * * * * cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/contact_source_lock.py >> logs/cron.log 2>&1
+
+# 8. Запрет смены «Источник» у сделок «Продавцы» брокерами/РОПами: каждые 5 минут
+*/5 * * * * cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/deal_source_lock.py >> logs/cron.log 2>&1

@@ -64,9 +64,14 @@ if "%1"=="exclusive-expiry" (
     exit /b
 )
 
+if "%1"=="contact-source-lock" (
+    %PYTHON% src\contact_source_lock.py
+    exit /b
+)
+
 if "%1"=="docker-build" (
     docker build -t b24-ai-auditor:latest .
     exit /b
 )
 
-echo Usage: make.cmd [install^|run^|test^|lint^|dry-run^|exclusive-expiry^|docker-build]
+echo Usage: make.cmd [install^|run^|test^|lint^|dry-run^|exclusive-expiry^|contact-source-lock^|docker-build]

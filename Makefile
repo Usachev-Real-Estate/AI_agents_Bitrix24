@@ -41,5 +41,11 @@ chat-poll:
 exclusive-expiry:
 	$(PYTHON) src/exclusive_expiry.py
 
+contact-source-lock:
+	$(PYTHON) src/contact_source_lock.py
+
+deal-source-lock:
+	$(PYTHON) src/deal_source_lock.py
+
 docker-build:
 	docker build -t b24-ai-auditor:latest .

@@ -112,6 +112,40 @@ class Settings(BaseSettings):
         default="",
         validation_alias="EXCLUSIVE_NOTIFY_WEBHOOK_URL",
     )
+    # Contact SOURCE_ID lock: revert changes made by brokers / ROPs.
+    contact_source_lock_enabled: bool = Field(
+        default=True,
+        validation_alias="CONTACT_SOURCE_LOCK_ENABLED",
+    )
+    contact_source_lock_lookback_minutes: int = Field(
+        default=30,
+        validation_alias="CONTACT_SOURCE_LOCK_LOOKBACK_MINUTES",
+    )
+    contact_source_lock_notify: bool = Field(
+        default=True,
+        validation_alias="CONTACT_SOURCE_LOCK_NOTIFY",
+    )
+    contact_source_lock_notify_user_id: int = Field(
+        default=0,
+        validation_alias="CONTACT_SOURCE_LOCK_NOTIFY_USER_ID",
+    )
+    contact_source_lock_rop_position_substr_json: str = Field(
+        default='["РОП", "Руководитель отдела продаж"]',
+        validation_alias="CONTACT_SOURCE_LOCK_ROP_POSITION_SUBSTR_JSON",
+    )
+    contact_source_lock_exclude_user_ids_json: str = Field(
+        default="[]",
+        validation_alias="CONTACT_SOURCE_LOCK_EXCLUDE_USER_IDS_JSON",
+    )
+    contact_source_lock_exclude_names_json: str = Field(
+        default='["Агентство Недвижимости", "Asterisk1 1"]',
+        validation_alias="CONTACT_SOURCE_LOCK_EXCLUDE_NAMES_JSON",
+    )
+    # Deal SOURCE_ID lock (sellers funnel): same rules as contacts.
+    deal_source_lock_enabled: bool = Field(
+        default=True,
+        validation_alias="DEAL_SOURCE_LOCK_ENABLED",
+    )
 
     @property
     def rules_advice(self) -> dict[str, str]:
@@ -167,6 +201,34 @@ class Settings(BaseSettings):
     def exclusive_notify_webhook(self) -> str:
         """Webhook used to send chat messages (must belong to FROM user)."""
         return (self.exclusive_notify_webhook_url or self.b24_webhook_url).strip()
+
+    @property
+    def contact_source_lock_rop_position_substr(self) -> list[str]:
+        try:
+            values = json.loads(self.contact_source_lock_rop_position_substr_json)
+            return [str(x) for x in values if str(x).strip()]
+        except Exception:
+            return ["РОП", "Руководитель отдела продаж"]
+
+    @property
+    def contact_source_lock_exclude_user_ids(self) -> set[int]:
+        try:
+            return {int(x) for x in json.loads(self.contact_source_lock_exclude_user_ids_json)}
+        except Exception:
+            return set()
+
+    @property
+    def contact_source_lock_exclude_names(self) -> set[str]:
+        try:
+            return {str(x) for x in json.loads(self.contact_source_lock_exclude_names_json)}
+        except Exception:
+            return {"Агентство Недвижимости", "Asterisk1 1"}
+
+    @property
+    def contact_source_lock_notify_user(self) -> int:
+        """Recipient for SOURCE lock alerts. 0 → ADMIN_USER_ID."""
+        uid = int(self.contact_source_lock_notify_user_id or 0)
+        return uid if uid > 0 else int(self.admin_user_id)
 
     @property
     def dept_chat_map(self) -> dict[int, int]:

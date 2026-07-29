@@ -136,6 +136,21 @@ def init_db() -> None:
         """)
         _migrate_exclusive_expiry_notifications(conn)
 
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS contact_source_snapshots (
+            contact_id INTEGER PRIMARY KEY,
+            source_id TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        );
+        """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS deal_source_snapshots (
+            deal_id INTEGER PRIMARY KEY,
+            source_id TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        );
+        """)
+
 
 def _migrate_exclusive_expiry_notifications(conn: sqlite3.Connection) -> None:
     """Upgrade PK to (item_id, end_date, days_before) for 7/3/1 milestones."""
@@ -499,4 +514,107 @@ def mark_exclusive_expiry_notified(
             ) VALUES (?, ?, ?, ?, ?)
             """,
             (item_id, end_date, days_before, assigned_by_id, notified_at),
+        )
+
+
+def count_contact_source_snapshots() -> int:
+    """Return number of stored contact SOURCE_ID snapshots."""
+    init_db()
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM contact_source_snapshots"
+        ).fetchone()
+        return int(row[0] if row else 0)
+
+
+def get_contact_source_snapshot(contact_id: int) -> str | None:
+    """Return stored SOURCE_ID for contact, or None if missing."""
+    init_db()
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT source_id FROM contact_source_snapshots WHERE contact_id = ?",
+            (contact_id,),
+        ).fetchone()
+        return None if row is None else str(row[0] or "")
+
+
+def upsert_contact_source_snapshot(
+    contact_id: int,
+    source_id: str,
+    updated_at: str,
+) -> None:
+    """Insert or update SOURCE_ID snapshot for a contact."""
+    init_db()
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO contact_source_snapshots (contact_id, source_id, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(contact_id) DO UPDATE SET
+                source_id = excluded.source_id,
+                updated_at = excluded.updated_at
+            """,
+            (contact_id, source_id or "", updated_at),
+        )
+
+
+def bulk_upsert_contact_source_snapshots(
+    rows: list[tuple[int, str, str]],
+) -> int:
+    """Upsert many snapshots. Each row: (contact_id, source_id, updated_at)."""
+    if not rows:
+        return 0
+    init_db()
+    with get_connection() as conn:
+        conn.executemany(
+            """
+            INSERT INTO contact_source_snapshots (contact_id, source_id, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(contact_id) DO UPDATE SET
+                source_id = excluded.source_id,
+                updated_at = excluded.updated_at
+            """,
+            rows,
+        )
+        return len(rows)
+
+
+def count_deal_source_snapshots() -> int:
+    """Return number of stored deal SOURCE_ID snapshots."""
+    init_db()
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM deal_source_snapshots"
+        ).fetchone()
+        return int(row[0] if row else 0)
+
+
+def get_deal_source_snapshot(deal_id: int) -> str | None:
+    """Return stored SOURCE_ID for deal, or None if missing."""
+    init_db()
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT source_id FROM deal_source_snapshots WHERE deal_id = ?",
+            (deal_id,),
+        ).fetchone()
+        return None if row is None else str(row[0] or "")
+
+
+def upsert_deal_source_snapshot(
+    deal_id: int,
+    source_id: str,
+    updated_at: str,
+) -> None:
+    """Insert or update SOURCE_ID snapshot for a deal."""
+    init_db()
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO deal_source_snapshots (deal_id, source_id, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(deal_id) DO UPDATE SET
+                source_id = excluded.source_id,
+                updated_at = excluded.updated_at
+            """,
+            (deal_id, source_id or "", updated_at),
         )
