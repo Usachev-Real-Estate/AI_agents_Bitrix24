@@ -47,5 +47,11 @@ contact-source-lock:
 deal-source-lock:
 	$(PYTHON) src/deal_source_lock.py
 
+buyer-base-rate-lock:
+	$(PYTHON) src/buyer_base_rate_lock.py
+
+import-kc-owners:
+	$(PYTHON) scripts/import_kc_owners.py
+
 docker-build:
 	docker build -t b24-ai-auditor:latest .

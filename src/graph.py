@@ -12,7 +12,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from config import Settings
-from notify import _bx_call_sync, send_chat_message_chunked
+from notify import _bx_call_sync, send_chat_message_chunked, send_user_chat_message
 from prompts import (
     LEAD_ANALYST_PROMPT,
 )
@@ -20,11 +20,15 @@ from tools import (
     _build_crm_link,
     _build_rop_map,
     _coerce_int,
+    _is_seller_violation,
     _lead_needs_llm_check,
     _lead_status_id,
+    _severity_icon,
+    seller_violation_action,
     check_buyer_deal_violations,
     check_lead_rule1_violations,
     check_missed_callback_violations,
+    check_seller_deal_violations,
     get_all_leads_with_timeline,
     get_deals_by_funnel_with_timeline,
     humanize_violation_reason,
@@ -49,6 +53,10 @@ ALLOWED_VIOLATION_RULES = {
     "buyer_stage_4",
     "buyer_stage_5",
     "buyer_missed_callback",
+    "seller_meeting_no_outgoing",
+    "seller_meeting_not_advanced",
+    "seller_deferred_no_comment",
+    "seller_source_no_outgoing",
 }
 
 NON_RULE_REASON_MARKERS = (
@@ -326,6 +334,21 @@ async def buyer_deal_analyst(state: AuditState, settings: Settings) -> AuditStat
     all_violations = check_buyer_deal_violations(deals, current_time, rop_map)
 
     logger.info("Agent 5: found %d buyer deal violations total", len(all_violations))
+    return {"violations": all_violations}
+
+
+async def seller_deal_analyst(state: AuditState, settings: Settings) -> AuditState:
+    """Analyze seller deals: paid-source calls + deferred comments."""
+    deals = state.get("raw_sellers_deals", [])
+    logger.info("Seller Deal Analyst: checking %d deals", len(deals))
+
+    if not deals:
+        return {"violations": []}
+
+    current_time = state.get("current_time", "")
+    rop_map = _build_rop_map()
+    all_violations = check_seller_deal_violations(deals, current_time, rop_map)
+    logger.info("Seller Deal Analyst: found %d seller deal violations", len(all_violations))
     return {"violations": all_violations}
 
 
@@ -642,6 +665,17 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
     audited_buyers = sum(
         1 for d in buyers_deals if d.get("audit_rule") is not None
     )
+    seller_violations = [v for v in violations if _is_seller_violation(v)]
+    seller_rule_counts = {
+        "seller_meeting_no_outgoing": 0,
+        "seller_meeting_not_advanced": 0,
+        "seller_deferred_no_comment": 0,
+        "seller_source_no_outgoing": 0,
+    }
+    for v in seller_violations:
+        rule = str(v.get("rule") or "")
+        if rule in seller_rule_counts:
+            seller_rule_counts[rule] += 1
     total_chunks = 0
 
     try:
@@ -670,6 +704,32 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
             )
             total_chunks += send_chat_message_chunked(settings.report_chat_id, summary)
 
+            # Сводка по правилам продавцов — только админу (личный чат).
+            seller_admin_summary = (
+                f"b24-ai-auditor v2 — воронка «Продавцы»\n"
+                f"Дата: {now}\n"
+                f"Открытых сделок продавцов: {seller_deals_count}\n"
+                f"Нарушений: {len(seller_violations)}\n"
+                f"seller_meeting_no_outgoing: "
+                f"{seller_rule_counts['seller_meeting_no_outgoing']}\n"
+                f"seller_meeting_not_advanced: "
+                f"{seller_rule_counts['seller_meeting_not_advanced']}\n"
+                f"seller_deferred_no_comment: "
+                f"{seller_rule_counts['seller_deferred_no_comment']}\n"
+                f"seller_source_no_outgoing: "
+                f"{seller_rule_counts['seller_source_no_outgoing']}"
+            )
+            try:
+                send_user_chat_message(
+                    settings.contact_source_lock_notify_user,
+                    seller_admin_summary,
+                )
+            except Exception:
+                logger.exception(
+                    "Dispatcher: failed to send seller summary to user %s",
+                    settings.contact_source_lock_notify_user,
+                )
+
             for dept_name in sorted(dept_groups):
                 dept_violations = _filter_zero_entity_violations(dept_groups[dept_name])
                 if not dept_violations:
@@ -680,7 +740,14 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
                     continue
 
                 lead_v = [v for v in dept_violations if v.get("entity_type") == "lead"]
-                deal_v = [v for v in dept_violations if v.get("entity_type") == "deal"]
+                buyer_deal_v = [
+                    v for v in dept_violations
+                    if v.get("entity_type") == "deal" and not _is_seller_violation(v)
+                ]
+                seller_deal_v = [
+                    v for v in dept_violations
+                    if v.get("entity_type") == "deal" and _is_seller_violation(v)
+                ]
 
                 dept_id = None
                 for v in dept_violations:
@@ -718,48 +785,69 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
                     ),
                     f"Всего нарушений: {len(dept_violations)}",
                     f"  Лиды: {len(lead_v)}",
-                    f"  Сделки: {len(deal_v)}",
+                    f"  Сделки покупателей: {len(buyer_deal_v)}",
+                    f"  Сделки продавцов: {len(seller_deal_v)}",
                     f"  ✅ Без нарушений: {len(clean_in_dept)}",
                     "",
                 ]
 
-                for v in dept_violations:
-                    sev = v.get("severity", "?")
-                    icon = {"very high": "🔴🔴", "high": "🔴", "medium": "🟡"}.get(
-                        sev,
-                        "⚪",
-                    )
-                    entity_type = str(v.get("entity_type", "?"))
-                    entity_id = _coerce_int(v.get("entity_id", 0))
-                    reason = humanize_violation_reason(
-                        v,
-                        buyers_deals=buyers_deals,
-                        sellers_deals=sellers_deals,
-                        leads=raw_leads,
-                    )
-                    link = _build_crm_link(entity_type, entity_id)
-                    uid = _coerce_int(v.get("responsible_id", 0))
-                    user_display = user_map.get(uid, f"ID:{uid}")
-                    name_only = (
-                        user_display.split(" (")[0]
-                        if " (" in user_display
-                        else user_display
-                    )
-                    etype_label = "Лид" if entity_type == "lead" else "Сделка"
-                    days_info = ""
-                    details = v.get("details", {})
-                    if isinstance(details, dict):
-                        days = details.get("days_on_stage") or details.get(
-                            "days_since_last_comment",
+                def _append_violation_lines(
+                    items: list[dict[str, Any]],
+                    *,
+                    seller: bool,
+                ) -> None:
+                    for v in items:
+                        sev = str(v.get("severity", "?"))
+                        icon = _severity_icon(sev, seller=seller)
+                        entity_type = str(v.get("entity_type", "?"))
+                        entity_id = _coerce_int(v.get("entity_id", 0))
+                        reason = humanize_violation_reason(
+                            v,
+                            buyers_deals=buyers_deals,
+                            sellers_deals=sellers_deals,
+                            leads=raw_leads,
                         )
-                        if days is not None and days != "" and days < 999:
-                            days_info = f" ({days} дн.)"
+                        link = _build_crm_link(entity_type, entity_id)
+                        uid = _coerce_int(v.get("responsible_id", 0))
+                        user_display = user_map.get(uid, f"ID:{uid}")
+                        name_only = (
+                            user_display.split(" (")[0]
+                            if " (" in user_display
+                            else user_display
+                        )
+                        etype_label = "Лид" if entity_type == "lead" else "Сделка"
+                        days_info = ""
+                        details = v.get("details", {})
+                        if isinstance(details, dict):
+                            days = details.get("days_on_stage") or details.get(
+                                "days_since_last_comment",
+                            )
+                            if days is not None and days != "" and days < 999:
+                                days_info = f" ({days} дн.)"
 
-                    lines.append(
-                        f"{icon} {etype_label} #{entity_id} | {name_only} | "
-                        f"{reason}{days_info}",
+                        lines.append(
+                            f"{icon} {etype_label} #{entity_id} | {name_only} | "
+                            f"{reason}{days_info}",
+                        )
+                        if seller:
+                            action = seller_violation_action(v)
+                            if action:
+                                lines.append(f"   → {action}")
+                        lines.append(f"   {link}")
+
+                lead_and_buyer = [
+                    v for v in dept_violations
+                    if v.get("entity_type") == "lead" or (
+                        v.get("entity_type") == "deal" and not _is_seller_violation(v)
                     )
-                    lines.append(f"   {link}")
+                ]
+                _append_violation_lines(lead_and_buyer, seller=False)
+
+                if seller_deal_v:
+                    if lead_and_buyer:
+                        lines.append("")
+                    lines.append("— Сделки продавцов —")
+                    _append_violation_lines(seller_deal_v, seller=True)
 
                 call_violations = [
                     v for v in dept_violations
@@ -846,7 +934,7 @@ async def merge_node(state: AuditState) -> AuditState:
 
 
 def build_graph_v2(settings: Settings):
-    """Build v2 audit graph: 3 collectors → 4 analysts → merge → dispatcher."""
+    """Build v2 audit graph: 3 collectors → analysts → merge → dispatcher."""
     graph = StateGraph(AuditState)
 
     graph.add_node("lead_collector", partial(lead_collector, settings=settings))
@@ -854,6 +942,7 @@ def build_graph_v2(settings: Settings):
     graph.add_node("seller_collector", partial(seller_collector, settings=settings))
     graph.add_node("lead_analyst", partial(lead_analyst, settings=settings))
     graph.add_node("buyer_deal_analyst", partial(buyer_deal_analyst, settings=settings))
+    graph.add_node("seller_deal_analyst", partial(seller_deal_analyst, settings=settings))
     graph.add_node("buyer_calls_controller", partial(buyer_calls_controller, settings=settings))
     graph.add_node("missed_calls_controller", partial(missed_calls_controller, settings=settings))
     graph.add_node("report_dispatcher", partial(report_dispatcher, settings=settings))
@@ -869,9 +958,11 @@ def build_graph_v2(settings: Settings):
     graph.add_edge("buyer_collector", "buyer_deal_analyst")
     graph.add_edge("buyer_deal_analyst", "buyer_calls_controller")
 
+    graph.add_edge("seller_collector", "seller_deal_analyst")
+
     graph.add_edge("missed_calls_controller", "merge")
     graph.add_edge("buyer_calls_controller", "merge")
-    graph.add_edge("seller_collector", "merge")
+    graph.add_edge("seller_deal_analyst", "merge")
 
     graph.add_edge("merge", "report_dispatcher")
     graph.add_edge("report_dispatcher", END)

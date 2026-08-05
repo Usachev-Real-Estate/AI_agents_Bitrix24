@@ -58,6 +58,43 @@ BUYERS_STAGE_NAMES: dict[str, str] = {
     "C18:UC_2ZBA0G": "Агент",
 }
 
+# Воронка «Продавцы» (category_id=0): платные источники КЦ/Диспозл
+SELLERS_PAID_SOURCE_IDS = frozenset({"24", "25", "26"})
+SELLERS_PAID_SOURCE_NAMES: dict[str, str] = {
+    "24": "КЦ - 5%",
+    "25": "Диспозл 10%",
+    "26": "Диспозл 5%",
+}
+SELLER_STAGE_NEW = "NEW"  # Назначение встречи
+SELLER_STAGE_DEFERRED = "LOSE"  # Отложенная продажа
+SELLERS_STAGE_NAMES: dict[str, str] = {
+    "NEW": "Назначение встречи",
+    "FINAL_INVOICE": "Подготовка объекта в рекламу",
+    "UC_A94BGF": "Закрытая продажа (На сайт)",
+    "UC_FADPBF": "Поиск клиента",
+    "WON": "Договор закрыт",
+    "LOSE": "Отложенная продажа",
+    "APOLOGY": "Сделка проиграна",
+}
+SELLER_MEETING_GRACE_HOURS = 24
+
+# Что сделать — текст рядом с нарушением в отчёте отдела
+SELLER_RULE_ACTIONS: dict[str, str] = {
+    "seller_meeting_no_outgoing": (
+        "Сделать исходящий звонок с рабочего номера телефона "
+        "и перенести сделку на другой этап"
+    ),
+    "seller_meeting_not_advanced": (
+        "Сделать исходящий звонок с рабочего номера телефона "
+        "и перенести сделку на другой этап"
+    ),
+    "seller_source_no_outgoing": (
+        "Сделать исходящий звонок с рабочего номера телефона "
+        "и перенести сделку на другой этап"
+    ),
+    "seller_deferred_no_comment": "Добавить комментарий в карточку сделки",
+}
+
 # Стадии лидов (ENTITY_ID=STATUS), портал b24-po7frr
 LEAD_STATUS_NEW = "NEW"
 LEAD_STATUS_CONVERTED = "CONVERTED"  # «Квалифицирован»
@@ -449,7 +486,7 @@ def _violation(
     details: dict[str, Any],
     severity: str = "medium",
 ) -> dict[str, Any]:
-    """Build a buyer deal violation record."""
+    """Build a deal violation record (buyers or sellers)."""
     return {
         "entity_type": "deal",
         "entity_id": _coerce_int(deal.get("deal_id")),
@@ -459,6 +496,193 @@ def _violation(
         "reason": reason,
         "details": details,
     }
+
+
+def _is_seller_violation(violation: dict[str, Any]) -> bool:
+    """Return True if violation belongs to sellers funnel audit."""
+    rule = str(violation.get("rule") or "")
+    if rule.startswith("seller_"):
+        return True
+    details = violation.get("details")
+    if isinstance(details, dict) and details.get("funnel") == "sellers":
+        return True
+    return False
+
+
+def seller_violation_action(violation: dict[str, Any]) -> str:
+    """Return «что сделать» text for a seller violation (empty if unknown)."""
+    rule = str(violation.get("rule") or "").strip()
+    return SELLER_RULE_ACTIONS.get(rule, "")
+
+
+def _severity_icon(severity: str, *, seller: bool = False) -> str:
+    """Map severity to report icon; sellers use blue circles."""
+    if seller:
+        return {
+            "very high": "🔵🔵",
+            "high": "🔵",
+            "medium": "🟦",
+        }.get(severity, "⚪")
+    return {
+        "very high": "🔴🔴",
+        "high": "🔴",
+        "medium": "🟡",
+    }.get(severity, "⚪")
+
+
+def _deal_has_outgoing_call(deal: dict[str, Any]) -> bool:
+    """True if deal.calls contains at least one outgoing call."""
+    for call in deal.get("calls") or []:
+        if isinstance(call, dict) and call.get("call_type") == "outgoing":
+            return True
+    return False
+
+
+def _hours_since_create(deal: dict[str, Any], now: datetime) -> float:
+    """Hours since deal date_create (0 if unknown)."""
+    created = _parse_datetime(deal.get("date_create"))
+    if created is None:
+        return 0.0
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    return max(0.0, (now - created).total_seconds() / 3600.0)
+
+
+def _filter_calls_for_deal(
+    calls: list[dict[str, Any]],
+    deal_id: int,
+) -> list[dict[str, Any]]:
+    """Keep only calls linked to the given deal."""
+    if deal_id <= 0:
+        return []
+    linked: list[dict[str, Any]] = []
+    for call in calls:
+        if not isinstance(call, dict):
+            continue
+        etype = str(call.get("crm_entity_type") or "").upper()
+        eid = _coerce_int(call.get("crm_entity_id"))
+        if etype in {"DEAL", "2"} and eid == deal_id:
+            linked.append(call)
+    return linked
+
+
+def check_seller_deal_violations(
+    deals: list[dict[str, Any]],
+    current_time: str,
+    rop_map: dict[int, int] | None = None,
+    broker_dept_map: dict[int, int] | None = None,
+) -> list[dict[str, Any]]:
+    """Deterministic audit of seller-funnel deals (paid sources + deferred).
+
+    Rules:
+    - seller_meeting_no_outgoing: NEW + paid + >24h + no outgoing
+    - seller_meeting_not_advanced: NEW + paid + has outgoing (still on NEW)
+    - seller_deferred_no_comment: LOSE without broker/ROP comment
+    - seller_source_no_outgoing: paid + >24h + no outgoing (non-NEW stages)
+    """
+    now = _parse_datetime(current_time) or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    violations: list[dict[str, Any]] = []
+
+    if rop_map is None:
+        rop_map = _build_rop_map()
+    if broker_dept_map is None:
+        broker_ids = {
+            _coerce_int(deal.get("assigned_by_id"))
+            for deal in deals
+            if _coerce_int(deal.get("assigned_by_id"))
+        }
+        broker_dept_map = _build_broker_dept_map(broker_ids)
+
+    for deal in deals:
+        stage_id = _clean_str(deal.get("stage_id"))
+        source_id = _clean_str(deal.get("source_id"))
+        raw_stage_name = str(deal.get("stage_name") or "").strip()
+        stage_name = (
+            SELLERS_STAGE_NAMES.get(stage_id)
+            or (raw_stage_name if raw_stage_name and raw_stage_name != stage_id else "")
+            or stage_id
+            or "—"
+        )
+        source_name = SELLERS_PAID_SOURCE_NAMES.get(source_id, source_id or "—")
+        assigned_by_id = _coerce_int(deal.get("assigned_by_id"))
+        allowed_authors = _allowed_comment_authors(
+            assigned_by_id, broker_dept_map, rop_map,
+        )
+        hours = round(_hours_since_create(deal, now), 2)
+        has_outgoing = _deal_has_outgoing_call(deal)
+        is_paid = source_id in SELLERS_PAID_SOURCE_IDS
+        base_details: dict[str, Any] = {
+            "deal_id": _coerce_int(deal.get("deal_id")),
+            "title": str(deal.get("title") or ""),
+            "stage_id": stage_id,
+            "stage_name": stage_name,
+            "source_id": source_id,
+            "source_name": source_name,
+            "funnel": "sellers",
+            "category_id": _coerce_int(deal.get("category_id")),
+            "hours_since_creation": hours,
+            "has_outgoing_call": has_outgoing,
+        }
+
+        if stage_id == SELLER_STAGE_DEFERRED:
+            days_since = _days_since_last_comment_by_authors(
+                deal.get("timeline") or [], now, allowed_authors,
+            )
+            if days_since >= 999:
+                violations.append(_violation(
+                    deal,
+                    "seller_deferred_no_comment",
+                    (
+                        f"На этапе «{stage_name}» нет комментария "
+                        "ответственного или РОПа."
+                    ),
+                    {**base_details, "days_since_last_comment": days_since},
+                    severity="medium",
+                ))
+
+        if not is_paid:
+            continue
+
+        if stage_id == SELLER_STAGE_NEW:
+            if has_outgoing:
+                violations.append(_violation(
+                    deal,
+                    "seller_meeting_not_advanced",
+                    (
+                        f"На этапе «{stage_name}» уже был исходящий звонок — "
+                        "сделку нужно перевести дальше."
+                    ),
+                    base_details,
+                    severity="high",
+                ))
+            elif hours > SELLER_MEETING_GRACE_HOURS:
+                violations.append(_violation(
+                    deal,
+                    "seller_meeting_no_outgoing",
+                    (
+                        f"Сделка на этапе «{stage_name}» более "
+                        f"{SELLER_MEETING_GRACE_HOURS} ч без исходящего звонка."
+                    ),
+                    base_details,
+                    severity="high",
+                ))
+            continue
+
+        if hours > SELLER_MEETING_GRACE_HOURS and not has_outgoing:
+            violations.append(_violation(
+                deal,
+                "seller_source_no_outgoing",
+                (
+                    f"На этапе «{stage_name}» нет исходящего звонка брокера "
+                    f"(более {SELLER_MEETING_GRACE_HOURS} ч)."
+                ),
+                base_details,
+                severity="high",
+            ))
+
+    return violations
 
 
 def check_missed_callback_violations(
@@ -1024,6 +1248,12 @@ def _fetch_user_calls_for_audit(
                         "start_date": str(record.get("CALL_START_DATE") or ""),
                         "status": status,
                         "call_type": call_type,
+                        "crm_entity_type": str(
+                            record.get("CRM_ENTITY_TYPE") or "",
+                        ),
+                        "crm_entity_id": _coerce_int(
+                            record.get("CRM_ENTITY_ID"),
+                        ),
                     }
                 )
             return calls
@@ -1051,6 +1281,8 @@ def _fetch_user_calls_for_audit(
                     "COMPLETED",
                     "RESULT_CODE",
                     "RESULT_SUMMARY",
+                    "OWNER_TYPE_ID",
+                    "OWNER_ID",
                 ],
             },
         )
@@ -1095,6 +1327,17 @@ def _fetch_user_calls_for_audit(
                 else:
                     status = "success" if completed == "Y" else "other"
 
+                owner_type = _coerce_int(item.get("OWNER_TYPE_ID"))
+                owner_id = _coerce_int(item.get("OWNER_ID"))
+                crm_entity_type = ""
+                crm_entity_id = 0
+                if owner_type == 2 and owner_id > 0:
+                    crm_entity_type = "DEAL"
+                    crm_entity_id = owner_id
+                elif owner_type == 1 and owner_id > 0:
+                    crm_entity_type = "LEAD"
+                    crm_entity_id = owner_id
+
                 calls.append(
                     {
                         "call_id": str(item.get("ID") or ""),
@@ -1106,6 +1349,8 @@ def _fetch_user_calls_for_audit(
                         "description": (str(item.get("DESCRIPTION") or ""))[:80],
                         "completed": completed[:1] or "?",
                         "result_code": str(item.get("RESULT_CODE") or ""),
+                        "crm_entity_type": crm_entity_type,
+                        "crm_entity_id": crm_entity_id,
                     }
                 )
             missed_count = sum(1 for c in calls if c.get("status") == "missed")
@@ -1322,12 +1567,14 @@ def get_deals_by_funnel_with_timeline(category_id: int) -> dict[str, Any]:
                     "DATE_CREATE",
                     "OPPORTUNITY",
                     "CATEGORY_ID",
+                    "SOURCE_ID",
                     *DEAL_AUDIT_UF_FIELD_CODES,
                 ],
             },
         )
         deals = deals_raw if isinstance(deals_raw, list) else _as_list(deals_raw)
         stage_names = _fetch_funnel_stage_names(category_id)
+        is_sellers = category_id == settings.sellers_category_id
         deal_records: dict[int, dict[str, Any]] = {}
         for deal in deals:
             if not isinstance(deal, dict):
@@ -1350,6 +1597,7 @@ def get_deals_by_funnel_with_timeline(category_id: int) -> dict[str, Any]:
                 "date_create": _clean_str(deal.get("DATE_CREATE")),
                 "opportunity": _coerce_float(deal.get("OPPORTUNITY")),
                 "category_id": category_id,
+                "source_id": _clean_str(deal.get("SOURCE_ID")),
                 "timeline": [],
                 "calls": [],
                 "uf_fields": _build_deal_uf_fields(deal),
@@ -1426,7 +1674,13 @@ def get_deals_by_funnel_with_timeline(category_id: int) -> dict[str, Any]:
                     )
                 except Exception:
                     calls_cache[assigned_id] = []
-            record["calls"] = calls_cache[assigned_id]
+            user_calls = calls_cache[assigned_id]
+            # Sellers audit needs deal-linked calls; buyers keep broker-wide list
+            # for missed-callback logic (existing behavior).
+            if is_sellers:
+                record["calls"] = _filter_calls_for_deal(user_calls, did)
+            else:
+                record["calls"] = user_calls
 
             if assigned_id not in responsible_activities_cache:
                 try:

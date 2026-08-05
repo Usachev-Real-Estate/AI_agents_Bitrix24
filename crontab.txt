@@ -25,3 +25,6 @@
 
 # 8. Запрет смены «Источник» у сделок «Продавцы» брокерами/РОПами: каждые 5 минут
 */5 * * * * cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/deal_source_lock.py >> logs/cron.log 2>&1
+
+# 9. «Базовая ставка» в сделках «Покупатели»: автозаполнение + откат брокеров/РОПов: каждые 5 минут
+*/5 * * * * cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/buyer_base_rate_lock.py >> logs/cron.log 2>&1

@@ -146,6 +146,15 @@ class Settings(BaseSettings):
         default=True,
         validation_alias="DEAL_SOURCE_LOCK_ENABLED",
     )
+    # Buyer funnel: auto-fill «Базовая ставка» + revert broker/ROP changes.
+    buyer_base_rate_lock_enabled: bool = Field(
+        default=True,
+        validation_alias="BUYER_BASE_RATE_LOCK_ENABLED",
+    )
+    buyer_base_rate_csv: str = Field(
+        default="data/Мотивация брокеров 3 кв 2026 - Мотивация брокеров 3 кв 2026.csv",
+        validation_alias="BUYER_BASE_RATE_CSV",
+    )
 
     @property
     def rules_advice(self) -> dict[str, str]:
