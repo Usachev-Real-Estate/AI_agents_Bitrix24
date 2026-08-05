@@ -566,6 +566,21 @@ def _filter_calls_for_deal(
     return linked
 
 
+def _has_comment_by_authors(
+    timeline: list[dict[str, Any]],
+    allowed_author_ids: set[int],
+) -> bool:
+    """True when timeline has a non-empty comment from an allowed author."""
+    for item in timeline:
+        if not isinstance(item, dict):
+            continue
+        if _coerce_int(item.get("author_id")) not in allowed_author_ids:
+            continue
+        if str(item.get("comment") or "").strip():
+            return True
+    return False
+
+
 def check_seller_deal_violations(
     deals: list[dict[str, Any]],
     current_time: str,
@@ -575,10 +590,10 @@ def check_seller_deal_violations(
     """Deterministic audit of seller-funnel deals (paid sources + deferred).
 
     Rules:
-    - seller_meeting_no_outgoing: NEW + paid + >24h + no outgoing
+    - seller_meeting_no_outgoing: NEW + paid + >24h + no outgoing + no comment
     - seller_meeting_not_advanced: NEW + paid + has outgoing (still on NEW)
     - seller_deferred_no_comment: LOSE without broker/ROP comment
-    - seller_source_no_outgoing: paid + >24h + no outgoing (non-NEW stages)
+    - seller_source_no_outgoing: paid + >24h + no outgoing + no comment (non-NEW)
     """
     now = _parse_datetime(current_time) or datetime.now(timezone.utc)
     if now.tzinfo is None:
@@ -612,6 +627,9 @@ def check_seller_deal_violations(
         )
         hours = round(_hours_since_create(deal, now), 2)
         has_outgoing = _deal_has_outgoing_call(deal)
+        has_comment = _has_comment_by_authors(
+            deal.get("timeline") or [], allowed_authors,
+        )
         is_paid = source_id in SELLERS_PAID_SOURCE_IDS
         base_details: dict[str, Any] = {
             "deal_id": _coerce_int(deal.get("deal_id")),
@@ -624,6 +642,7 @@ def check_seller_deal_violations(
             "category_id": _coerce_int(deal.get("category_id")),
             "hours_since_creation": hours,
             "has_outgoing_call": has_outgoing,
+            "has_broker_or_rop_comment": has_comment,
         }
 
         if stage_id == SELLER_STAGE_DEFERRED:
@@ -657,7 +676,7 @@ def check_seller_deal_violations(
                     base_details,
                     severity="high",
                 ))
-            elif hours > SELLER_MEETING_GRACE_HOURS:
+            elif hours > SELLER_MEETING_GRACE_HOURS and not has_comment:
                 violations.append(_violation(
                     deal,
                     "seller_meeting_no_outgoing",
@@ -670,7 +689,11 @@ def check_seller_deal_violations(
                 ))
             continue
 
-        if hours > SELLER_MEETING_GRACE_HOURS and not has_outgoing:
+        if (
+            hours > SELLER_MEETING_GRACE_HOURS
+            and not has_outgoing
+            and not has_comment
+        ):
             violations.append(_violation(
                 deal,
                 "seller_source_no_outgoing",

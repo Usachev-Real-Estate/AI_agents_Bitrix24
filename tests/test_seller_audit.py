@@ -54,6 +54,23 @@ def test_meeting_no_outgoing_after_24h():
     assert "КЦ" not in violations[0]["reason"]
 
 
+def test_meeting_no_outgoing_skipped_when_comment_exists():
+    deal = _deal(
+        calls=[],
+        timeline=[
+            {
+                "author_id": 100,
+                "comment": "Договорились созвониться завтра",
+                "created": "2026-07-30T10:00:00+00:00",
+            },
+        ],
+    )
+    violations = check_seller_deal_violations(
+        [deal], CURRENT, rop_map={}, broker_dept_map={100: 1},
+    )
+    assert violations == []
+
+
 def test_meeting_grace_under_24h():
     deal = _deal(date_create="2026-07-31T10:00:00+00:00", calls=[])
     violations = check_seller_deal_violations(
@@ -119,6 +136,26 @@ def test_source_no_outgoing_other_stage():
     assert violations[0]["rule"] == "seller_source_no_outgoing"
     assert "Поиск клиента" in violations[0]["reason"]
     assert "источник" not in violations[0]["reason"].lower()
+
+
+def test_source_no_outgoing_skipped_when_comment_exists():
+    deal = _deal(
+        stage_id="UC_FADPBF",
+        stage_name="Поиск клиента",
+        source_id="26",
+        calls=[],
+        timeline=[
+            {
+                "author_id": 100,
+                "comment": "Клиент просил перезвонить",
+                "created": "2026-07-30T12:00:00+00:00",
+            },
+        ],
+    )
+    violations = check_seller_deal_violations(
+        [deal], CURRENT, rop_map={}, broker_dept_map={100: 1},
+    )
+    assert violations == []
 
 
 def test_non_paid_source_skips_call_rules():
