@@ -157,6 +157,25 @@ def init_db() -> None:
             updated_at TEXT NOT NULL
         );
         """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS buyer_commission_notifications (
+            deal_id INTEGER NOT NULL,
+            recipient_role TEXT NOT NULL,
+            recipient_user_id INTEGER NOT NULL,
+            notified_at TEXT NOT NULL,
+            PRIMARY KEY (deal_id, recipient_role)
+        );
+        """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS buyer_commission_enforcements (
+            deal_id INTEGER NOT NULL,
+            enforce_date TEXT NOT NULL,
+            previous_assigned_by_id INTEGER NOT NULL DEFAULT 0,
+            new_assigned_by_id INTEGER NOT NULL DEFAULT 0,
+            enforced_at TEXT NOT NULL,
+            PRIMARY KEY (deal_id, enforce_date)
+        );
+        """)
 
 
 def _migrate_exclusive_expiry_notifications(conn: sqlite3.Connection) -> None:
@@ -665,4 +684,84 @@ def upsert_deal_base_rate_snapshot(
                 updated_at = excluded.updated_at
             """,
             (deal_id, base_rate or "", updated_at),
+        )
+
+
+def get_buyer_commission_notified_at(
+    deal_id: int,
+    recipient_role: str,
+) -> str | None:
+    """Return last notification timestamp for deal+role, or None."""
+    init_db()
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT notified_at FROM buyer_commission_notifications
+            WHERE deal_id = ? AND recipient_role = ?
+            """,
+            (deal_id, recipient_role),
+        ).fetchone()
+        return None if row is None else str(row[0] or "")
+
+
+def mark_buyer_commission_notified(
+    deal_id: int,
+    recipient_role: str,
+    recipient_user_id: int,
+    notified_at: str,
+) -> None:
+    """Upsert last commission-reminder notification for deal+role."""
+    init_db()
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO buyer_commission_notifications (
+                deal_id, recipient_role, recipient_user_id, notified_at
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(deal_id, recipient_role) DO UPDATE SET
+                recipient_user_id = excluded.recipient_user_id,
+                notified_at = excluded.notified_at
+            """,
+            (deal_id, recipient_role, recipient_user_id, notified_at),
+        )
+
+
+def was_buyer_commission_enforced(deal_id: int, enforce_date: str) -> bool:
+    """Return True if deal was already moved to pool on enforce_date."""
+    init_db()
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT 1 FROM buyer_commission_enforcements
+            WHERE deal_id = ? AND enforce_date = ?
+            """,
+            (deal_id, enforce_date),
+        ).fetchone()
+        return row is not None
+
+
+def mark_buyer_commission_enforced(
+    deal_id: int,
+    enforce_date: str,
+    previous_assigned_by_id: int,
+    new_assigned_by_id: int,
+    enforced_at: str,
+) -> None:
+    """Persist that a deal was moved to the shared pool on enforce_date."""
+    init_db()
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO buyer_commission_enforcements (
+                deal_id, enforce_date, previous_assigned_by_id,
+                new_assigned_by_id, enforced_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                deal_id,
+                enforce_date,
+                previous_assigned_by_id,
+                new_assigned_by_id,
+                enforced_at,
+            ),
         )

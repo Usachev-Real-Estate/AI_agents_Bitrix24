@@ -155,6 +155,39 @@ class Settings(BaseSettings):
         default="data/Мотивация брокеров 3 кв 2026 - Мотивация брокеров 3 кв 2026.csv",
         validation_alias="BUYER_BASE_RATE_CSV",
     )
+    # Buyer funnel: remind to fill OPPORTUNITY (Комиссия), then move to pool.
+    buyer_commission_reminder_enabled: bool = Field(
+        default=True,
+        validation_alias="BUYER_COMMISSION_REMINDER_ENABLED",
+    )
+    buyer_commission_broker_interval_hours: float = Field(
+        default=2.0,
+        validation_alias="BUYER_COMMISSION_BROKER_INTERVAL_HOURS",
+    )
+    buyer_commission_rop_interval_hours: float = Field(
+        default=1.0,
+        validation_alias="BUYER_COMMISSION_ROP_INTERVAL_HOURS",
+    )
+    buyer_commission_deadline_hour: int = Field(
+        default=19,
+        validation_alias="BUYER_COMMISSION_DEADLINE_HOUR",
+    )
+    buyer_commission_remind_start_hour: int = Field(
+        default=9,
+        validation_alias="BUYER_COMMISSION_REMIND_START_HOUR",
+    )
+    buyer_commission_pool_user_id: int = Field(
+        default=1,
+        validation_alias="BUYER_COMMISSION_POOL_USER_ID",
+    )
+    buyer_commission_enforce_enabled: bool = Field(
+        default=True,
+        validation_alias="BUYER_COMMISSION_ENFORCE_ENABLED",
+    )
+    buyer_commission_timezone: str = Field(
+        default="Europe/Moscow",
+        validation_alias="BUYER_COMMISSION_TIMEZONE",
+    )
 
     @property
     def rules_advice(self) -> dict[str, str]:

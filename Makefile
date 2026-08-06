@@ -50,6 +50,9 @@ deal-source-lock:
 buyer-base-rate-lock:
 	$(PYTHON) src/buyer_base_rate_lock.py
 
+buyer-commission-reminder:
+	$(PYTHON) src/buyer_commission_reminder.py
+
 import-kc-owners:
 	$(PYTHON) scripts/import_kc_owners.py
 

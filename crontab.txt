@@ -28,3 +28,7 @@
 
 # 9. «Базовая ставка» в сделках «Покупатели»: автозаполнение + откат брокеров/РОПов: каждые 5 минут
 */5 * * * * cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/buyer_base_rate_lock.py >> logs/cron.log 2>&1
+
+# 10. «Комиссия» (OPPORTUNITY) в сделках «Покупатели»: напоминания брокерам/РОПам (9–18 МСК) + перенос в общую базу в 19:00 МСК
+#     UTC 6–16 = МСК 9–19; в 19:00 МСК скрипт переназначает сделки на BUYER_COMMISSION_POOL_USER_ID
+0 6-16 * * 1-5 cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/buyer_commission_reminder.py >> logs/cron.log 2>&1
