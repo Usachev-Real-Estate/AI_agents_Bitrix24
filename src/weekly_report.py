@@ -10,9 +10,16 @@ _SRC_DIR = Path(__file__).resolve().parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
-from db import get_weekly_stats, init_db, purge_test_violations
+from db import get_previous_rating_snapshot, get_weekly_stats, init_db, purge_test_violations
 from notify import send_chat_message_chunked, _bx_call_sync
 from config import get_settings
+from broker_rating import (
+    compute_all_ratings,
+    format_rating_leaderboard,
+    get_rating_period,
+    persist_ratings_snapshot,
+)
+from broker_rating_collectors import fetch_all_broker_tasks, fetch_important_feed_posts
 
 logger = logging.getLogger(__name__)
 EXCLUDED_WEEKLY_DEPARTMENTS = {"ТО"}
@@ -74,15 +81,78 @@ def _get_rule_advice() -> dict[str, str]:
             "lead_missed_callback": "не пропускать входящие звонки по лидам без обратного",
             "buyer_stage_1": "не задерживать сделки на этапе «Первый контакт» более 1 дня (стадия снята)",
             "buyer_stage_2": "не держать сделки на этапе «Подбор» более 2 дней без комментария",
-            "buyer_stage_3": "на этапе «Показ» обязательно держать актуальное запланированное дело и будущую дату показа, иначе переносить сделку дальше",
-            "buyer_stage_4": "не забывать комментировать сделки на этапах Переговоры / Дожим / Офер / Задаток / Сделка",
-            "buyer_stage_5": "регулярно комментировать сделки в «Отложенном спросе»",
+            "buyer_stage_3": "на «Первый показ» и «Повторный показ» — живое дело с датой не дальше 14 дней от этапа",
+            "buyer_stage_4": "устаревшее правило (стадии Переговоры/Дожим сняты с аудита)",
+            "buyer_stage_5": "на этапе «Отложенный спрос» держать запланированное дело в карточке сделки",
+            "buyer_podbor_stale": "не держать сделки на этапе «Подбор» более 7 дней",
+            "buyer_ofer_comment": "на этапе «Офер» оставлять развёрнутый комментарий (от 30 символов)",
+            "buyer_lost_no_reason": "на «Сделка проиграна» нужен комментарий брокера/РОПа или дело",
+            "buyer_agent_no_comment": "при переводе в «Агент» оставлять комментарий",
             "buyer_missed_callback": "не пропускать входящие звонки по сделкам без обратного",
+            "lead_new_over_24h": "квалифицировать лид «Новый» за 24 часа, иначе он уйдёт в «Общие лиды»",
+            "seller_stage_stale": "на этапах воронки Продавцы оставлять комментарий (на «Подготовке в рекламу» — комментарий или дело) в срок регламента",
+            "seller_deferred_no_activity": "на этапе «Отложенная продажа» держать запланированное дело",
+            "seller_negotiations_max": "не держать сделки на «Переговорах» более 14 дней",
+            "seller_lost_no_reason": "на «Сделка проиграна» нужен комментарий брокера/РОПа или дело",
+            "seller_afina_id_missing": "на «Закрытая продажа» и «Поиск клиента» заполнять ID Афины",
+            "general_base_no_plan": "в «Общей базе» за 2 дня после переноса запланировать дело или написать комментарий с планом дальнейших действий",
         }
     return advice
 
 
-def format_weekly_report(violators: list[dict], clean: list[dict], week_start: str, now: datetime, dept_name: str = None, prev_total_violations: int = 0) -> str:
+def build_rating_section(
+    dept_name: str | None = None,
+    dept_id: int | None = None,
+    full_list: bool = True,
+) -> tuple[str, list]:
+    """Build rating leaderboard text and ratings list."""
+    from broker_rating_collectors import list_eligible_brokers_for_rating
+
+    since_iso, until_iso, since_dt, until_dt = get_rating_period()
+    settings = get_settings()
+    important_posts = fetch_important_feed_posts(since_iso, settings)
+    brokers = list_eligible_brokers_for_rating(settings)
+    if dept_id is not None:
+        brokers = [b for b in brokers if b.get("department_id") == dept_id]
+    elif dept_name:
+        brokers = [
+            b for b in brokers
+            if dept_name.lower() in (b.get("department") or "").lower()
+        ]
+
+    broker_ids = [int(b["responsible_id"]) for b in brokers]
+    tasks_by_broker = fetch_all_broker_tasks(broker_ids) if broker_ids else {}
+
+    ratings = compute_all_ratings(
+        since_iso,
+        until_iso,
+        brokers=brokers,
+        tasks_by_broker=tasks_by_broker,
+        important_posts=important_posts,
+        settings=settings,
+    )
+
+    prev = get_previous_rating_snapshot(until_dt.strftime("%Y-%m-%d"))
+    text = format_rating_leaderboard(
+        ratings,
+        since_dt,
+        until_dt,
+        prev_scores=prev,
+        dept_name=dept_name,
+        full_list=full_list,
+    )
+    return text, ratings
+
+
+def format_weekly_report(
+    violators: list[dict],
+    clean: list[dict],
+    week_start: str,
+    now: datetime,
+    dept_name: str = None,
+    prev_total_violations: int = 0,
+    rating_section: str | None = None,
+) -> str:
     """Format the weekly report message."""
     start_date = datetime.fromisoformat(week_start).strftime("%d.%m.%Y")
     end_date = now.strftime("%d.%m.%Y")
@@ -95,11 +165,22 @@ def format_weekly_report(violators: list[dict], clean: list[dict], week_start: s
         title,
         f"Отчёт сформирован с начала недели (с {start_date} по {end_date})",
         "",
+    ]
+
+    if rating_section:
+        lines.extend([
+            rating_section,
+            "",
+            "═══════════════════════════════",
+            "",
+        ])
+
+    lines.extend([
         "═══════════════════════════════",
         f"🔴 БРОКЕРЫ С НАРУШЕНИЯМИ ({len(violators)})",
         "═══════════════════════════════",
         ""
-    ]
+    ])
 
     total_violations = 0
     for i, v in enumerate(violators, 1):
@@ -207,10 +288,16 @@ def main():
     prev_violators, _ = filter_weekly_scope(prev_violators, [])
     prev_total = sum(v['total_violations'] for v in prev_violators)
 
+    rating_text, all_ratings = build_rating_section()
+    snapshot_date = now.strftime("%Y-%m-%d")
+    if all_ratings:
+        persist_ratings_snapshot(all_ratings, snapshot_date)
+
     # 1. Main report (all departments)
     main_report = format_weekly_report(
         violators, clean, week_start, now,
         prev_total_violations=prev_total,
+        rating_section=rating_text,
     )
     print("Generated MAIN report:")
     print(main_report)
@@ -255,9 +342,12 @@ def main():
         dept_prev_violators = [v for v in prev_violators if v.get("department_id") == dept_id]
         dept_prev_total = sum(v['total_violations'] for v in dept_prev_violators)
 
+        dept_rating_text, _ = build_rating_section(dept_name=dept_name, dept_id=dept_id)
+
         dept_report = format_weekly_report(
             dept_violators, dept_clean, week_start, now, dept_name=dept_name,
             prev_total_violations=dept_prev_total,
+            rating_section=dept_rating_text,
         )
         print(f"Generated report for DEPT {dept_name} (chat {chat_id}):")
         print(dept_report)

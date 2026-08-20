@@ -49,6 +49,7 @@ def test_select_empty_commission_deals_filters_pool_and_filled() -> None:
             "ID": 1,
             "TITLE": "A",
             "STAGE_ID": "C18:NEW",
+            "CATEGORY_ID": 18,
             "ASSIGNED_BY_ID": 10,
             "OPPORTUNITY": "0",
         },
@@ -56,6 +57,7 @@ def test_select_empty_commission_deals_filters_pool_and_filled() -> None:
             "ID": 2,
             "TITLE": "B",
             "STAGE_ID": "C18:NEW",
+            "CATEGORY_ID": 18,
             "ASSIGNED_BY_ID": 10,
             "OPPORTUNITY": "500000",
         },
@@ -63,8 +65,25 @@ def test_select_empty_commission_deals_filters_pool_and_filled() -> None:
             "ID": 3,
             "TITLE": "C",
             "STAGE_ID": "C18:NEW",
+            "CATEGORY_ID": 18,
             "ASSIGNED_BY_ID": 1,
             "OPPORTUNITY": None,
+        },
+        {
+            "ID": 4,
+            "TITLE": "Общая база",
+            "STAGE_ID": "C26:NEW",
+            "CATEGORY_ID": 26,
+            "ASSIGNED_BY_ID": 10,
+            "OPPORTUNITY": None,
+        },
+        {
+            "ID": 5,
+            "TITLE": "C26 stage leak",
+            "STAGE_ID": "C26:PREPARATION",
+            "CATEGORY_ID": 18,
+            "ASSIGNED_BY_ID": 10,
+            "OPPORTUNITY": "0",
         },
     ]
     selected = select_empty_commission_deals(deals, pool_user_id=1)
@@ -92,7 +111,8 @@ def test_format_reminder_contains_warning() -> None:
         webhook_url="https://b24-po7frr.bitrix24.ru/rest/154/token/",
     )
     assert "19:00" in msg
-    assert "сделка уйдет в общую базу" in msg
+    assert "Заполните сумму" in msg
+    assert "уйдет в общую базу" not in msg
     assert "Сделка #14900" in msg
     assert "Подбор" in msg
     assert "/crm/deal/details/14900/" in msg

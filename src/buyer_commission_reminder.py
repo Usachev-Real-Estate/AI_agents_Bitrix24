@@ -4,8 +4,11 @@ While the field is empty on open deals in воронка «Покупатели�
 - broker gets a personal reminder every N hours (default 2);
 - their ROP every M hours (default 1).
 
-At deadline hour (default 19:00 Europe/Moscow) deals with empty OPPORTUNITY
-are reassigned to the shared pool user («общая база»).
+Воронка «Общая база» (category 26) и ответственный pool-user в выборку
+не входят.
+
+Does not change ASSIGNED_BY_ID. Pool reassignment stays behind
+BUYER_COMMISSION_ENFORCE_ENABLED (default off).
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ from db import (  # noqa: E402
 from notify import send_user_chat_message  # noqa: E402
 from tools import (  # noqa: E402
     BUYERS_STAGE_NAMES,
+    GENERAL_BASE_CATEGORY_ID,
     _as_list,
     _build_broker_dept_map,
     _bx_get_all_sync,
@@ -130,12 +134,21 @@ def list_open_buyer_deals(bx: Bitrix, category_id: int) -> list[dict[str, Any]]:
     return items
 
 
+def _is_general_base_deal(deal: dict[str, Any]) -> bool:
+    """True for воронка «Общая база» (category 26 / stages C26:*)."""
+    category_id = _coerce_int(deal.get("CATEGORY_ID") or deal.get("category_id"))
+    if category_id == GENERAL_BASE_CATEGORY_ID:
+        return True
+    stage_id = str(deal.get("STAGE_ID") or deal.get("stage_id") or "")
+    return stage_id.startswith("C26:")
+
+
 def select_empty_commission_deals(
     deals: list[dict[str, Any]],
     *,
     pool_user_id: int,
 ) -> list[dict[str, Any]]:
-    """Keep open deals with empty OPPORTUNITY not already on pool user."""
+    """Keep open deals with empty OPPORTUNITY not already on pool / Общая база."""
     selected: list[dict[str, Any]] = []
     for deal in deals:
         deal_id = _coerce_int(deal.get("ID"))
@@ -143,6 +156,8 @@ def select_empty_commission_deals(
         if deal_id <= 0 or assigned <= 0:
             continue
         if assigned == pool_user_id:
+            continue
+        if _is_general_base_deal(deal):
             continue
         if not is_opportunity_empty(deal.get("OPPORTUNITY")):
             continue
@@ -234,8 +249,7 @@ def format_reminder_message(
     header = (
         f"⚠️ Напоминание {role_label}: не заполнена «Комиссия» "
         f"(поле «Сумма») в сделках воронки «Покупатели».\n\n"
-        f"Если не заполнить до {deadline_hour:02d}:00 сегодня — "
-        f"сделка уйдет в общую базу.\n"
+        f"Заполните сумму до {deadline_hour:02d}:00.\n"
     )
     return header + "\n" + format_deals_block(deals, webhook_url)
 
@@ -528,11 +542,14 @@ def run(
     deadline_h = int(settings.buyer_commission_deadline_hour)
     hour = now_local.hour
 
-    in_remind_window = start_h <= hour < deadline_h
+    in_remind_window = start_h <= hour <= deadline_h
     at_deadline = hour == deadline_h
-    do_remind = force_remind or in_remind_window or (force_enforce and in_remind_window)
-    # At deadline hour: enforce; also allow --enforce any time.
-    do_enforce = force_enforce or at_deadline
+    do_remind = force_remind or in_remind_window
+    # Reassignment is off unless BUYER_COMMISSION_ENFORCE_ENABLED (or --enforce).
+    do_enforce = (
+        settings.buyer_commission_enforce_enabled
+        and (force_enforce or at_deadline)
+    )
 
     if not do_remind and not do_enforce:
         logger.info(
@@ -549,6 +566,12 @@ def run(
 
     category_id = int(settings.buyers_category_id or 18)
     pool_user_id = int(settings.buyer_commission_pool_user_id)
+    if category_id == GENERAL_BASE_CATEGORY_ID:
+        logger.error(
+            "BUYERS_CATEGORY_ID=%s is «Общая база» — commission reminders disabled",
+            category_id,
+        )
+        return {"skipped": True, "reason": "general_base_category"}
     bx = Bitrix(settings.b24_webhook_url)
 
     raw_deals = list_open_buyer_deals(bx, category_id)
@@ -619,7 +642,7 @@ def main() -> None:
     parser.add_argument(
         "--enforce",
         action="store_true",
-        help="Force move empty-commission deals to pool user",
+        help="Force pool reassignment (only if BUYER_COMMISSION_ENFORCE_ENABLED)",
     )
     args = parser.parse_args()
     run(force_remind=args.remind, force_enforce=args.enforce)

@@ -29,6 +29,17 @@
 # 9. «Базовая ставка» в сделках «Покупатели»: автозаполнение + откат брокеров/РОПов: каждые 5 минут
 */5 * * * * cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/buyer_base_rate_lock.py >> logs/cron.log 2>&1
 
-# 10. «Комиссия» (OPPORTUNITY) в сделках «Покупатели»: напоминания брокерам/РОПам (9–18 МСК) + перенос в общую базу в 19:00 МСК
-#     UTC 6–16 = МСК 9–19; в 19:00 МСК скрипт переназначает сделки на BUYER_COMMISSION_POOL_USER_ID
+# 10. «Комиссия» (OPPORTUNITY): только напоминания — пн–пт каждый час 9–19 МСК (06–16 UTC)
 0 6-16 * * 1-5 cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/buyer_commission_reminder.py >> logs/cron.log 2>&1
+
+# 11. Рейтинг CRM: ежедневный сбор метрик (CRM-визиты, чистые дни, лента): пн–пт 19:00 МСК (16:00 UTC)
+0 16 * * 1-5 cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/broker_rating_collectors.py --daily >> logs/cron.log 2>&1
+
+# 12. Рейтинг CRM: ежедневная публикация в REPORT_CHAT (после вечернего аудита): пн–пт 17:30 МСК (14:30 UTC)
+30 14 * * 1-5 cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/broker_rating_report.py >> logs/cron.log 2>&1
+
+# 13. Контроль Спам/Нецелевой (слитые / неверная квалификация): пн–пт 11:00 МСК (08:00 UTC) → чат 22358
+0 8 * * 1-5 cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/lead_quality_audit.py >> logs/cron.log 2>&1
+
+# 14. Первый перенос в Общую базу: 13.08.2026 19:05 МСК (16:05 UTC). После этой даты перенос идёт на штатных 10:00/17:00.
+5 16 13 8 * cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest >> logs/cron.log 2>&1

@@ -52,6 +52,25 @@ def test_missed_call_resolved_by_callback():
     assert len(violations) == 0
 
 
+def test_deal_missed_call_uses_buyer_rule():
+    entities = [
+        {
+            "deal_id": 99,
+            "assigned_by_id": 10,
+            "calls": [
+                {
+                    "call_type": "incoming",
+                    "status": "missed",
+                    "start_date": "2026-06-15T10:00:00+00:00",
+                }
+            ],
+        }
+    ]
+    violations = check_missed_callback_violations(entities, "deal")
+    assert len(violations) == 1
+    assert violations[0]["rule"] == "buyer_missed_callback"
+
+
 def test_missed_call_resolved_by_timeline_comment():
     entities = [
         {

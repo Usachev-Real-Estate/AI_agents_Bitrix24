@@ -8,15 +8,18 @@ AI-аудитор для Битрикс24 на базе LangGraph + DeepSeek API
 
 ```mermaid
 flowchart TB
-    subgraph Collectors["Collectors (3 агента)"]
+    subgraph Collectors["Collectors"]
         LC["lead_collector\nвсе лиды + таймлайн"]
         BC["buyer_collector\nсделки покупателей + таймлайн"]
         SC["seller_collector\nсделки продавцов + таймлайн"]
+        GC["general_base_collector\nОбщая база + таймлайн"]
     end
 
-    subgraph Analysts["Analysts (4 агента)"]
+    subgraph Analysts["Analysts"]
         LA["lead_analyst\nанализ лидов"]
         BDA["buyer_deal_analyst\nанализ сделок"]
+        SDA["seller_deal_analyst\nанализ продавцов"]
+        GBA["general_base_analyst\n2 дня на план"]
         BCC["buyer_calls_controller\nпропущенные звонки (сделки)"]
         MCC["missed_calls_controller\nпропущенные звонки (лиды)"]
     end
@@ -27,7 +30,10 @@ flowchart TB
 
     LC --> LA --> MCC
     BC --> BDA --> BCC
-    SC --> MERGE["merge"]
+    SC --> SDA
+    GC --> GBA
+    SDA --> MERGE["merge"]
+    GBA --> MERGE
     MCC --> MERGE
     BCC --> MERGE
     MERGE --> RD
@@ -55,7 +61,7 @@ flowchart TB
 ### 1. Клонирование и настройка
 
 ```bash
-git clone https://github.com/DanilaYukin/AI_agents_CRM.git b24-ai-auditor
+git clone https://github.com/Usachevofishial-git/AI_agents_Bitrix24.git b24-ai-auditor
 cd b24-ai-auditor
 python -m venv venv
 venv\Scripts\activate        # Windows

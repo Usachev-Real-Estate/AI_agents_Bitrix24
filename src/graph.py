@@ -1,37 +1,37 @@
 """LangGraph workflow: v2 collectors -> analysts -> report dispatcher."""
 
-import json
 import logging
 import operator
-import re
 from datetime import datetime, timezone
 from functools import partial
 from typing import Annotated, Any, TypedDict
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from config import Settings
 from notify import _bx_call_sync, send_chat_message_chunked, send_user_chat_message
-from prompts import (
-    LEAD_ANALYST_PROMPT,
-)
 from tools import (
     _build_crm_link,
     _build_rop_map,
     _coerce_int,
+    _is_general_base_violation,
     _is_seller_violation,
-    _lead_needs_llm_check,
     _lead_status_id,
     _severity_icon,
     seller_violation_action,
     check_buyer_deal_violations,
+    check_general_base_violations,
     check_lead_rule1_violations,
+    check_lead_rule2_rule3_violations,
     check_missed_callback_violations,
     check_seller_deal_violations,
     get_all_leads_with_timeline,
     get_deals_by_funnel_with_timeline,
+    get_general_base_deals_with_timeline,
     humanize_violation_reason,
+    list_seller_meeting_reminders,
+    process_deals_to_general_base,
+    process_stale_new_leads,
+    GENERAL_BASE_RULE_ACTION,
     LEAD_STATUS_NEW,
     LEAD_STATUS_SHARED,
     LEAD_STATUS_CONVERTED,
@@ -46,17 +46,24 @@ ALLOWED_VIOLATION_RULES = {
     "lead_rule_1",
     "lead_rule_2",
     "lead_rule_3",
+    "lead_new_over_24h",
     "lead_missed_callback",
     "buyer_stage_1",
     "buyer_stage_2",
     "buyer_stage_3",
     "buyer_stage_4",
     "buyer_stage_5",
+    "buyer_podbor_stale",
+    "buyer_ofer_comment",
+    "buyer_lost_no_reason",
+    "buyer_agent_no_comment",
     "buyer_missed_callback",
-    "seller_meeting_no_outgoing",
-    "seller_meeting_not_advanced",
-    "seller_deferred_no_comment",
-    "seller_source_no_outgoing",
+    "seller_stage_stale",
+    "seller_deferred_no_activity",
+    "seller_negotiations_max",
+    "seller_lost_no_reason",
+    "seller_afina_id_missing",
+    "general_base_no_plan",
 }
 
 NON_RULE_REASON_MARKERS = (
@@ -73,6 +80,7 @@ class AuditState(TypedDict, total=False):
     raw_leads: list[dict[str, Any]]
     raw_buyers_deals: list[dict[str, Any]]
     raw_sellers_deals: list[dict[str, Any]]
+    raw_general_base_deals: list[dict[str, Any]]
     violations: Annotated[list[dict[str, Any]], operator.add]
     current_time: str
     dry_run: bool
@@ -80,70 +88,6 @@ class AuditState(TypedDict, total=False):
     messages: Annotated[list[str], operator.add]
     report_sent: bool
     last_violation_count: int
-
-
-def _make_llm(settings: Settings) -> ChatOpenAI:
-    """Create DeepSeek LLM for analyst nodes.
-
-    Args:
-        settings: Application settings.
-
-    Returns:
-        ChatOpenAI client configured for DeepSeek API.
-    """
-    return ChatOpenAI(
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url,
-        model=settings.deepseek_model,
-        temperature=0.1,
-    )
-
-
-def _message_content_to_str(content: Any) -> str:
-    """Convert LLM message content to a plain string.
-
-    Args:
-        content: Message content (str or multimodal blocks).
-
-    Returns:
-        Concatenated text content.
-    """
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict):
-                parts.append(str(block.get("text") or block.get("content") or ""))
-            else:
-                parts.append(str(block))
-        return "".join(parts)
-    return str(content)
-
-
-def _parse_violations_json(content: str) -> list[dict[str, Any]]:
-    """Extract violations list from Analyst LLM response.
-
-    Args:
-        content: Raw model response text.
-
-    Returns:
-        Parsed violations or empty list on failure.
-    """
-    if "{" not in content:
-        return []
-    json_str = content
-    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
-    if fence:
-        json_str = fence.group(1)
-    else:
-        json_start = content.index("{")
-        json_str = content[json_start:]
-    parsed = json.loads(json_str)
-    violations = parsed.get("violations", [])
-    if isinstance(violations, list):
-        return [v for v in violations if isinstance(v, dict)]
-    return []
 
 
 def _filter_zero_entity_violations(
@@ -235,8 +179,23 @@ async def seller_collector(state: AuditState, settings: Settings) -> AuditState:
     }
 
 
+async def general_base_collector(state: AuditState, settings: Settings) -> AuditState:
+    """Collect open deals in воронка «Общая база» (category 26)."""
+    logger.info("General Base Collector: fetching category 26 deals")
+
+    data = get_general_base_deals_with_timeline()
+    deals = data.get("deals", []) if isinstance(data, dict) else []
+
+    logger.info("General Base Collector: collected %d deals", len(deals))
+
+    return {
+        "raw_general_base_deals": deals,
+        "messages": [f"general_base_collector: {len(deals)} deals"],
+    }
+
+
 async def lead_analyst(state: AuditState, settings: Settings) -> AuditState:
-    """Agent 4: analyze leads for stage violations."""
+    """Agent 4: analyze leads (rules 1–3) and move NEW > 24h to shared pool."""
     leads = state.get("raw_leads", [])
     logger.info(
         "Agent 4 (Lead Analyst): analyzing %d leads",
@@ -254,63 +213,9 @@ async def lead_analyst(state: AuditState, settings: Settings) -> AuditState:
     if not current_time.tzinfo:
         current_time = current_time.replace(tzinfo=timezone.utc)
 
-    # Детерминированная проверка rule_1
-    rule1_violations = check_lead_rule1_violations(leads, current_time)
-
-    # Фильтруем лиды, требующие LLM (rule_2: SPAM, rule_3: Нецелевой)
-    llm_leads = [lead for lead in leads if _lead_needs_llm_check(lead)]
-
-    logger.info(
-        "Agent 4: %d leads require LLM checking",
-        len(llm_leads),
-    )
-
-    if not llm_leads:
-        return {"violations": rule1_violations}
-
-    llm = _make_llm(settings)
-    all_violations: list[dict[str, Any]] = list(rule1_violations)
-
-    llm_fields = (
-        "lead_id",
-        "title",
-        "status_id",
-        "status_name",
-        "assigned_by_id",
-        "comments_field",
-        "timeline",
-    )
-
-    for i in range(0, len(llm_leads), settings.analyst_chunk_size):
-        chunk = [
-            {k: lead[k] for k in llm_fields if k in lead}
-            for lead in llm_leads[i:i + settings.analyst_chunk_size]
-        ]
-        payload = {"leads": chunk, "current_time": current_time_str}
-
-        try:
-            response = await llm.ainvoke([
-                SystemMessage(content=LEAD_ANALYST_PROMPT),
-                HumanMessage(
-                    content=json.dumps(payload, ensure_ascii=False, default=str),
-                ),
-            ])
-            content = _message_content_to_str(response.content)
-            new_violations = _parse_violations_json(content)
-            all_violations.extend(new_violations)
-            logger.debug(
-                "Agent 4 chunk %d-%d: %d violations",
-                i,
-                min(i + settings.analyst_chunk_size, len(llm_leads)),
-                len(new_violations),
-            )
-        except Exception as exc:
-            logger.warning(
-                "Agent 4 chunk %d-%d failed: %s",
-                i,
-                min(i + settings.analyst_chunk_size, len(llm_leads)),
-                exc,
-            )
+    all_violations = check_lead_rule1_violations(leads, current_time)
+    all_violations.extend(check_lead_rule2_rule3_violations(leads))
+    all_violations.extend(process_stale_new_leads(leads, current_time))
 
     sanitized = _sanitize_violations(all_violations)
     logger.info(
@@ -332,13 +237,14 @@ async def buyer_deal_analyst(state: AuditState, settings: Settings) -> AuditStat
     current_time = state.get("current_time", "")
     rop_map = _build_rop_map()
     all_violations = check_buyer_deal_violations(deals, current_time, rop_map)
+    process_deals_to_general_base(all_violations, "buyers")
 
     logger.info("Agent 5: found %d buyer deal violations total", len(all_violations))
     return {"violations": all_violations}
 
 
 async def seller_deal_analyst(state: AuditState, settings: Settings) -> AuditState:
-    """Analyze seller deals: paid-source calls + deferred comments."""
+    """Analyze seller deals: cadence, deferred activity, Afina ID, meeting reminders."""
     deals = state.get("raw_sellers_deals", [])
     logger.info("Seller Deal Analyst: checking %d deals", len(deals))
 
@@ -349,7 +255,67 @@ async def seller_deal_analyst(state: AuditState, settings: Settings) -> AuditSta
     rop_map = _build_rop_map()
     all_violations = check_seller_deal_violations(deals, current_time, rop_map)
     logger.info("Seller Deal Analyst: found %d seller deal violations", len(all_violations))
+
+    reminders = list_seller_meeting_reminders(deals, current_time, rop_map)
+    if reminders:
+        logger.info(
+            "Seller Deal Analyst: %d meeting reminders (2h before 24h)",
+            len(reminders),
+        )
+    if settings.dry_run:
+        for item in reminders:
+            logger.info(
+                "DRY_RUN: would remind user %s about deal %s (%.1fh left)",
+                item.get("assigned_by_id"),
+                item.get("deal_id"),
+                item.get("hours_left") or 0,
+            )
+    else:
+        for item in reminders:
+            uid = _coerce_int(item.get("assigned_by_id"))
+            deal_id = _coerce_int(item.get("deal_id"))
+            if uid <= 0 or deal_id <= 0:
+                continue
+            hours_left = item.get("hours_left") or 0
+            link = _build_crm_link("deal", deal_id)
+            msg = (
+                "Напоминание: сделка на этапе «Назначение встречи» "
+                f"без комментария брокера/РОПа и без непросроченного дела. "
+                f"Осталось {hours_left:.0f} ч "
+                "до перевода в воронку «Общая база».\n"
+                f"Сделка #{deal_id} {item.get('title') or ''}\n{link}"
+            )
+            try:
+                send_user_chat_message(uid, msg)
+            except Exception:
+                logger.exception(
+                    "Failed to send meeting reminder to user %s deal %s",
+                    uid,
+                    deal_id,
+                )
+
+    process_deals_to_general_base(all_violations, "sellers")
+
     return {"violations": all_violations}
+
+
+async def general_base_analyst(state: AuditState, settings: Settings) -> AuditState:
+    """Deals in Общая база: 2 days after transfer to plan an activity or comment."""
+    deals = state.get("raw_general_base_deals", [])
+    logger.info("General Base Analyst: checking %d deals", len(deals))
+
+    if not deals:
+        return {"violations": []}
+
+    current_time = state.get("current_time", "")
+    all_violations = check_general_base_violations(deals, current_time)
+    sanitized = _sanitize_violations(all_violations)
+    logger.info(
+        "General Base Analyst: found %d violations (%d after policy filter)",
+        len(all_violations),
+        len(sanitized),
+    )
+    return {"violations": sanitized}
 
 
 async def _generic_calls_controller(
@@ -412,6 +378,7 @@ async def _build_user_map(
     leads: list[dict[str, Any]],
     buyer_deals: list[dict[str, Any]],
     seller_deals: list[dict[str, Any]],
+    general_base_deals: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[int, str], dict[int, int], set[int]]:
     """Fetch user names and departments for all responsible_id in violations.
 
@@ -420,6 +387,7 @@ async def _build_user_map(
         leads: Raw leads data.
         buyer_deals: Raw buyer deals data.
         seller_deals: Raw seller deals data.
+        general_base_deals: Raw Общая база deals.
 
     Returns:
         Tuple of user_id → display name, user_id → department_id, and set of inactive user_ids.
@@ -440,6 +408,10 @@ async def _build_user_map(
         if uid:
             user_ids.add(uid)
     for deal in seller_deals:
+        uid = _coerce_int(deal.get("assigned_by_id", 0))
+        if uid:
+            user_ids.add(uid)
+    for deal in general_base_deals or []:
         uid = _coerce_int(deal.get("assigned_by_id", 0))
         if uid:
             user_ids.add(uid)
@@ -602,7 +574,7 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
             "Dispatcher: violations unchanged (%d), skipping",
             current_count,
         )
-        return state
+        return {"status": "skipped_unchanged"}
     logger.info(
         "Dispatcher: formatting %d violations by department (DRY_RUN=%s)",
         len(violations),
@@ -615,6 +587,7 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
         state.get("raw_leads", []),
         state.get("raw_buyers_deals", []),
         state.get("raw_sellers_deals", []),
+        state.get("raw_general_base_deals", []),
     )
 
     # Filter out violations from inactive users and excluded departments
@@ -643,6 +616,7 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
     seller_deals_count = len(state.get("raw_sellers_deals", []))
     buyers_deals = state.get("raw_buyers_deals", [])
     sellers_deals = state.get("raw_sellers_deals", [])
+    gb_deals = state.get("raw_general_base_deals", [])
     raw_leads = state.get("raw_leads", [])
     new_leads_count = sum(
         1 for lead in raw_leads if _lead_status_id(lead) == LEAD_STATUS_NEW
@@ -666,11 +640,13 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
         1 for d in buyers_deals if d.get("audit_rule") is not None
     )
     seller_violations = [v for v in violations if _is_seller_violation(v)]
+    gb_violations = [v for v in violations if _is_general_base_violation(v)]
     seller_rule_counts = {
-        "seller_meeting_no_outgoing": 0,
-        "seller_meeting_not_advanced": 0,
-        "seller_deferred_no_comment": 0,
-        "seller_source_no_outgoing": 0,
+        "seller_stage_stale": 0,
+        "seller_deferred_no_activity": 0,
+        "seller_negotiations_max": 0,
+        "seller_lost_no_reason": 0,
+        "seller_afina_id_missing": 0,
     }
     for v in seller_violations:
         rule = str(v.get("rule") or "")
@@ -701,6 +677,8 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
                 f"Сделок покупателей: {len(buyers_deals)} "
                 f"(на аудите: {audited_buyers})\n"
                 f"Сделок продавцов: {seller_deals_count}\n"
+                f"Сделок «Общая база»: {len(gb_deals)}\n"
+                f"  general_base_no_plan: {len(gb_violations)}\n"
             )
             total_chunks += send_chat_message_chunked(settings.report_chat_id, summary)
 
@@ -710,14 +688,16 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
                 f"Дата: {now}\n"
                 f"Открытых сделок продавцов: {seller_deals_count}\n"
                 f"Нарушений: {len(seller_violations)}\n"
-                f"seller_meeting_no_outgoing: "
-                f"{seller_rule_counts['seller_meeting_no_outgoing']}\n"
-                f"seller_meeting_not_advanced: "
-                f"{seller_rule_counts['seller_meeting_not_advanced']}\n"
-                f"seller_deferred_no_comment: "
-                f"{seller_rule_counts['seller_deferred_no_comment']}\n"
-                f"seller_source_no_outgoing: "
-                f"{seller_rule_counts['seller_source_no_outgoing']}"
+                f"seller_stage_stale: "
+                f"{seller_rule_counts['seller_stage_stale']}\n"
+                f"seller_deferred_no_activity: "
+                f"{seller_rule_counts['seller_deferred_no_activity']}\n"
+                f"seller_negotiations_max: "
+                f"{seller_rule_counts['seller_negotiations_max']}\n"
+                f"seller_lost_no_reason: "
+                f"{seller_rule_counts['seller_lost_no_reason']}\n"
+                f"seller_afina_id_missing: "
+                f"{seller_rule_counts['seller_afina_id_missing']}"
             )
             try:
                 send_user_chat_message(
@@ -730,6 +710,64 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
                     settings.contact_source_lock_notify_user,
                 )
 
+            if gb_violations:
+                gb_lines = [
+                    "b24-ai-auditor v2 — воронка «Общая база»",
+                    f"Дата: {now}",
+                    f"Открытых сделок: {len(gb_deals)}",
+                    f"Без плана > 2 дн.: {len(gb_violations)}",
+                    "",
+                ]
+                for v in gb_violations:
+                    entity_id = _coerce_int(v.get("entity_id", 0))
+                    reason = humanize_violation_reason(
+                        v,
+                        buyers_deals=buyers_deals,
+                        sellers_deals=sellers_deals,
+                        general_base_deals=gb_deals,
+                        leads=raw_leads,
+                    )
+                    link = _build_crm_link("deal", entity_id)
+                    uid = _coerce_int(v.get("responsible_id", 0))
+                    user_display = user_map.get(uid, f"ID:{uid}")
+                    name_only = (
+                        user_display.split(" (")[0]
+                        if " (" in user_display
+                        else user_display
+                    )
+                    days_info = ""
+                    details = v.get("details", {})
+                    if isinstance(details, dict):
+                        days = details.get("days_on_stage")
+                        if days is not None and days != "" and days < 999:
+                            days_info = f" ({days} дн.)"
+                    gb_lines.append(
+                        f"🟡 Сделка #{entity_id} | {name_only} | "
+                        f"{reason}{days_info}",
+                    )
+                    gb_lines.append(f"   → {GENERAL_BASE_RULE_ACTION}")
+                    gb_lines.append(f"   {link}")
+                gb_report = "\n".join(gb_lines)
+                try:
+                    total_chunks += send_chat_message_chunked(
+                        settings.report_chat_id, gb_report,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Dispatcher: failed to send general-base list to chat %s",
+                        settings.report_chat_id,
+                    )
+                try:
+                    send_user_chat_message(
+                        settings.contact_source_lock_notify_user,
+                        gb_report,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Dispatcher: failed to send general-base list to user %s",
+                        settings.contact_source_lock_notify_user,
+                    )
+
             for dept_name in sorted(dept_groups):
                 dept_violations = _filter_zero_entity_violations(dept_groups[dept_name])
                 if not dept_violations:
@@ -740,9 +778,14 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
                     continue
 
                 lead_v = [v for v in dept_violations if v.get("entity_type") == "lead"]
+                gb_deal_v = [
+                    v for v in dept_violations if _is_general_base_violation(v)
+                ]
                 buyer_deal_v = [
                     v for v in dept_violations
-                    if v.get("entity_type") == "deal" and not _is_seller_violation(v)
+                    if v.get("entity_type") == "deal"
+                    and not _is_seller_violation(v)
+                    and not _is_general_base_violation(v)
                 ]
                 seller_deal_v = [
                     v for v in dept_violations
@@ -787,6 +830,7 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
                     f"  Лиды: {len(lead_v)}",
                     f"  Сделки покупателей: {len(buyer_deal_v)}",
                     f"  Сделки продавцов: {len(seller_deal_v)}",
+                    f"  Сделки «Общая база»: {len(gb_deal_v)}",
                     f"  ✅ Без нарушений: {len(clean_in_dept)}",
                     "",
                 ]
@@ -805,6 +849,7 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
                             v,
                             buyers_deals=buyers_deals,
                             sellers_deals=sellers_deals,
+                            general_base_deals=gb_deals,
                             leads=raw_leads,
                         )
                         link = _build_crm_link(entity_type, entity_id)
@@ -833,12 +878,16 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
                             action = seller_violation_action(v)
                             if action:
                                 lines.append(f"   → {action}")
+                        elif _is_general_base_violation(v):
+                            lines.append(f"   → {GENERAL_BASE_RULE_ACTION}")
                         lines.append(f"   {link}")
 
                 lead_and_buyer = [
                     v for v in dept_violations
                     if v.get("entity_type") == "lead" or (
-                        v.get("entity_type") == "deal" and not _is_seller_violation(v)
+                        v.get("entity_type") == "deal"
+                        and not _is_seller_violation(v)
+                        and not _is_general_base_violation(v)
                     )
                 ]
                 _append_violation_lines(lead_and_buyer, seller=False)
@@ -848,6 +897,12 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
                         lines.append("")
                     lines.append("— Сделки продавцов —")
                     _append_violation_lines(seller_deal_v, seller=True)
+
+                if gb_deal_v:
+                    if lead_and_buyer or seller_deal_v:
+                        lines.append("")
+                    lines.append("— Общая база —")
+                    _append_violation_lines(gb_deal_v, seller=False)
 
                 call_violations = [
                     v for v in dept_violations
@@ -865,57 +920,71 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
                         lines.append(f"   • {name_only} — {link}")
 
                 report = "\n".join(lines)
-                chunks = send_chat_message_chunked(rop_chat_id, report)
-                total_chunks += chunks
-
-                logger.info(
-                    "Dispatcher: dept '%s' report sent to ROP chat %d (%d violations, %d chunks)",
-                    dept_name,
-                    rop_chat_id,
-                    len(dept_violations),
-                    chunks,
-                )
+                try:
+                    chunks = send_chat_message_chunked(rop_chat_id, report)
+                    total_chunks += chunks
+                    logger.info(
+                        "Dispatcher: dept '%s' report sent to ROP chat %d "
+                        "(%d violations, %d chunks)",
+                        dept_name,
+                        rop_chat_id,
+                        len(dept_violations),
+                        chunks,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Dispatcher: failed to send dept '%s' report to chat %d "
+                        "— continuing with other departments",
+                        dept_name,
+                        rop_chat_id,
+                    )
 
             logger.info(
                 "Dispatcher: reports sent for %d departments",
                 len(dept_groups),
             )
 
-        from db import init_db, is_routine_audit_run, save_audit_run, save_violations, upsert_brokers
-
-        init_db()
-        is_routine = is_routine_audit_run(settings.report_since, len(raw_leads), now)
-        run_id = save_audit_run(
-            now,
-            len(raw_leads),
-            len(buyers_deals),
-            seller_deals_count,
-            current_count,
-            report_since=settings.report_since,
-            is_routine=is_routine,
-        )
-        if is_routine:
-            save_violations(run_id, violations, user_map, dept_id_map, now)
-        else:
-            logger.info(
-                "Dispatcher: non-routine audit run %d — violations not saved to DB",
-                run_id,
-            )
-        upsert_brokers(
-            user_map,
-            dept_id_map,
-            raw_leads,
-            buyers_deals,
-            state.get("raw_sellers_deals", []),
-            now
-        )
-        logger.info("Dispatcher: saved audit run %d to database", run_id)
-
     except Exception:
         logger.exception(
-            "Dispatcher: failed to send reports to chat %d",
+            "Dispatcher: failed while sending reports (chat %d)",
             settings.report_chat_id,
         )
+
+    from db import init_db, is_routine_audit_run, save_audit_run, save_violations, upsert_brokers
+
+    init_db()
+    is_routine = bool(settings.force_routine_audit) or is_routine_audit_run(
+        settings.report_since, len(raw_leads), now
+    )
+    if settings.force_routine_audit and not is_routine_audit_run(
+        settings.report_since, len(raw_leads), now
+    ):
+        logger.info("Dispatcher: FORCE_ROUTINE_AUDIT=true — saving violations")
+    run_id = save_audit_run(
+        now,
+        len(raw_leads),
+        len(buyers_deals),
+        seller_deals_count,
+        current_count,
+        report_since=settings.report_since,
+        is_routine=is_routine,
+    )
+    if is_routine:
+        save_violations(run_id, violations, user_map, dept_id_map, now)
+    else:
+        logger.info(
+            "Dispatcher: non-routine audit run %d — violations not saved to DB",
+            run_id,
+        )
+    upsert_brokers(
+        user_map,
+        dept_id_map,
+        raw_leads,
+        buyers_deals,
+        state.get("raw_sellers_deals", []),
+        now,
+    )
+    logger.info("Dispatcher: saved audit run %d to database", run_id)
 
     return {
         "messages": [
@@ -928,21 +997,24 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
     }
 
 
-async def merge_node(state: AuditState) -> AuditState:
+async def merge_node(state: AuditState) -> dict[str, Any]:
     """No-op merge: waits for all branches before dispatcher."""
-    return state
+    # Return empty update so fan-in does not collide on last_value channels.
+    return {}
 
 
 def build_graph_v2(settings: Settings):
-    """Build v2 audit graph: 3 collectors → analysts → merge → dispatcher."""
+    """Build v2 audit graph: 4 collectors → analysts → merge → dispatcher."""
     graph = StateGraph(AuditState)
 
     graph.add_node("lead_collector", partial(lead_collector, settings=settings))
     graph.add_node("buyer_collector", partial(buyer_collector, settings=settings))
     graph.add_node("seller_collector", partial(seller_collector, settings=settings))
+    graph.add_node("general_base_collector", partial(general_base_collector, settings=settings))
     graph.add_node("lead_analyst", partial(lead_analyst, settings=settings))
     graph.add_node("buyer_deal_analyst", partial(buyer_deal_analyst, settings=settings))
     graph.add_node("seller_deal_analyst", partial(seller_deal_analyst, settings=settings))
+    graph.add_node("general_base_analyst", partial(general_base_analyst, settings=settings))
     graph.add_node("buyer_calls_controller", partial(buyer_calls_controller, settings=settings))
     graph.add_node("missed_calls_controller", partial(missed_calls_controller, settings=settings))
     graph.add_node("report_dispatcher", partial(report_dispatcher, settings=settings))
@@ -951,6 +1023,7 @@ def build_graph_v2(settings: Settings):
     graph.add_edge(START, "lead_collector")
     graph.add_edge(START, "buyer_collector")
     graph.add_edge(START, "seller_collector")
+    graph.add_edge(START, "general_base_collector")
 
     graph.add_edge("lead_collector", "lead_analyst")
     graph.add_edge("lead_analyst", "missed_calls_controller")
@@ -959,10 +1032,12 @@ def build_graph_v2(settings: Settings):
     graph.add_edge("buyer_deal_analyst", "buyer_calls_controller")
 
     graph.add_edge("seller_collector", "seller_deal_analyst")
+    graph.add_edge("general_base_collector", "general_base_analyst")
 
     graph.add_edge("missed_calls_controller", "merge")
     graph.add_edge("buyer_calls_controller", "merge")
     graph.add_edge("seller_deal_analyst", "merge")
+    graph.add_edge("general_base_analyst", "merge")
 
     graph.add_edge("merge", "report_dispatcher")
     graph.add_edge("report_dispatcher", END)
@@ -971,7 +1046,7 @@ def build_graph_v2(settings: Settings):
 
 
 async def run_audit_v2(settings: Settings) -> AuditState:
-    """Run v2 audit: 3 collectors → 4 analysts → merge → report dispatcher.
+    """Run v2 audit: collectors → analysts → merge → report dispatcher.
 
     Args:
         settings: Application settings.
@@ -986,6 +1061,7 @@ async def run_audit_v2(settings: Settings) -> AuditState:
         "raw_leads": [],
         "raw_buyers_deals": [],
         "raw_sellers_deals": [],
+        "raw_general_base_deals": [],
         "violations": [],
         "current_time": datetime.now(timezone.utc).isoformat(),
         "dry_run": settings.dry_run,

@@ -51,6 +51,12 @@ def test_routine_rejects_off_schedule_hour() -> None:
     ) is False
 
 
+def test_force_routine_audit_setting_exists() -> None:
+    from config import Settings
+
+    assert "force_routine_audit" in Settings.model_fields
+
+
 def test_routine_rejects_pathological_full_dump() -> None:
     assert is_routine_audit_run(
         "2026-06-12",

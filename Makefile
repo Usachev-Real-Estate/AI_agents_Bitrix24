@@ -53,6 +53,15 @@ buyer-base-rate-lock:
 buyer-commission-reminder:
 	$(PYTHON) src/buyer_commission_reminder.py
 
+broker-rating-daily:
+	$(PYTHON) src/broker_rating_collectors.py --daily
+
+broker-rating-report:
+	$(PYTHON) src/broker_rating_report.py
+
+lead-quality:
+	$(PYTHON) src/lead_quality_audit.py
+
 import-kc-owners:
 	$(PYTHON) scripts/import_kc_owners.py
 

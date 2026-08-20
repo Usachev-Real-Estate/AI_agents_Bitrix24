@@ -143,3 +143,38 @@ def send_chat_message_chunked(chat_id: int, message: str, chunk_size: int = 4000
 
     logger.info("Chat message chunked: chat_id=%s chunks=%d", chat_id, len(chunks))
     return len(chunks)
+
+
+def send_user_chat_message_chunked(
+    user_id: int,
+    message: str,
+    chunk_size: int = 1800,
+    *,
+    system: bool = True,
+) -> int:
+    """Send a long personal chat message, splitting into chunks."""
+    if user_id <= 0:
+        logger.warning("Skip personal message: invalid user_id=%s", user_id)
+        return 0
+    if len(message) <= chunk_size:
+        send_user_chat_message(user_id, message, system=system)
+        return 1
+
+    lines = message.split("\n")
+    chunks: list[str] = []
+    current = ""
+    for line in lines:
+        if len(current) + len(line) + 1 > chunk_size:
+            if current:
+                chunks.append(current)
+            current = line
+        else:
+            current += "\n" + line if current else line
+    if current:
+        chunks.append(current)
+    for chunk in chunks:
+        send_user_chat_message(user_id, chunk, system=system)
+    logger.info(
+        "User chat message chunked: user_id=%s chunks=%d", user_id, len(chunks),
+    )
+    return len(chunks)

@@ -14,7 +14,7 @@ sudo usermod -aG docker $USER
 
 ```bash
 cd /opt
-git clone https://github.com/DanilaYukin/AI_agents_CRM.git b24-ai-auditor
+git clone https://github.com/Usachevofishial-git/AI_agents_Bitrix24.git b24-ai-auditor
 cd b24-ai-auditor
 
 # Создать .env из примера

@@ -32,6 +32,10 @@ COMMAND_DEPT = re.compile(
     r"(?:/dept|!dept|!отдел)\s+(.+)",
     re.IGNORECASE,
 )
+COMMAND_RATING = re.compile(
+    r"^(?:/rating|!rating|рейтинг)(?:\s+(.+))?$",
+    re.IGNORECASE,
+)
 LAST_ID_FILE = Path("data/chat_last_id.txt")
 
 
@@ -158,7 +162,6 @@ async def async_main():
             
             report = format_weekly_report(
                 violators, clean, week_start, now,
-                prev_violators_count=len(prev_violators),
                 prev_total_violations=prev_total,
             )
             if not settings.dry_run:
@@ -213,11 +216,29 @@ async def async_main():
             
             report = format_weekly_report(
                 dept_violators, dept_clean, week_start, now, dept_name=dept_name,
-                prev_violators_count=len(dept_prev_violators),
                 prev_total_violations=dept_prev_total,
             )
             if not settings.dry_run:
                 send_chat_message_chunked(chat_id, report)
+
+    # Check for /rating command
+    for m in messages:
+        text = m.get("text", "") or m.get("message", "")
+        match = COMMAND_RATING.search(text.strip())
+        if match:
+            dept_query = (match.group(1) or "").strip()
+            logger.info("Rating report requested%s", f": {dept_query}" if dept_query else "")
+            from weekly_report import build_rating_section
+            from db import init_db
+            init_db()
+            if dept_query:
+                rating_text, _ = build_rating_section(dept_name=dept_query)
+            else:
+                rating_text, _ = build_rating_section()
+            if not settings.dry_run:
+                send_chat_message_chunked(chat_id, rating_text)
+            else:
+                logger.info("DRY_RUN=True, rating report:\n%s", rating_text)
 
     # Обновить last_id до максимального обработанного
     if messages:

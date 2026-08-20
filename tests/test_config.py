@@ -25,4 +25,24 @@ def test_buyer_commission_defaults() -> None:
     assert settings.buyer_commission_rop_interval_hours == 1.0
     assert settings.buyer_commission_deadline_hour == 19
     assert settings.buyer_commission_pool_user_id == 1
-    assert settings.buyer_commission_enforce_enabled is True
+    assert settings.buyer_commission_enforce_enabled is False
+
+
+def test_general_base_move_after_default_empty() -> None:
+    settings = Settings(
+        B24_WEBHOOK_URL="https://example.bitrix24.ru/rest/1/x/",
+        DEEPSEEK_API_KEY="sk-test",
+        _env_file=None,
+    )
+    assert settings.general_base_move_after == ""
+
+
+def test_lead_quality_defaults() -> None:
+    settings = Settings(
+        B24_WEBHOOK_URL="https://example.bitrix24.ru/rest/1/x/",
+        DEEPSEEK_API_KEY="sk-test",
+        _env_file=None,
+    )
+    assert settings.lead_quality_enabled is True
+    assert settings.lead_quality_since == "2026-07-01"
+    assert settings.lead_quality_chunk_size == 40

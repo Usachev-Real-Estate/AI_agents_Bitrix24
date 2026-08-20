@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Any
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -42,6 +43,14 @@ class Settings(BaseSettings):
         validation_alias="DEEPSEEK_V3_MODEL",
     )
     dry_run: bool = Field(default=True, validation_alias="DRY_RUN")
+    general_base_move_after: str = Field(
+        default="",
+        validation_alias="GENERAL_BASE_MOVE_AFTER",
+    )
+    force_routine_audit: bool = Field(
+        default=False,
+        validation_alias="FORCE_ROUTINE_AUDIT",
+    )
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
     management_chat_id: str = Field(
         default="",
@@ -155,7 +164,7 @@ class Settings(BaseSettings):
         default="data/Мотивация брокеров 3 кв 2026 - Мотивация брокеров 3 кв 2026.csv",
         validation_alias="BUYER_BASE_RATE_CSV",
     )
-    # Buyer funnel: remind to fill OPPORTUNITY (Комиссия), then move to pool.
+    # Buyer funnel: remind to fill OPPORTUNITY (Комиссия). No assignee change.
     buyer_commission_reminder_enabled: bool = Field(
         default=True,
         validation_alias="BUYER_COMMISSION_REMINDER_ENABLED",
@@ -181,13 +190,110 @@ class Settings(BaseSettings):
         validation_alias="BUYER_COMMISSION_POOL_USER_ID",
     )
     buyer_commission_enforce_enabled: bool = Field(
-        default=True,
+        default=False,
         validation_alias="BUYER_COMMISSION_ENFORCE_ENABLED",
     )
     buyer_commission_timezone: str = Field(
         default="Europe/Moscow",
         validation_alias="BUYER_COMMISSION_TIMEZONE",
     )
+    # Broker CRM rating
+    broker_rating_period_days: int = Field(
+        default=7,
+        validation_alias="BROKER_RATING_PERIOD_DAYS",
+    )
+    # Fixed start date YYYY-MM-DD (MSK). If set — rating accumulates from this day.
+    broker_rating_since: str = Field(
+        default="",
+        validation_alias="BROKER_RATING_SINCE",
+    )
+    broker_rating_weights_json: str = Field(
+        default="{}",
+        validation_alias="BROKER_RATING_WEIGHTS_JSON",
+    )
+    broker_rating_news_tag: str = Field(
+        default="",
+        validation_alias="BROKER_RATING_NEWS_TAG",
+    )
+    broker_rating_top_n: int = Field(
+        default=10,
+        validation_alias="BROKER_RATING_TOP_N",
+    )
+    broker_rating_sales_dept_ids_json: str = Field(
+        default="",
+        validation_alias="BROKER_RATING_SALES_DEPT_IDS_JSON",
+    )
+    broker_rating_exclude_user_ids_json: str = Field(
+        default="[]",
+        validation_alias="BROKER_RATING_EXCLUDE_USER_IDS_JSON",
+    )
+    # Quality audit: Spam / Non-target leads (leaked / wrong qualification)
+    lead_quality_enabled: bool = Field(
+        default=True,
+        validation_alias="LEAD_QUALITY_ENABLED",
+    )
+    lead_quality_since: str = Field(
+        default="2026-07-01",
+        validation_alias="LEAD_QUALITY_SINCE",
+    )
+    lead_quality_chunk_size: int = Field(
+        default=40,
+        validation_alias="LEAD_QUALITY_CHUNK_SIZE",
+    )
+
+    @property
+    def broker_rating_weights(self) -> dict[str, Any]:
+        defaults: dict[str, Any] = {
+            "component_weights": {
+                "crm": 0.60,
+                "portfolio": 0.20,
+                "tasks": 0.10,
+                "engagement": 0.10,
+            },
+            "severity_penalties": {
+                "medium": 4,
+                "high": 6,
+                "very high": 10,
+            },
+            "shared_lead_penalty": 12,
+            "pool_deal_penalty": 18,
+            "tasks_neutral_score": 75,
+            "tasks_closure_bonus": 5,
+            "clean_day_bonus": 0.5,
+            "clean_day_bonus_max": 5,
+            "tier_green": 80,
+            "tier_yellow": 50,
+        }
+        try:
+            overrides = json.loads(self.broker_rating_weights_json)
+        except Exception:
+            return defaults
+        if not isinstance(overrides, dict):
+            return defaults
+        merged = dict(defaults)
+        for key, value in overrides.items():
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key] = {**merged[key], **value}
+            else:
+                merged[key] = value
+        return merged
+
+    @property
+    def broker_rating_sales_dept_ids(self) -> list[int]:
+        raw = (self.broker_rating_sales_dept_ids_json or "").strip()
+        if raw:
+            try:
+                return [int(x) for x in json.loads(raw)]
+            except Exception:
+                pass
+        return self.owner_sales_dept_ids
+
+    @property
+    def broker_rating_exclude_user_ids(self) -> set[int]:
+        try:
+            return {int(x) for x in json.loads(self.broker_rating_exclude_user_ids_json)}
+        except Exception:
+            return set()
 
     @property
     def rules_advice(self) -> dict[str, str]:
