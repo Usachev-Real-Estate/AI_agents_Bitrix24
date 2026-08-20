@@ -28,6 +28,7 @@ from tools import (
     get_deals_by_funnel_with_timeline,
     get_general_base_deals_with_timeline,
     build_stage_name_index,
+    count_incomplete,
     humanize_violation_reason,
     list_seller_meeting_reminders,
     process_deals_to_general_base,
@@ -90,6 +91,10 @@ class AuditState(TypedDict, total=False):
     messages: Annotated[list[str], operator.add]
     report_sent: bool
     last_violation_count: int
+    # Карточки, исключённые из аудита из-за нечитаемых доказательств.
+    # Ключ обязан быть объявлен здесь: LangGraph отбрасывает всё,
+    # чего нет в схеме состояния.
+    skipped_incomplete: int
 
 
 def _is_reportable_days(value: Any) -> bool:
@@ -654,6 +659,23 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
     agent_count = sum(
         1 for lead in raw_leads if _lead_status_id(lead) == LEAD_STATUS_AGENT
     )
+    # Качество прогона: карточки, по которым не удалось прочитать доказательства,
+    # исключены из аудита. Без этой строки деградация Bitrix читается в отчёте
+    # как улучшение дисциплины.
+    skipped_quality = {
+        "leads": count_incomplete(raw_leads),
+        "buyers": count_incomplete(buyers_deals),
+        "sellers": count_incomplete(sellers_deals),
+        "general_base": count_incomplete(gb_deals),
+    }
+    skipped_total = sum(skipped_quality.values())
+    if skipped_total:
+        logger.warning(
+            "Dispatcher: %d cards excluded from this audit (unreadable evidence): %s",
+            skipped_total,
+            skipped_quality,
+        )
+
     stage_names = build_stage_name_index(
         buyers_deals=buyers_deals,
         sellers_deals=sellers_deals,
@@ -704,6 +726,16 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
                 f"Сделок «Общая база»: {len(gb_deals)}\n"
                 f"  general_base_no_plan: {len(gb_violations)}\n"
             )
+            if skipped_total:
+                summary += (
+                    f"\n⚠️ Не проверено из-за сбоев Bitrix: {skipped_total} "
+                    f"(лиды {skipped_quality['leads']}, "
+                    f"покупатели {skipped_quality['buyers']}, "
+                    f"продавцы {skipped_quality['sellers']}, "
+                    f"общая база {skipped_quality['general_base']})\n"
+                    "Эти карточки в аудит не попали — нарушений по ним нет "
+                    "не потому, что их нет.\n"
+                )
             total_chunks += send_chat_message_chunked(settings.report_chat_id, summary)
 
             # Сводка по правилам продавцов — только админу (личный чат).
@@ -977,13 +1009,21 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
                 f"({len(violations)} violations)",
             ],
             "status": "completed_dry_run",
+            "skipped_incomplete": skipped_total,
             # Проход диспетчера состоялся: флаг гасит повторный вызов
             # (см. защиту «violations unchanged» выше).
             "report_sent": True,
             "last_violation_count": current_count,
         }
 
-    from db import init_db, is_routine_audit_run, save_audit_run, save_violations, upsert_brokers
+    from db import (
+        init_db,
+        is_routine_audit_run,
+        save_audit_run,
+        save_violations,
+        sync_violation_states,
+        upsert_brokers,
+    )
 
     init_db()
     is_routine = bool(settings.force_routine_audit) or is_routine_audit_run(
@@ -1004,6 +1044,26 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
     )
     if is_routine:
         save_violations(run_id, violations, user_map, dept_id_map, now)
+        # Область закрывается только если её коллектор реально вернул данные:
+        # пустой сбор из-за сбоя API иначе отрапортует «всё исправлено».
+        scopes_with_data = {
+            scope
+            for scope, records in (
+                ("leads", raw_leads),
+                ("buyers", buyers_deals),
+                ("sellers", sellers_deals),
+                ("general_base", gb_deals),
+            )
+            if records
+        }
+        lifecycle = sync_violation_states(
+            violations,
+            now,
+            scopes_with_data=scopes_with_data,
+            user_map=user_map,
+            dept_id_map=dept_id_map,
+        )
+        logger.info("Dispatcher: violation lifecycle %s", lifecycle)
     else:
         logger.info(
             "Dispatcher: non-routine audit run %d — violations not saved to DB",
@@ -1025,6 +1085,7 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
             f"({len(violations)} violations, {total_chunks} chunks)",
         ],
         "status": "completed",
+        "skipped_incomplete": skipped_total,
         "report_sent": True,
         "last_violation_count": current_count,
     }

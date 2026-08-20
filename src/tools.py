@@ -138,6 +138,11 @@ GENERAL_BASE_MOVE_WARNING = (
     "В случае невыполнения требования регламента сделка будет перенесена "
     "в воронку «Общая база»."
 )
+# Констатация вместо предупреждения: если перенос уже выполнен, будущее время
+# вводит брокера в заблуждение — он считает, что время ещё есть.
+GENERAL_BASE_MOVED_NOTICE = (
+    "Сделка перенесена в воронку «Общая база»."
+)
 # После переноса в Общую базу: 2 дня на живое дело или комментарий с планом
 GENERAL_BASE_PLAN_DEADLINE = timedelta(days=2)
 GENERAL_BASE_RULE_ACTION = (
@@ -693,14 +698,39 @@ def move_buyer_deal_to_general_base(
 
 
 def _general_base_move_reason_suffix(result: dict[str, Any]) -> str:
-    """Human-readable suffix for a deal moved (or not) to «Общая база»."""
+    """Human-readable suffix for a deal moved (or not) to «Общая база».
+
+    A completed move is stated in the past tense: the warning wording promises
+    a future transfer, and a broker reading it after the fact believes the deal
+    is still in their funnel.
+    """
     if result.get("skipped"):
         return ""
-    if result.get("dry_run_skipped") or result.get("ok"):
+    if result.get("ok"):
+        return f" {GENERAL_BASE_MOVED_NOTICE}"
+    if result.get("dry_run_skipped"):
         return f" {GENERAL_BASE_MOVE_WARNING}"
     if result.get("error"):
         return " Перенос в воронку «Общая база» не выполнен."
     return ""
+
+
+def _apply_move_outcome(reason: str, result: dict[str, Any]) -> str:
+    """Attach the move outcome, replacing a pre-baked future-tense warning.
+
+    Some rules embed GENERAL_BASE_MOVE_WARNING while building the reason, before
+    the move is attempted; once the deal has actually moved that sentence has to
+    go, or the report both warns and reports the same transfer.
+    """
+    suffix = _general_base_move_reason_suffix(result)
+    text = str(reason or "")
+    if result.get("ok") and GENERAL_BASE_MOVE_WARNING in text:
+        text = text.replace(GENERAL_BASE_MOVE_WARNING, "").strip()
+    if not suffix:
+        return text
+    if suffix.strip() in text:
+        return text
+    return f"{text}{suffix}" if text else suffix.strip()
 
 
 def process_deals_to_general_base(
@@ -761,10 +791,9 @@ def process_deals_to_general_base(
         details["dry_run_skipped"] = bool(result.get("dry_run_skipped"))
         details["move_error"] = result.get("error")
         details["general_base_stage_id"] = result.get("stage_id")
-        suffix = _general_base_move_reason_suffix(result)
-        reason = str(violation.get("reason") or "")
-        if suffix and suffix.strip() not in reason:
-            violation["reason"] = reason + suffix
+        violation["reason"] = _apply_move_outcome(
+            str(violation.get("reason") or ""), result,
+        )
     return violations
 
 
@@ -1406,6 +1435,11 @@ def _evidence_incomplete(record: dict[str, Any]) -> bool:
     and, for movable rules, relocate the deal to «Общая база».
     """
     return bool(record.get("evidence_incomplete"))
+
+
+def count_incomplete(records: list[dict[str, Any]]) -> int:
+    """How many cards had unreadable evidence in this run."""
+    return sum(1 for r in records if _evidence_incomplete(r))
 
 
 def _skip_incomplete(

@@ -30,15 +30,23 @@ async def main() -> None:
         settings.sellers_category_id,
     )
     result = await run_audit_v2(settings)
+    skipped = int(result.get("skipped_incomplete") or 0)
     logger.info(
         "Audit V2 finished: status=%s, leads=%d, buyer_deals=%d, "
-        "seller_deals=%d, violations=%d",
+        "seller_deals=%d, violations=%d, skipped_incomplete=%d",
         result.get("status"),
         len(result.get("raw_leads", [])),
         len(result.get("raw_buyers_deals", [])),
         len(result.get("raw_sellers_deals", [])),
         len(result.get("violations", [])),
+        skipped,
     )
+    if skipped:
+        logger.warning(
+            "%d cards were excluded from this audit because their evidence "
+            "could not be read — treat the result as incomplete",
+            skipped,
+        )
 
 
 def cli() -> None:
