@@ -20,18 +20,22 @@ STATUS_ERROR = "error"
 
 
 def list_call_activities(deal_id: int) -> list[dict[str, Any]]:
-    """Return call activities linked to a deal."""
-    raw = _bx_get_all_sync(
-        "crm.activity.list",
-        {
-            "filter": {
-                "OWNER_TYPE_ID": 2,
-                "OWNER_ID": deal_id,
-                "TYPE_ID": CALL_ACTIVITY_TYPE_ID,
+    """Return call activities linked to a deal ([] when the API call fails)."""
+    try:
+        raw = _bx_get_all_sync(
+            "crm.activity.list",
+            {
+                "filter": {
+                    "OWNER_TYPE_ID": 2,
+                    "OWNER_ID": deal_id,
+                    "TYPE_ID": CALL_ACTIVITY_TYPE_ID,
+                },
+                "select": ["ID", "SUBJECT", "CREATED", "DIRECTION", "COMPLETED"],
             },
-            "select": ["ID", "SUBJECT", "CREATED", "DIRECTION", "COMPLETED"],
-        },
-    )
+        )
+    except Exception:
+        logger.warning("Call activity list failed for deal %s", deal_id)
+        return []
     return [a for a in _as_list(raw) if isinstance(a, dict)]
 
 
@@ -100,9 +104,12 @@ def fetch_and_cache(
 ) -> list[dict[str, Any]]:
     """Load call transcripts for a deal, using SQLite cache when possible."""
     settings = settings or get_settings()
-    write_db = not (settings.dry_run if dry_run is None else dry_run)
-    if write_db:
-        init_db()
+    # Кэш пишется всегда, включая DRY_RUN: это локальная копия данных, доступных
+    # только на чтение, и никаких последствий в CRM у неё нет. Иначе тестовый
+    # прогон заново тянул бы тысячи расшифровок из Битрикса — самый дорогой
+    # режим оказывался бы тем, который запускают чаще всего.
+    del dry_run  # оставлен в сигнатуре ради совместимости вызовов
+    init_db()
 
     retry_hours = float(settings.client_state_transcript_retry_hours)
     now = datetime.now(timezone.utc)
@@ -132,15 +139,15 @@ def fetch_and_cache(
             "chars": len(text or ""),
             "activity_created": _clean_str(activity.get("CREATED")),
         }
-        if write_db:
-            upsert_call_transcript(
-                activity_id=activity_id,
-                deal_id=deal_id,
-                text=row["text"],
-                status=status,
-                fetched_at=now_iso,
-                chars=row["chars"],
-            )
+        upsert_call_transcript(
+            activity_id=activity_id,
+            deal_id=deal_id,
+            text=row["text"],
+            status=status,
+            fetched_at=now_iso,
+            chars=row["chars"],
+            activity_created=row["activity_created"],
+        )
         out.append(row)
 
     return out

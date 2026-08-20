@@ -253,6 +253,13 @@ class Settings(BaseSettings):
         default=False,
         validation_alias="CLIENT_STATE_ENABLED",
     )
+    # Потолок объёма событий в одном запросе. Первый прогон по карточке шлёт
+    # всю историю, и карточка с двумя десятками звонков иначе выходит за лимит
+    # контекста модели.
+    client_state_max_event_chars: int = Field(
+        default=40_000,
+        validation_alias="CLIENT_STATE_MAX_EVENT_CHARS",
+    )
     client_state_transcript_retry_hours: float = Field(
         default=1.0,
         validation_alias="CLIENT_STATE_TRANSCRIPT_RETRY_HOURS",

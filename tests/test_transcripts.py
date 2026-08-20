@@ -92,14 +92,56 @@ def test_not_ready_refetched_after_retry_window(temp_db, monkeypatch):
     assert rows[0]["text"] == "готовый текст"
 
 
-def test_dry_run_does_not_write_cache(temp_db, monkeypatch):
+def test_dry_run_still_caches(temp_db, monkeypatch):
+    """Кэш — локальная копия read-only данных, в CRM он ничего не меняет.
+
+    Без записи в DRY_RUN тестовый прогон заново тянул бы тысячи расшифровок
+    из Битрикса, то есть самый частый режим был бы самым дорогим.
+    """
     calls = [{"ID": 404, "CREATED": "2026-08-20T13:00:00+03:00"}]
+    monkeypatch.setattr(transcripts, "list_call_activities", lambda deal_id: calls)
+    fetches: list[int] = []
+
+    def _fake(activity_id: int):
+        fetches.append(activity_id)
+        return "tmp", transcripts.STATUS_OK
+
+    monkeypatch.setattr(transcripts, "fetch_transcript_from_api", _fake)
+
+    transcripts.fetch_and_cache(5004, dry_run=True)
+    cached = db.get_call_transcript(404)
+    assert cached is not None
+    assert cached["text"] == "tmp"
+
+    # Повторный прогон берёт из кэша и в Битрикс не ходит.
+    transcripts.fetch_and_cache(5004, dry_run=True)
+    assert fetches == [404]
+
+
+def test_call_time_survives_the_cache(temp_db, monkeypatch):
+    """Время звонка должно пережить кэширование, иначе ломается хронология."""
+    calls = [{"ID": 505, "CREATED": "2026-06-01T09:30:00+03:00"}]
     monkeypatch.setattr(transcripts, "list_call_activities", lambda deal_id: calls)
     monkeypatch.setattr(
         transcripts,
         "fetch_transcript_from_api",
-        lambda activity_id: ("tmp", transcripts.STATUS_OK),
+        lambda activity_id: ("текст", transcripts.STATUS_OK),
     )
 
-    transcripts.fetch_and_cache(5004, dry_run=True)
-    assert db.get_call_transcript(404) is None
+    transcripts.fetch_and_cache(5005)
+    assert db.get_call_transcript(505)["activity_created"] == (
+        "2026-06-01T09:30:00+03:00"
+    )
+
+    # И при чтении из кэша тоже — а не время скачивания.
+    rows = transcripts.fetch_and_cache(5005)
+    assert rows[0]["activity_created"] == "2026-06-01T09:30:00+03:00"
+
+
+def test_activity_list_failure_does_not_raise(temp_db, monkeypatch):
+    """Сбой API по одной карточке не должен ронять прогон."""
+    def _boom(method, params):
+        raise RuntimeError("Bitrix недоступен")
+
+    monkeypatch.setattr(transcripts, "_bx_get_all_sync", _boom)
+    assert transcripts.fetch_and_cache(5006) == []

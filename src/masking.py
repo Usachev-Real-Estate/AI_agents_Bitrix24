@@ -6,12 +6,15 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from tools import _as_list, _clean_str
+from tools import _as_list, _clean_str, _coerce_int
 
-_EMAIL_RE = re.compile(
-    r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
-    re.IGNORECASE,
-)
+# Границы слова с учётом кириллицы. Без них «Ира» совпадает внутри «кварт-ира»,
+# «Лиза» — внутри «ана-лиза»: для базы недвижимости это калечит почти каждую
+# карточку и меняет смысл текста, который уходит модели.
+_LEFT_BOUNDARY = r"(?<!\w)"
+_RIGHT_BOUNDARY = r"(?!\w)"
+
+MIN_FRAGMENT_LEN = 3
 
 
 @dataclass
@@ -19,13 +22,19 @@ class MaskMap:
     """Bidirectional map: sensitive fragments ↔ stable placeholders."""
 
     placeholder_to_value: dict[str, str] = field(default_factory=dict)
-    _patterns: list[tuple[re.Pattern[str], str]] = field(default_factory=list)
+    patterns: list[tuple[re.Pattern[str], str]] = field(default_factory=list)
+    _collapse: list[tuple[re.Pattern[str], str]] = field(default_factory=list)
 
     def apply(self, text: str) -> str:
-        if not text or not self._patterns:
+        if not text or not self.patterns:
             return text
         out = text
-        for pattern, placeholder in self._patterns:
+        for pattern, placeholder in self.patterns:
+            out = pattern.sub(placeholder, out)
+        # «Ириной Логутиной» → «КЛИЕНТ_1 КЛИЕНТ_1» → «КЛИЕНТ_1». Один человек
+        # должен выглядеть как один участник, иначе модель посчитает их двумя,
+        # а обратная подстановка задвоит имя.
+        for pattern, placeholder in self._collapse:
             out = pattern.sub(placeholder, out)
         return out
 
@@ -45,15 +54,15 @@ class MaskMap:
 def _inflect_russian_name(word: str) -> set[str]:
     """Common spoken/written case forms for a single name token."""
     forms: set[str] = set()
-    if len(word) < 3:
+    if len(word) < MIN_FRAGMENT_LEN:
         return forms
     lower = word.lower()
     if lower.endswith("а"):
         stem = word[:-1]
-        forms.update(stem + ending for ending in ("ы", "е", "у", "ой", "е"))
+        forms.update(stem + ending for ending in ("ы", "е", "у", "ой"))
     elif lower.endswith("я"):
         stem = word[:-1]
-        forms.update(stem + ending for ending in ("и", "е", "ю", "ей", "и"))
+        forms.update(stem + ending for ending in ("и", "е", "ю", "ей"))
     elif lower.endswith("ий"):
         stem = word[:-2]
         forms.update(stem + ending for ending in ("ия", "ию", "ием", "ии"))
@@ -62,8 +71,8 @@ def _inflect_russian_name(word: str) -> set[str]:
         forms.update(stem + ending for ending in ("ого", "ому", "ым", "ом"))
     elif lower.endswith("ь"):
         stem = word[:-1]
-        forms.update(stem + ending for ending in ("и", "ью", "и"))
-    return {f for f in forms if len(f) >= 3}
+        forms.update(stem + ending for ending in ("и", "ью"))
+    return {f for f in forms if len(f) >= MIN_FRAGMENT_LEN}
 
 
 def _name_variants(full_name: str) -> list[str]:
@@ -72,7 +81,7 @@ def _name_variants(full_name: str) -> list[str]:
         return []
     variants: set[str] = {name}
     for part in name.split():
-        if len(part) < 3:
+        if len(part) < MIN_FRAGMENT_LEN:
             continue
         variants.add(part)
         variants.update(_inflect_russian_name(part))
@@ -93,21 +102,23 @@ def _phone_variants(phone: str) -> list[str]:
     digits = _digits_only(raw)
     variants: set[str] = {raw}
     if len(digits) >= 10:
-        last10 = digits[-10:]
-        variants.update(
-            {
-                last10,
-                "8" + last10,
-                "7" + last10,
-                "+7" + last10,
-                f"+7{last10}",
-                f"8{last10}",
-                f"+7 ({last10[:3]}) {last10[3:6]}-{last10[6:8]}-{last10[8:10]}",
-                f"8 ({last10[:3]}) {last10[3:6]}-{last10[6:8]}-{last10[8:10]}",
-                f"+7-{last10[:3]}-{last10[3:6]}-{last10[6:8]}-{last10[8:10]}",
-                f"8-{last10[:3]}-{last10[3:6]}-{last10[6:8]}-{last10[8:10]}",
-            },
+        head, mid, tail1, tail2 = (
+            digits[-10:][:3],
+            digits[-10:][3:6],
+            digits[-10:][6:8],
+            digits[-10:][8:10],
         )
+        last10 = digits[-10:]
+        variants.update({
+            last10,
+            "8" + last10,
+            "7" + last10,
+            "+7" + last10,
+            f"+7 ({head}) {mid}-{tail1}-{tail2}",
+            f"8 ({head}) {mid}-{tail1}-{tail2}",
+            f"+7-{head}-{mid}-{tail1}-{tail2}",
+            f"8-{head}-{mid}-{tail1}-{tail2}",
+        })
     return sorted(variants, key=len, reverse=True)
 
 
@@ -135,6 +146,16 @@ def _contact_display_name(contact: dict[str, Any]) -> str:
     return _clean_str(contact.get("TITLE") or contact.get("title"))
 
 
+def _ordered_contacts(contacts: list[Any]) -> list[dict[str, Any]]:
+    """Deterministic order so placeholders mean the same person across runs.
+
+    Masked state is persisted between runs; if КЛИЕНТ_1 pointed at a different
+    contact next time, the stored history would silently describe someone else.
+    """
+    rows = [c for c in contacts if isinstance(c, dict)]
+    return sorted(rows, key=lambda c: _coerce_int(c.get("ID") or c.get("id")))
+
+
 def build_mask_map(
     deal: dict[str, Any],
     contacts: list[dict[str, Any]] | None = None,
@@ -146,10 +167,8 @@ def build_mask_map(
     email_idx = 0
     fragments: list[tuple[str, str]] = []
 
-    contact_list = contacts if contacts is not None else _as_list(deal.get("contacts"))
-    for contact in contact_list:
-        if not isinstance(contact, dict):
-            continue
+    source = contacts if contacts is not None else _as_list(deal.get("contacts"))
+    for contact in _ordered_contacts(list(source)):
         display = _contact_display_name(contact)
         if display:
             client_idx += 1
@@ -169,26 +188,31 @@ def build_mask_map(
             mask.placeholder_to_value[placeholder] = email
             fragments.append((email, placeholder))
 
-    # Dedupe fragments: longest match wins at apply time.
     seen: set[tuple[str, str]] = set()
     ordered: list[tuple[str, str]] = []
-    for fragment, placeholder in sorted(fragments, key=lambda x: len(x[0]), reverse=True):
+    for fragment, placeholder in sorted(
+        fragments, key=lambda x: len(x[0]), reverse=True,
+    ):
         key = (fragment.casefold(), placeholder)
-        if key in seen or len(fragment) < 3:
+        if key in seen or len(fragment) < MIN_FRAGMENT_LEN:
             continue
         seen.add(key)
         ordered.append((fragment, placeholder))
 
-    mask._patterns = [
-        (re.compile(re.escape(fragment), re.IGNORECASE), placeholder)
+    mask.patterns = [
+        (
+            re.compile(
+                _LEFT_BOUNDARY + re.escape(fragment) + _RIGHT_BOUNDARY,
+                re.IGNORECASE,
+            ),
+            placeholder,
+        )
         for fragment, placeholder in ordered
     ]
-    # Also mask emails discovered in free text when they match known addresses.
-    for placeholder, email in list(mask.placeholder_to_value.items()):
-        if placeholder.startswith("ПОЧТА_"):
-            mask._patterns.append(
-                (re.compile(re.escape(email), re.IGNORECASE), placeholder),
-            )
+    mask._collapse = [
+        (re.compile(rf"{re.escape(ph)}(?:[\s,]+{re.escape(ph)})+"), ph)
+        for ph in mask.placeholder_to_value
+    ]
     return mask
 
 
@@ -200,15 +224,3 @@ def apply_mask(text: str, mask_map: MaskMap) -> str:
 def unmask(text: str, mask_map: MaskMap) -> str:
     """Restore original contact fragments in report text."""
     return mask_map.unmask(text or "")
-
-
-def mask_emails_in_text(text: str, mask_map: MaskMap) -> str:
-    """Mask stray email addresses that match known contact emails."""
-    if not text:
-        return text
-    out = text
-    for placeholder, email in mask_map.placeholder_to_value.items():
-        if not placeholder.startswith("ПОЧТА_"):
-            continue
-        out = re.sub(re.escape(email), placeholder, out, flags=re.IGNORECASE)
-    return out

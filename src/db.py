@@ -117,6 +117,7 @@ def init_db() -> None:
         """)
 
         _migrate_audit_runs(conn)
+        _migrate_call_transcripts(conn)
 
         conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_violations_responsible
@@ -314,7 +315,11 @@ def init_db() -> None:
             text TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL,
             fetched_at TEXT NOT NULL,
-            chars INTEGER NOT NULL DEFAULT 0
+            chars INTEGER NOT NULL DEFAULT 0,
+            -- Время самого звонка. Без него закэшированная расшифровка
+            -- получала бы время скачивания и всплывала в конец ленты как
+            -- самое свежее событие, ломая хронологию карточки.
+            activity_created TEXT NOT NULL DEFAULT ''
         );
         """)
         conn.execute("""
@@ -371,6 +376,17 @@ def _migrate_exclusive_expiry_notifications(conn: sqlite3.Connection) -> None:
         "ALTER TABLE exclusive_expiry_notifications_new "
         "RENAME TO exclusive_expiry_notifications"
     )
+
+
+def _migrate_call_transcripts(conn: sqlite3.Connection) -> None:
+    """Add activity_created to caches created before the column existed."""
+    try:
+        conn.execute(
+            "ALTER TABLE call_transcripts "
+            "ADD COLUMN activity_created TEXT NOT NULL DEFAULT ''",
+        )
+    except sqlite3.OperationalError:
+        pass
 
 
 def _migrate_audit_runs(conn: sqlite3.Connection) -> None:
@@ -1621,7 +1637,8 @@ def get_call_transcript(activity_id: int) -> dict[str, Any] | None:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             """
-            SELECT activity_id, deal_id, text, status, fetched_at, chars
+            SELECT activity_id, deal_id, text, status, fetched_at, chars,
+                   activity_created
             FROM call_transcripts
             WHERE activity_id = ?
             """,
@@ -1637,6 +1654,7 @@ def upsert_call_transcript(
     status: str,
     fetched_at: str,
     chars: int,
+    activity_created: str = "",
 ) -> None:
     """Insert or replace a cached call transcript."""
     init_db()
@@ -1644,16 +1662,26 @@ def upsert_call_transcript(
         conn.execute(
             """
             INSERT INTO call_transcripts (
-                activity_id, deal_id, text, status, fetched_at, chars
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                activity_id, deal_id, text, status, fetched_at, chars,
+                activity_created
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(activity_id) DO UPDATE SET
                 deal_id = excluded.deal_id,
                 text = excluded.text,
                 status = excluded.status,
                 fetched_at = excluded.fetched_at,
-                chars = excluded.chars
+                chars = excluded.chars,
+                -- Время звонка не затираем пустым: оно приходит из
+                -- crm.activity.list и при повторной попытке может отсутствовать.
+                activity_created = CASE
+                    WHEN excluded.activity_created != '' THEN excluded.activity_created
+                    ELSE call_transcripts.activity_created
+                END
             """,
-            (activity_id, deal_id, text, status, fetched_at, chars),
+            (
+                activity_id, deal_id, text, status, fetched_at, chars,
+                activity_created,
+            ),
         )
 
 
@@ -1664,7 +1692,8 @@ def list_call_transcripts_for_deal(deal_id: int) -> list[dict[str, Any]]:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
-            SELECT activity_id, deal_id, text, status, fetched_at, chars
+            SELECT activity_id, deal_id, text, status, fetched_at, chars,
+                   activity_created
             FROM call_transcripts
             WHERE deal_id = ?
             ORDER BY fetched_at
