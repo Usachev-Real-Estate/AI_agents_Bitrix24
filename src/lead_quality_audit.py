@@ -124,8 +124,15 @@ def _parse_violations_json(content: str) -> list[dict[str, Any]]:
     else:
         json_str = content[content.index("{") :]
     try:
-        parsed = json.loads(json_str)
-    except json.JSONDecodeError:
+        # raw_decode разбирает JSON-префикс и игнорирует хвост: одно лишнее
+        # слово после объекта раньше обнуляло весь чанк находок.
+        parsed, _ = json.JSONDecoder().raw_decode(json_str)
+    except ValueError:
+        logger.warning(
+            "Lead quality: LLM response is not valid JSON (%d chars)", len(content),
+        )
+        return []
+    if not isinstance(parsed, dict):
         return []
     violations = parsed.get("violations", [])
     if not isinstance(violations, list):
@@ -687,7 +694,10 @@ def format_quality_report(
 def purge_excluded_stored_findings(
     leads_by_id: dict[int, dict[str, Any]],
 ) -> int:
-    """Remove DB findings for excluded leads (spam mark / self-call / deal). Returns deleted rows."""
+    """Remove DB findings for excluded leads (spam mark / self-call / deal).
+
+    Returns the number of deleted rows.
+    """
     deleted = 0
     for row in list_lead_quality_findings():
         lid = _coerce_int(row.get("lead_id"))

@@ -11,9 +11,9 @@ _SRC_DIR = Path(__file__).resolve().parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
-from config import get_settings
-from notify import send_chat_message_chunked
-from fast_bitrix24 import Bitrix
+from config import get_settings  # noqa: E402
+from notify import send_chat_message_chunked  # noqa: E402
+from fast_bitrix24 import Bitrix  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -130,15 +130,29 @@ def format_global_report(back_office_data: list[dict], rop_data: list[dict], now
         overdue_cnt = len(stats["overdue"])
         lines.append(f"👤 {name}{dept} — {stats['total']} задач ({overdue_cnt} просрочено)")
 
-        sorted_overdue = sorted(stats["overdue"], key=lambda x: x.get("days_overdue", 0), reverse=True)
+        sorted_overdue = sorted(
+            stats["overdue"],
+            key=lambda x: x.get("days_overdue", 0),
+            reverse=True,
+        )
         idx = 1
         for t in sorted_overdue:
             days = t["days_overdue"]
             d_str = t["deadline"].strftime("%d.%m.%Y") if t["deadline"] else "?"
-            lines.append(f"   {idx}. 🔴 #{t['id']} «{t['title']}» — просрочена на {days} дн. (дедлайн: {d_str})")
+            lines.append(
+                f"   {idx}. 🔴 #{t['id']} «{t['title']}» — "
+                f"просрочена на {days} дн. (дедлайн: {d_str})"
+            )
             idx += 1
 
-        sorted_active = sorted(stats["active"], key=lambda x: x.get("deadline").timestamp() if x.get("deadline") else float('inf'))
+        sorted_active = sorted(
+            stats["active"],
+            key=lambda x: (
+                x.get("deadline").timestamp()
+                if x.get("deadline")
+                else float("inf")
+            ),
+        )
         for t in sorted_active:
             if idx > 10:  # limit to top 10 tasks to avoid huge lists
                 break
@@ -228,7 +242,7 @@ async def async_main():
 
     # Remove duplicates and excluded users
     excluded_users = _get_excluded_users()
-    
+
     seen_users = set()
     bo_unique = []
     for u in back_office_users:
@@ -252,13 +266,22 @@ async def async_main():
             u["department_name"] = dept_map.get(primary_dept, "")
             rop_unique.append(u)
 
-    logger.info("Found %d unique back-office users, %d unique ROP users", len(bo_unique), len(rop_unique))
+    logger.info(
+        "Found %d unique back-office users, %d unique ROP users",
+        len(bo_unique),
+        len(rop_unique),
+    )
 
     # 3. Fetch tasks
     for u in bo_unique + rop_unique:
         u["tasks"] = await fetch_user_tasks(bx, u["ID"])
         u["stats"] = classify_tasks(u["tasks"], now)
-        logger.info("User %s: %d total tasks, %d overdue", u.get("ID"), u["stats"]["total"], len(u["stats"]["overdue"]))
+        logger.info(
+            "User %s: %d total tasks, %d overdue",
+            u.get("ID"),
+            u["stats"]["total"],
+            len(u["stats"]["overdue"]),
+        )
 
     # 4. Generate report
     report = format_global_report(bo_unique, rop_unique, now)

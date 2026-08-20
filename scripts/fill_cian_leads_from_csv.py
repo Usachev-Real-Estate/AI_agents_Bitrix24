@@ -16,7 +16,6 @@ import json
 import logging
 import re
 import sys
-from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -423,7 +422,11 @@ def main() -> None:
         json.dumps(summary.as_dict(), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    print(json.dumps({k: v for k, v in summary.as_dict().items() if k != "preview"}, ensure_ascii=False, indent=2))
+    print(json.dumps(
+        {k: v for k, v in summary.as_dict().items() if k != "preview"},
+        ensure_ascii=False,
+        indent=2,
+    ))
     print(f"preview_file={args.preview_file} items={len(summary.preview)}")
     for row in summary.preview[:15]:
         print(

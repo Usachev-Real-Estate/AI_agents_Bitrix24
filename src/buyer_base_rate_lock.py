@@ -85,6 +85,13 @@ def _list_buyer_deals(
         nxt = raw.get("next")
         if nxt is None:
             break
+        # Bitrix обязан двигать курсор вперёд. Если не двигает — выходим,
+        # иначе цикл крутится вечно и список растёт до OOM.
+        if int(nxt) <= start:
+            logger.warning(
+                "Pagination stalled at start=%s (next=%s) — stopping", start, nxt,
+            )
+            break
         start = int(nxt)
     return items
 
@@ -238,7 +245,7 @@ def process_buyer_deals(
                     msg = (
                         f"Откат поля «Базовая ставка» у сделки "
                         f"({BUYERS_FUNNEL_LABEL}).\n"
-                        f"Кто менял: {who}\n"
+                        f"Последний редактор карточки: {who}\n"
                         f"Сделка: [url=/crm/deal/details/{did}/]{title}[/url]\n"
                         f"Восстановлено: {snapshot or '—'} "
                         f"(попытка: {current or '—'})."
@@ -308,7 +315,8 @@ def run(settings: Settings | None = None) -> dict[str, Any]:
         settings.dry_run,
         count_deal_base_rate_snapshots(),
     )
-    print_ui_checklist(restricted_ids, labels)
+    if "--checklist" in sys.argv:
+        print_ui_checklist(restricted_ids, labels)
 
     lookback = max(1, int(settings.contact_source_lock_lookback_minutes))
     since = (now - timedelta(minutes=lookback)).isoformat()

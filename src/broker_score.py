@@ -3,23 +3,22 @@
 import asyncio
 import logging
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 _SRC_DIR = Path(__file__).resolve().parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
-from fast_bitrix24 import Bitrix
-from config import get_settings
-from db import get_connection, init_db
-from broker_rating import (
+from fast_bitrix24 import Bitrix  # noqa: E402
+from config import get_settings  # noqa: E402
+from db import db_session, init_db  # noqa: E402
+from broker_rating import (  # noqa: E402
     compute_all_ratings,
     compute_broker_rating,
     format_rating_scorecard,
     get_rating_period,
 )
-from broker_rating_collectors import (
+from broker_rating_collectors import (  # noqa: E402
     fetch_all_broker_tasks,
     fetch_important_feed_posts,
     list_eligible_brokers_for_rating,
@@ -31,7 +30,7 @@ logger = logging.getLogger(__name__)
 def get_broker_info(broker_id: int) -> dict | None:
     """Имя и отдел из таблицы brokers."""
     try:
-        with get_connection() as conn:
+        with db_session() as conn:
             row = conn.execute(
                 "SELECT responsible_id, responsible_name, department, department_id, "
                 "lead_count, deal_count "

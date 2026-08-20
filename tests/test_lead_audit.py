@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from tools import (
+from tools import (  # noqa: E402
     LEAD_STATUS_CONVERTED,
     LEAD_STATUS_JUNK,
     LEAD_STATUS_NECELEVOY,

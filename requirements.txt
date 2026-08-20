@@ -3,3 +3,5 @@ langchain-openai>=0.2.0
 fast-bitrix24>=1.0.0
 python-dotenv>=1.0.0
 pydantic-settings>=2.0.0
+# используется напрямую в exclusive_expiry.py и notify.py
+httpx>=0.27.0

@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from tools import check_missed_callback_violations
+from tools import check_missed_callback_violations  # noqa: E402
 
 
 def test_missed_call_violation():

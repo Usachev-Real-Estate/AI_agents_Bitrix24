@@ -43,7 +43,6 @@ from tools import (  # noqa: E402
     _fetch_deal_activities,
     _fetch_entity_timeline,
     _open_activity_due_datetime,
-    _parse_datetime,
     _strip_lead_markup,
     _allowed_comment_authors,
 )
@@ -197,7 +196,10 @@ def classify_deal(
         sample = (other_comments or other_live_acts)[0]
         why = f"есть касание, но нет плана дальнейших действий: «{sample}»"
     elif overdue_or_done:
-        why = "нет живого дела с планом и нет комментария с планом (есть только закрытые/просроченные дела)"
+        why = (
+            "нет живого дела с планом и нет комментария с планом "
+            "(есть только закрытые/просроченные дела)"
+        )
     else:
         why = "нет комментария с планом и нет запланированного дела"
 

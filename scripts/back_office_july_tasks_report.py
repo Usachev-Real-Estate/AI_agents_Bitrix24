@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import re
 import sys
-from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -15,7 +14,7 @@ _SRC_DIR = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
-import requests
+import requests  # noqa: E402
 
 from config import get_settings  # noqa: E402
 from fast_bitrix24 import Bitrix  # noqa: E402
@@ -227,7 +226,10 @@ def _closing_message_from_chat(
     close_events = [
         (dt, text)
         for dt, author_id, text in parsed
-        if author_id == 0 and any(m in text.lower() for m in ("завершил задачу", "завершила задачу"))
+        if author_id == 0 and any(
+            m in text.lower()
+            for m in ("завершил задачу", "завершила задачу")
+        )
     ]
     if close_events and closed_at is not None:
         close_dt = min(close_events, key=lambda x: abs((x[0] - closed_at).total_seconds()))[0]
@@ -331,7 +333,7 @@ async def analyze_user_tasks(client: B24Client, user: dict) -> dict[str, Any]:
 def format_report(results: list[dict]) -> str:
     lines = [
         "Отчёт: БЭК-ОФИС — закрытые задачи за июль 2026",
-        f"Период: 01.07.2026 — 31.07.2026",
+        "Период: 01.07.2026 — 31.07.2026",
         "",
     ]
 
@@ -406,7 +408,10 @@ async def async_main() -> None:
     report = format_report(results)
     print("\n" + report)
 
-    out_path = Path(__file__).resolve().parent.parent / "data" / "back_office_july_2026_tasks_report.txt"
+    out_path = (
+        Path(__file__).resolve().parent.parent
+        / "data" / "back_office_july_2026_tasks_report.txt"
+    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(report, encoding="utf-8")
     print(f"\nОтчёт сохранён: {out_path}")

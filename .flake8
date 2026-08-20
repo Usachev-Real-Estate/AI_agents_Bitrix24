@@ -1,5 +1,7 @@
 [flake8]
 max-line-length = 100
 exclude = venv,.venv,build,dist,*.egg-info
+# E203 конфликтует с форматированием black (срезы вида `text[i :]`).
+extend-ignore = E203
 per-file-ignores =
     src/prompts.py: E501

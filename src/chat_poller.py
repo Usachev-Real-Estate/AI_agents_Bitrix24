@@ -12,10 +12,10 @@ _SRC_DIR = Path(__file__).resolve().parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
-from fast_bitrix24 import Bitrix
-from config import get_settings
-from notify import send_chat_message_chunked
-from broker_score import build_scorecard_for_broker
+from fast_bitrix24 import Bitrix  # noqa: E402
+from config import get_settings  # noqa: E402
+from notify import send_chat_message_chunked  # noqa: E402
+from broker_score import build_scorecard_for_broker  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +123,7 @@ async def async_main():
 
     for broker_id, msg_id in commands:
         logger.info(f"Processing command for broker {broker_id} from message {msg_id}")
-        
+
         report = await build_scorecard_for_broker(broker_id, bx, settings)
         if not report:
             msg = f"❌ Брокер с ID {broker_id} не найден или произошла ошибка"
@@ -153,13 +153,13 @@ async def async_main():
             week_end = now.isoformat()
             violators, clean = get_weekly_stats(week_start, week_end, latest_only=True)
             violators, clean = filter_weekly_scope(violators, clean)
-            
+
             prev_week_start = (week_start_dt - timedelta(days=7)).isoformat()
             prev_week_end = week_start_dt.isoformat()
             prev_violators, _ = get_weekly_stats(prev_week_start, prev_week_end, latest_only=True)
             prev_violators, _ = filter_weekly_scope(prev_violators, [])
             prev_total = sum(v['total_violations'] for v in prev_violators)
-            
+
             report = format_weekly_report(
                 violators, clean, week_start, now,
                 prev_total_violations=prev_total,
@@ -186,7 +186,7 @@ async def async_main():
             week_end = now.isoformat()
             violators, clean = get_weekly_stats(week_start, week_end, latest_only=True)
             violators, clean = filter_weekly_scope(violators, clean)
-            
+
             # Filter by department name (fuzzy match)
             dept_violators = [
                 v for v in violators
@@ -196,7 +196,7 @@ async def async_main():
                 c for c in clean
                 if dept_query.lower() in (c.get("department") or "").lower()
             ]
-            
+
             if not dept_violators and not dept_clean:
                 msg = f"❌ Отдел '{dept_query}' не найден или нет данных"
                 if not settings.dry_run:
@@ -206,14 +206,17 @@ async def async_main():
             dept_name = dept_violators[0]["department"] if dept_violators else (
                 dept_clean[0]["department"] if dept_clean else dept_query
             )
-            
+
             prev_week_start = (week_start_dt - timedelta(days=7)).isoformat()
             prev_week_end = week_start_dt.isoformat()
             prev_violators, _ = get_weekly_stats(prev_week_start, prev_week_end, latest_only=True)
             prev_violators, _ = filter_weekly_scope(prev_violators, [])
-            dept_prev_violators = [v for v in prev_violators if dept_query.lower() in (v.get("department") or "").lower()]
+            dept_prev_violators = [
+                v for v in prev_violators
+                if dept_query.lower() in (v.get("department") or "").lower()
+            ]
             dept_prev_total = sum(v['total_violations'] for v in dept_prev_violators)
-            
+
             report = format_weekly_report(
                 dept_violators, dept_clean, week_start, now, dept_name=dept_name,
                 prev_total_violations=dept_prev_total,

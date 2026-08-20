@@ -14,17 +14,17 @@ _SRC_DIR = Path(__file__).resolve().parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
-from config import Settings, get_settings, setup_logging
-from db import (
+from config import Settings, get_settings, setup_logging  # noqa: E402
+from db import (  # noqa: E402
     count_violations_on_date,
     init_db,
     list_active_brokers_from_db,
     upsert_broker_daily_metric,
     upsert_broker_shared_lead,
 )
-from notify import _bx_call_sync
-from task_auditor import classify_tasks
-from tools import LEAD_STATUS_SHARED, _bx_get_all_sync
+from notify import _bx_call_sync  # noqa: E402
+from task_auditor import classify_tasks  # noqa: E402
+from tools import LEAD_STATUS_SHARED, _bx_get_all_sync  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +141,10 @@ def list_eligible_brokers_for_rating(settings: Settings | None = None) -> list[d
             "deal_count": int(db_row.get("deal_count") or 0),
         })
 
-    eligible = [b for b in eligible if int(b.get("lead_count") or 0) > 0 or int(b.get("deal_count") or 0) > 0]
+    eligible = [
+        b for b in eligible
+        if int(b.get("lead_count") or 0) > 0 or int(b.get("deal_count") or 0) > 0
+    ]
     eligible.sort(key=lambda b: str(b.get("responsible_name") or ""))
     return eligible
 
@@ -269,9 +272,9 @@ async def collect_daily_metrics(settings: Settings | None = None) -> dict[str, i
     now_iso = now.isoformat()
 
     users = fetch_users_by_departments(cfg.broker_rating_sales_dept_ids)
-    eligible_ids = {int(b["responsible_id"]) for b in list_eligible_brokers_for_rating(cfg)}
-    db_brokers = {int(b["responsible_id"]): b for b in list_active_brokers_from_db()}
-    broker_ids = eligible_ids
+    broker_ids = {
+        int(b["responsible_id"]) for b in list_eligible_brokers_for_rating(cfg)
+    }
 
     since = (now - timedelta(days=cfg.broker_rating_period_days)).isoformat()
     collect_shared_leads(since, now_iso)

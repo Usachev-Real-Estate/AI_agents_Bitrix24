@@ -135,16 +135,14 @@ def test_collect_due_notifications_respects_intervals(monkeypatch) -> None:
         },
     ]
 
-    def fake_last(deal_id: int, role: str) -> str | None:
-        if deal_id == 100 and role == ROLE_BROKER:
-            return (now - timedelta(hours=1)).isoformat()
-        if deal_id == 100 and role == ROLE_ROP:
-            return (now - timedelta(minutes=30)).isoformat()
-        return None
+    notified = {
+        (100, ROLE_BROKER): (now - timedelta(hours=1)).isoformat(),
+        (100, ROLE_ROP): (now - timedelta(minutes=30)).isoformat(),
+    }
 
     monkeypatch.setattr(
-        "buyer_commission_reminder.get_buyer_commission_notified_at",
-        fake_last,
+        "buyer_commission_reminder.get_buyer_commission_notified_map",
+        lambda deal_ids: {k: v for k, v in notified.items() if k[0] in deal_ids},
     )
 
     broker_groups, rop_groups = collect_due_notifications(
@@ -172,8 +170,8 @@ def test_collect_due_skips_inactive_broker(monkeypatch) -> None:
         }
     ]
     monkeypatch.setattr(
-        "buyer_commission_reminder.get_buyer_commission_notified_at",
-        lambda *_a, **_k: None,
+        "buyer_commission_reminder.get_buyer_commission_notified_map",
+        lambda *_a, **_k: {},
     )
     broker_groups, rop_groups = collect_due_notifications(
         deals,

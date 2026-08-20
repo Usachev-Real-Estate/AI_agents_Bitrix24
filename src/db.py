@@ -1,8 +1,9 @@
 import logging
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 DB_PATH = Path("data/violations.db")
 ROUTINE_AUDIT_SINCE_CUTOFF = "2026-06-01"
@@ -51,18 +52,41 @@ def is_routine_audit_run(report_since: str, total_leads: int, run_time: str = ""
     return True
 
 
+# Девять cron-задач пишут в одну базу; дефолтные 5 с дают «database is locked».
+BUSY_TIMEOUT_MS = 10_000
+
+
 def get_connection() -> sqlite3.Connection:
-    """Return connection with WAL mode for better concurrent reads."""
+    """Return connection with WAL mode for better concurrent reads.
+
+    Caller owns the connection and must close it — prefer `db_session()`.
+    """
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=BUSY_TIMEOUT_MS / 1000)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
     return conn
+
+
+@contextmanager
+def db_session() -> Iterator[sqlite3.Connection]:
+    """Transactional connection that is always closed.
+
+    `with sqlite3.connect(...) as conn` commits but never closes: in WAL mode
+    the leaked handle keeps a read lock and blocks checkpointing.
+    """
+    conn = get_connection()
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def init_db() -> None:
     """Create tables if not exist (idempotent)."""
-    with get_connection() as conn:
+    with db_session() as conn:
         conn.execute("""
         CREATE TABLE IF NOT EXISTS audit_runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -359,7 +383,7 @@ def _migrate_audit_runs(conn: sqlite3.Connection) -> None:
 def purge_test_violations() -> int:
     """Delete violations from runs explicitly marked non-routine (is_routine=0)."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         to_delete = [
             int(r[0])
             for r in conn.execute(
@@ -395,7 +419,7 @@ def save_audit_run(
     is_routine: bool = True,
 ) -> int:
     """Insert audit_run row, return run_id."""
-    with get_connection() as conn:
+    with db_session() as conn:
         cursor = conn.execute("""
         INSERT INTO audit_runs (
             run_time, total_leads, total_buyer_deals, total_seller_deals,
@@ -447,7 +471,7 @@ def save_violations(audit_run_id: int, violations: list[dict[str, Any]],
             now
         ))
 
-    with get_connection() as conn:
+    with db_session() as conn:
         cursor = conn.executemany("""
         INSERT OR IGNORE INTO violations (
             audit_run_id, entity_type, entity_id, responsible_id,
@@ -500,7 +524,7 @@ def upsert_brokers(
             rid, stats["name"], stats["dept"], stats["dept_id"], stats["leads"], stats["deals"], now
         ))
 
-    with get_connection() as conn:
+    with db_session() as conn:
         conn.executemany("""
         INSERT INTO brokers (
             responsible_id, responsible_name, department, department_id,
@@ -524,7 +548,7 @@ def get_weekly_stats(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Return (violators_list, clean_brokers_list) for weekly report."""
     upper = week_end or datetime.now(timezone.utc).isoformat()
-    with get_connection() as conn:
+    with db_session() as conn:
         conn.row_factory = sqlite3.Row
         latest_run_id: int | None = None
         if latest_only:
@@ -612,7 +636,7 @@ def was_exclusive_expiry_notified(
 ) -> bool:
     """Return True if this milestone reminder was already sent."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         row = conn.execute(
             """
             SELECT 1 FROM exclusive_expiry_notifications
@@ -632,7 +656,7 @@ def mark_exclusive_expiry_notified(
 ) -> None:
     """Persist that a milestone expiry reminder was sent (idempotent)."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         conn.execute(
             """
             INSERT OR IGNORE INTO exclusive_expiry_notifications (
@@ -646,7 +670,7 @@ def mark_exclusive_expiry_notified(
 def count_contact_source_snapshots() -> int:
     """Return number of stored contact SOURCE_ID snapshots."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         row = conn.execute(
             "SELECT COUNT(*) FROM contact_source_snapshots"
         ).fetchone()
@@ -656,7 +680,7 @@ def count_contact_source_snapshots() -> int:
 def get_contact_source_snapshot(contact_id: int) -> str | None:
     """Return stored SOURCE_ID for contact, or None if missing."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         row = conn.execute(
             "SELECT source_id FROM contact_source_snapshots WHERE contact_id = ?",
             (contact_id,),
@@ -671,7 +695,7 @@ def upsert_contact_source_snapshot(
 ) -> None:
     """Insert or update SOURCE_ID snapshot for a contact."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         conn.execute(
             """
             INSERT INTO contact_source_snapshots (contact_id, source_id, updated_at)
@@ -691,7 +715,7 @@ def bulk_upsert_contact_source_snapshots(
     if not rows:
         return 0
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         conn.executemany(
             """
             INSERT INTO contact_source_snapshots (contact_id, source_id, updated_at)
@@ -708,7 +732,7 @@ def bulk_upsert_contact_source_snapshots(
 def count_deal_source_snapshots() -> int:
     """Return number of stored deal SOURCE_ID snapshots."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         row = conn.execute(
             "SELECT COUNT(*) FROM deal_source_snapshots"
         ).fetchone()
@@ -718,7 +742,7 @@ def count_deal_source_snapshots() -> int:
 def get_deal_source_snapshot(deal_id: int) -> str | None:
     """Return stored SOURCE_ID for deal, or None if missing."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         row = conn.execute(
             "SELECT source_id FROM deal_source_snapshots WHERE deal_id = ?",
             (deal_id,),
@@ -733,7 +757,7 @@ def upsert_deal_source_snapshot(
 ) -> None:
     """Insert or update SOURCE_ID snapshot for a deal."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         conn.execute(
             """
             INSERT INTO deal_source_snapshots (deal_id, source_id, updated_at)
@@ -749,7 +773,7 @@ def upsert_deal_source_snapshot(
 def count_deal_base_rate_snapshots() -> int:
     """Return number of stored deal base-rate snapshots."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         row = conn.execute(
             "SELECT COUNT(*) FROM deal_base_rate_snapshots"
         ).fetchone()
@@ -759,7 +783,7 @@ def count_deal_base_rate_snapshots() -> int:
 def get_deal_base_rate_snapshot(deal_id: int) -> str | None:
     """Return stored base rate for deal, or None if missing."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         row = conn.execute(
             "SELECT base_rate FROM deal_base_rate_snapshots WHERE deal_id = ?",
             (deal_id,),
@@ -774,7 +798,7 @@ def upsert_deal_base_rate_snapshot(
 ) -> None:
     """Insert or update base-rate snapshot for a deal."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         conn.execute(
             """
             INSERT INTO deal_base_rate_snapshots (deal_id, base_rate, updated_at)
@@ -793,7 +817,7 @@ def get_buyer_commission_notified_at(
 ) -> str | None:
     """Return last notification timestamp for deal+role, or None."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         row = conn.execute(
             """
             SELECT notified_at FROM buyer_commission_notifications
@@ -804,6 +828,36 @@ def get_buyer_commission_notified_at(
         return None if row is None else str(row[0] or "")
 
 
+def get_buyer_commission_notified_map(
+    deal_ids: list[int],
+) -> dict[tuple[int, str], str]:
+    """Return {(deal_id, role): notified_at} for the given deals in one query.
+
+    The per-deal getter opened (and ran init_db on) a fresh connection for every
+    deal and role, which is two connections per deal per hourly run.
+    """
+    if not deal_ids:
+        return {}
+    init_db()
+    result: dict[tuple[int, str], str] = {}
+    with db_session() as conn:
+        # SQLite limits host parameters, so query in chunks.
+        for i in range(0, len(deal_ids), 500):
+            chunk = deal_ids[i:i + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""
+                SELECT deal_id, recipient_role, notified_at
+                FROM buyer_commission_notifications
+                WHERE deal_id IN ({placeholders})
+                """,
+                chunk,
+            ).fetchall()
+            for deal_id, role, notified_at in rows:
+                result[(int(deal_id), str(role))] = str(notified_at or "")
+    return result
+
+
 def mark_buyer_commission_notified(
     deal_id: int,
     recipient_role: str,
@@ -812,7 +866,7 @@ def mark_buyer_commission_notified(
 ) -> None:
     """Upsert last commission-reminder notification for deal+role."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         conn.execute(
             """
             INSERT INTO buyer_commission_notifications (
@@ -829,7 +883,7 @@ def mark_buyer_commission_notified(
 def was_buyer_commission_enforced(deal_id: int, enforce_date: str) -> bool:
     """Return True if deal was already moved to pool on enforce_date."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         row = conn.execute(
             """
             SELECT 1 FROM buyer_commission_enforcements
@@ -849,7 +903,7 @@ def mark_buyer_commission_enforced(
 ) -> None:
     """Persist that a deal was moved to the shared pool on enforce_date."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         conn.execute(
             """
             INSERT OR IGNORE INTO buyer_commission_enforcements (
@@ -877,7 +931,7 @@ def upsert_broker_shared_lead(
 ) -> None:
     """Persist a lead moved to «Общие лиды»."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         conn.execute(
             """
             INSERT OR IGNORE INTO broker_shared_leads (
@@ -896,7 +950,7 @@ def count_shared_leads_for_broker(
     """Count leads moved to shared queue attributed to broker."""
     init_db()
     upper = until or datetime.now(timezone.utc).isoformat()
-    with get_connection() as conn:
+    with db_session() as conn:
         row = conn.execute(
             """
             SELECT COUNT(*) FROM broker_shared_leads
@@ -917,7 +971,7 @@ def count_pool_deals_for_broker(
     """Count deals moved to shared pool attributed to broker."""
     init_db()
     upper = until or datetime.now(timezone.utc).isoformat()
-    with get_connection() as conn:
+    with db_session() as conn:
         row = conn.execute(
             """
             SELECT COUNT(*) FROM buyer_commission_enforcements
@@ -942,7 +996,7 @@ def upsert_broker_daily_metric(
 ) -> None:
     """Insert or update daily broker metrics."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         conn.execute(
             """
             INSERT INTO broker_daily_metrics (
@@ -976,7 +1030,7 @@ def get_broker_daily_metrics_summary(
     """Aggregate daily metrics for a broker in a date range."""
     init_db()
     upper = until or datetime.now(timezone.utc).isoformat()
-    with get_connection() as conn:
+    with db_session() as conn:
         row = conn.execute(
             """
             SELECT
@@ -1007,7 +1061,7 @@ def get_violations_for_broker(
     """Return routine violations for broker in period."""
     init_db()
     upper = until or datetime.now(timezone.utc).isoformat()
-    with get_connection() as conn:
+    with db_session() as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
@@ -1030,7 +1084,7 @@ def count_violations_on_date(broker_id: int, metric_date: str) -> int:
     init_db()
     day_start = f"{metric_date}T00:00:00+00:00"
     day_end = f"{metric_date}T23:59:59+00:00"
-    with get_connection() as conn:
+    with db_session() as conn:
         row = conn.execute(
             """
             SELECT COUNT(*) FROM violations v
@@ -1076,7 +1130,7 @@ def save_broker_ratings_snapshot(ratings: list[dict[str, Any]], snapshot_date: s
         )
         for r in ratings
     ]
-    with get_connection() as conn:
+    with db_session() as conn:
         conn.executemany(
             """
             INSERT INTO broker_ratings (
@@ -1117,7 +1171,7 @@ def get_previous_rating_snapshot(
 ) -> dict[int, float]:
     """Return {broker_id: score} from latest snapshot before given date."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         row = conn.execute(
             """
             SELECT snapshot_date FROM broker_ratings
@@ -1143,7 +1197,7 @@ def get_previous_rating_snapshot(
 def get_broker_rating_history(broker_id: int, limit: int = 12) -> list[dict[str, Any]]:
     """Return recent rating snapshots for a broker."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
@@ -1160,7 +1214,7 @@ def get_broker_rating_history(broker_id: int, limit: int = 12) -> list[dict[str,
 def list_active_brokers_from_db() -> list[dict[str, Any]]:
     """Return brokers with active portfolio from latest audit snapshot."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
@@ -1179,7 +1233,7 @@ def list_active_brokers_from_db() -> list[dict[str, Any]]:
 def was_lead_quality_finding_recorded(lead_id: int, rule: str) -> bool:
     """True if this lead+rule was already persisted."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         row = conn.execute(
             """
             SELECT 1 FROM lead_quality_findings
@@ -1201,7 +1255,7 @@ def save_lead_quality_finding(
 ) -> bool:
     """Insert finding. Returns True if newly inserted."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         cur = conn.execute(
             """
             INSERT OR IGNORE INTO lead_quality_findings (
@@ -1229,7 +1283,7 @@ def mark_lead_quality_notified(
 ) -> None:
     """Set notified_at for an existing finding."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         conn.execute(
             """
             UPDATE lead_quality_findings
@@ -1243,7 +1297,7 @@ def mark_lead_quality_notified(
 def delete_lead_quality_finding(lead_id: int, rule: str | None = None) -> int:
     """Delete finding(s) for lead. If rule is None — all rules for lead."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         if rule:
             cur = conn.execute(
                 "DELETE FROM lead_quality_findings WHERE lead_id = ? AND rule = ?",
@@ -1260,7 +1314,7 @@ def delete_lead_quality_finding(lead_id: int, rule: str | None = None) -> int:
 def list_lead_quality_findings() -> list[dict[str, Any]]:
     """Return all stored quality findings."""
     init_db()
-    with get_connection() as conn:
+    with db_session() as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """

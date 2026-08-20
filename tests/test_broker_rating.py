@@ -2,8 +2,6 @@
 
 from datetime import datetime, timezone
 
-import pytest
-
 from broker_rating import (
     BrokerRating,
     TasksMetrics,
@@ -75,7 +73,12 @@ def test_compute_tasks_score_closure_bonus():
 
 
 def test_compute_engagement_score():
-    m = EngagementMetrics(crm_visit_days=18, workdays_in_period=22, important_posts_total=5, important_posts_read=4)
+    m = EngagementMetrics(
+        crm_visit_days=18,
+        workdays_in_period=22,
+        important_posts_total=5,
+        important_posts_read=4,
+    )
     score = compute_engagement_score(m)
     assert 75 < score < 85
 

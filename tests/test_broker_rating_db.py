@@ -1,6 +1,5 @@
 """Tests for broker rating DB helpers."""
 
-import sqlite3
 from datetime import datetime, timezone
 
 import pytest

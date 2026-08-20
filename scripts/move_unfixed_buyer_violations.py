@@ -123,13 +123,7 @@ def main() -> int:
             continue
         to_move.append(v)
 
-    fixed = sorted(watch_ids - set(still) - {
-        _coerce_int(d.get("deal_id"))
-        for d in (payload.get("deals") or [])
-        if _coerce_int(d.get("deal_id")) in watch_ids
-        and _coerce_int(d.get("deal_id")) not in still
-    })
-    # deals that left the buyers funnel or no longer violate
+    # Сделки, ушедшие из воронки покупателей или переставшие нарушать.
     present_ids = {_coerce_int(d.get("deal_id")) for d in deals}
     left_funnel = sorted(watch_ids - present_ids)
     still_ok = sorted(present_ids - set(still))
@@ -173,7 +167,10 @@ def main() -> int:
     print("===== SKIP ORESHNIKOVA ETC =====")
     for did in skipped_people:
         print(f"SKIP #{did}")
-    print(f"DONE moved={moved} fail={len(fails)} by_user={dict(Counter({k: len(v) for k, v in by_user.items()}))}")
+    by_user_counts = dict(Counter({k: len(v) for k, v in by_user.items()}))
+    print(
+        f"DONE moved={moved} fail={len(fails)} by_user={by_user_counts}"
+    )
     if fails:
         print("FAILS", fails)
     return 0 if not fails else 1

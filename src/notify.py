@@ -10,7 +10,9 @@ from config import BX_EXECUTOR, get_settings
 
 logger = logging.getLogger(__name__)
 
-MESSAGE_MAX_LEN = 2000
+# Жёсткий предел одного сообщения Bitrix24. Строка длиннее режется по нему,
+# иначе хвост молча теряется на стороне портала.
+MESSAGE_HARD_LIMIT = 4000
 
 
 def _bx_call_sync(method: str, params: dict[str, Any]) -> Any:
@@ -108,6 +110,34 @@ def send_user_chat_message(
     return msg_id
 
 
+def _split_message(message: str, chunk_size: int) -> list[str]:
+    """Split text into chunks of at most chunk_size, breaking on newlines.
+
+    A single line longer than chunk_size is hard-split: previously it was
+    emitted whole and truncated by Bitrix.
+    """
+    chunks: list[str] = []
+    current = ""
+
+    for line in message.split("\n"):
+        while len(line) > chunk_size:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(line[:chunk_size])
+            line = line[chunk_size:]
+        if len(current) + len(line) + 1 > chunk_size:
+            if current:
+                chunks.append(current)
+            current = line
+        else:
+            current += "\n" + line if current else line
+
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def send_chat_message_chunked(chat_id: int, message: str, chunk_size: int = 4000) -> int:
     """Send a long message to chat, splitting into chunks.
 
@@ -119,25 +149,12 @@ def send_chat_message_chunked(chat_id: int, message: str, chunk_size: int = 4000
     Returns:
         Number of chunks sent.
     """
+    chunk_size = min(chunk_size, MESSAGE_HARD_LIMIT)
     if len(message) <= chunk_size:
         send_chat_message(chat_id, message)
         return 1
 
-    lines = message.split("\n")
-    chunks: list[str] = []
-    current = ""
-
-    for line in lines:
-        if len(current) + len(line) + 1 > chunk_size:
-            if current:
-                chunks.append(current)
-            current = line
-        else:
-            current += "\n" + line if current else line
-
-    if current:
-        chunks.append(current)
-
+    chunks = _split_message(message, chunk_size)
     for chunk in chunks:
         send_chat_message(chat_id, chunk)
 
@@ -160,18 +177,7 @@ def send_user_chat_message_chunked(
         send_user_chat_message(user_id, message, system=system)
         return 1
 
-    lines = message.split("\n")
-    chunks: list[str] = []
-    current = ""
-    for line in lines:
-        if len(current) + len(line) + 1 > chunk_size:
-            if current:
-                chunks.append(current)
-            current = line
-        else:
-            current += "\n" + line if current else line
-    if current:
-        chunks.append(current)
+    chunks = _split_message(message, chunk_size)
     for chunk in chunks:
         send_user_chat_message(user_id, chunk, system=system)
     logger.info(

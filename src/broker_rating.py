@@ -14,7 +14,6 @@ from db import (
     count_shared_leads_for_broker,
     get_broker_daily_metrics_summary,
     get_violations_for_broker,
-    list_active_brokers_from_db,
     save_broker_ratings_snapshot,
 )
 

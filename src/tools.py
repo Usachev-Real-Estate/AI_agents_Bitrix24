@@ -10,7 +10,7 @@ from typing import Any
 from fast_bitrix24 import Bitrix
 from langchain_core.tools import tool
 
-from config import BX_EXECUTOR, Settings, get_settings
+from config import BX_EXECUTOR, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,9 @@ BUYER_SHOW_MAX_DAYS_FROM_STAGE = 14
 BUYER_SHOW_HORIZON_STAGE_IDS = frozenset({
     "C18:UC_DVW1P9",  # Повторный показ
 })
+# «Комментариев ответственного не было» — sentinel из
+# _days_since_last_comment_by_authors. Не выводится пользователю.
+NO_COMMENT_DAYS = 999
 BUYER_OFER_MIN_COMMENT_LEN = 30
 BUYER_REASON_MIN_COMMENT_LEN = 5
 # Брокер пишет причину, затем сразу меняет стадию: CREATED комментария
@@ -448,7 +451,14 @@ def _author_comment_meets(
             return True
         created = _parse_datetime(item.get("created"))
         if created is None:
-            return True
+            # Дату не разобрать — доказать, что комментарий после входа на стадию,
+            # нельзя. Не засчитываем, но делаем сбой заметным.
+            logger.warning(
+                "Timeline comment without parsable date: author=%s created=%r",
+                item.get("author_id"),
+                item.get("created"),
+            )
+            continue
         if created.tzinfo is None:
             created = created.replace(tzinfo=timezone.utc)
         if created >= threshold:
@@ -461,18 +471,26 @@ def _days_since_last_comment_by_authors(
     current: datetime,
     allowed_author_ids: set[int],
 ) -> int:
-    """Days since last comment from allowed authors, or 999 if none."""
+    """Days since last comment from allowed authors, or NO_COMMENT_DAYS if none."""
     authored = [
         item for item in timeline
         if _coerce_int(item.get("author_id")) in allowed_author_ids
         and str(item.get("comment") or "").strip()
     ]
     if not authored:
-        return 999
-    latest = max(authored, key=lambda item: str(item.get("created") or ""))
-    created = _parse_datetime(latest.get("created"))
-    if created is None:
-        return 999
+        return NO_COMMENT_DAYS
+    dated = [
+        (parsed, item)
+        for item, parsed in (
+            (item, _parse_datetime(item.get("created"))) for item in authored
+        )
+        if parsed is not None
+    ]
+    if not dated:
+        return NO_COMMENT_DAYS
+    # Сравниваем datetime, а не ISO-строки: разные смещения (+03:00 / +00:00)
+    # сортируются лексикографически неверно.
+    created = max(parsed for parsed, _ in dated)
     return int(_days_between(created, current))
 
 
@@ -952,46 +970,116 @@ def _lost_stage_id_for_category(category_id: int) -> str | None:
     return None
 
 
+# Границы слова с учётом кириллицы: «РОП» не должен совпадать внутри «Европа».
+_WORD_CHARS = "а-яёa-z0-9_"
+
+
+def _position_is_rop(position: str, substrings: list[str]) -> bool:
+    """True when a job title marks the user as a ROP.
+
+    Matching is on word boundaries, not raw substrings: a bare "роп" occurs
+    inside ordinary words («Европа»), and a false ROP would make an unrelated
+    user's comments count towards the audit.
+    """
+    text = (position or "").strip().lower()
+    if not text:
+        return False
+    for sub in substrings:
+        token = sub.strip().lower()
+        if not token:
+            continue
+        pattern = (
+            rf"(?<![{_WORD_CHARS}]){re.escape(token)}(?![{_WORD_CHARS}])"
+        )
+        if re.search(pattern, text):
+            return True
+    return False
+
+
 def _build_rop_map() -> dict[int, int]:
-    """Build department_id → ROP user_id mapping."""
+    """Build department_id → ROP user_id mapping.
+
+    Matching is by substring (CONTACT_SOURCE_LOCK_ROP_POSITION_SUBSTR_JSON), the
+    same rule the SOURCE locks use. An exact-title filter used to miss any
+    spelling variation, and a missed ROP silently voids their comments.
+    """
+    substrings = get_settings().contact_source_lock_rop_position_substr
     try:
-        rop_users = _bx_get_all_sync("user.get", {
-            "FILTER": {
-                "WORK_POSITION": "Руководитель отдела продаж (РОП)",
-                "ACTIVE": True,
-            },
-        })
-        rop_map: dict[int, int] = {}
-        for user in _as_list(rop_users):
-            if not isinstance(user, dict):
-                continue
-            uid = _coerce_int(user.get("ID"))
-            depts = user.get("UF_DEPARTMENT", [])
-            if isinstance(depts, list) and depts:
-                dept_id = _coerce_int(depts[0])
-                if dept_id:
-                    rop_map[dept_id] = uid
-        return rop_map
+        users = _bx_get_all_sync("user.get", {"FILTER": {"ACTIVE": True}})
     except Exception:
         logger.warning("Failed to build ROP map, ROP comments won't be counted")
         return {}
 
+    rop_map: dict[int, int] = {}
+    for user in _as_list(users):
+        if not isinstance(user, dict):
+            continue
+        if not _position_is_rop(str(user.get("WORK_POSITION") or ""), substrings):
+            continue
+        uid = _coerce_int(user.get("ID"))
+        depts = user.get("UF_DEPARTMENT", [])
+        if not uid or not isinstance(depts, list) or not depts:
+            continue
+        dept_id = _coerce_int(depts[0])
+        if not dept_id:
+            continue
+        if dept_id in rop_map and rop_map[dept_id] != uid:
+            logger.warning(
+                "Department %s has several ROPs (%s, %s) — keeping %s",
+                dept_id,
+                rop_map[dept_id],
+                uid,
+                rop_map[dept_id],
+            )
+            continue
+        rop_map[dept_id] = uid
+    if not rop_map:
+        logger.warning("ROP map is empty — ROP comments won't be counted")
+    return rop_map
+
 
 def _build_broker_dept_map(broker_ids: set[int]) -> dict[int, int]:
-    """Build broker user_id → primary department_id mapping."""
+    """Build broker user_id → primary department_id mapping.
+
+    One request for the whole set; per-broker fallback on failure. A partially
+    built map means the ROP of the missing brokers stops counting as a comment
+    author, so failures are logged loudly rather than swallowed.
+    """
     if not broker_ids:
         return {}
     broker_dept_map: dict[int, int] = {}
+
+    def _absorb(payload: Any) -> None:
+        for user in _as_list(payload):
+            if not isinstance(user, dict):
+                continue
+            uid = _coerce_int(user.get("ID"))
+            depts = user.get("UF_DEPARTMENT", [])
+            if uid and isinstance(depts, list) and depts:
+                broker_dept_map[uid] = _coerce_int(depts[0])
+
     try:
-        for bid in broker_ids:
-            user_raw = _bx_get_all_sync("user.get", {"ID": bid})
-            user = user_raw[0] if isinstance(user_raw, list) and user_raw else user_raw
-            if isinstance(user, dict):
-                depts = user.get("UF_DEPARTMENT", [])
-                if isinstance(depts, list) and depts:
-                    broker_dept_map[bid] = _coerce_int(depts[0])
+        _absorb(_bx_get_all_sync("user.get", {"FILTER": {"ID": sorted(broker_ids)}}))
     except Exception:
-        logger.warning("Failed to load broker departments for ROP check")
+        logger.warning("Bulk broker department fetch failed, falling back per user")
+
+    # Добираем поштучно только тех, кого не вернул общий запрос: один сбой
+    # больше не обрывает обход остальных брокеров.
+    missing = sorted(broker_ids - set(broker_dept_map))
+    failed = 0
+    for bid in missing:
+        try:
+            _absorb(_bx_get_all_sync("user.get", {"ID": bid}))
+        except Exception:
+            failed += 1
+            logger.warning("Failed to load department for broker %s", bid)
+    if failed:
+        logger.warning(
+            "Broker department map incomplete: %d/%d users unresolved — "
+            "their ROP comments will not be counted",
+            failed,
+            len(broker_ids),
+        )
     return broker_dept_map
 
 
@@ -1059,7 +1147,10 @@ def _show_date_from_timeline_comments(
                 continue
 
         for m in re.finditer(
-            r"(\d{1,2})\s+(январ\w*|феврал\w*|март\w*|апрел\w*|ма[йя]\w*|июн\w*|июл\w*|август\w*|сентябр\w*|октябр\w*|ноябр\w*|декабр\w*)(?:\s+(\d{4}))?",
+            r"(\d{1,2})\s+"
+            r"(январ\w*|феврал\w*|март\w*|апрел\w*|ма[йя]\w*|июн\w*|"
+            r"июл\w*|август\w*|сентябр\w*|октябр\w*|ноябр\w*|декабр\w*)"
+            r"(?:\s+(\d{4}))?",
             text,
         ):
             day = int(m.group(1))
@@ -1267,12 +1358,26 @@ def _hours_since_create(deal: dict[str, Any], now: datetime) -> float:
     return max(0.0, (now - created).total_seconds() / 3600.0)
 
 
-def _filter_calls_for_deal(
+# Коды сущностей в звонках: voximplant отдаёт строку, activity.list — OWNER_TYPE_ID.
+CALL_ENTITY_ALIASES: dict[str, frozenset[str]] = {
+    "deal": frozenset({"DEAL", "2"}),
+    "lead": frozenset({"LEAD", "1"}),
+}
+
+
+def _filter_calls_for_entity(
     calls: list[dict[str, Any]],
-    deal_id: int,
+    entity_type: str,
+    entity_id: int,
 ) -> list[dict[str, Any]]:
-    """Keep only calls linked to the given deal."""
-    if deal_id <= 0:
+    """Keep only calls linked to the given CRM entity.
+
+    `_fetch_user_calls_for_audit` returns the whole call history of a user, so
+    the caller must narrow it down: a violation is raised against one card and
+    must rest on that card's calls only.
+    """
+    aliases = CALL_ENTITY_ALIASES.get(entity_type.lower())
+    if entity_id <= 0 or not aliases:
         return []
     linked: list[dict[str, Any]] = []
     for call in calls:
@@ -1280,9 +1385,50 @@ def _filter_calls_for_deal(
             continue
         etype = str(call.get("crm_entity_type") or "").upper()
         eid = _coerce_int(call.get("crm_entity_id"))
-        if etype in {"DEAL", "2"} and eid == deal_id:
+        if etype in aliases and eid == entity_id:
             linked.append(call)
     return linked
+
+
+def _filter_calls_for_deal(
+    calls: list[dict[str, Any]],
+    deal_id: int,
+) -> list[dict[str, Any]]:
+    """Keep only calls linked to the given deal."""
+    return _filter_calls_for_entity(calls, "deal", deal_id)
+
+
+def _evidence_incomplete(record: dict[str, Any]) -> bool:
+    """True when the card's timeline/activities could not be read this run.
+
+    Rules treat "no comment" and "no activity" as violations, so a failed fetch
+    must not be mistaken for an empty card: that would flag a compliant broker
+    and, for movable rules, relocate the deal to «Общая база».
+    """
+    return bool(record.get("evidence_incomplete"))
+
+
+def _skip_incomplete(
+    records: list[dict[str, Any]],
+    id_key: str,
+    scope: str,
+) -> list[dict[str, Any]]:
+    """Drop cards with unreadable evidence, logging how many were skipped."""
+    usable = [r for r in records if not _evidence_incomplete(r)]
+    skipped = len(records) - len(usable)
+    if skipped:
+        logger.warning(
+            "%s: %d/%d cards skipped — evidence fetch failed (ids: %s)",
+            scope,
+            skipped,
+            len(records),
+            ", ".join(
+                str(r.get(id_key))
+                for r in records
+                if _evidence_incomplete(r)
+            )[:500],
+        )
+    return usable
 
 
 def _has_comment_by_authors(
@@ -1343,6 +1489,8 @@ def check_seller_deal_violations(
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     violations: list[dict[str, Any]] = []
+
+    deals = _skip_incomplete(deals, "deal_id", "Seller audit")
 
     if rop_map is None:
         rop_map = _build_rop_map()
@@ -1642,7 +1790,7 @@ def check_general_base_violations(
         now = now.replace(tzinfo=timezone.utc)
     violations: list[dict[str, Any]] = []
 
-    for deal in deals:
+    for deal in _skip_incomplete(deals, "deal_id", "General base audit"):
         stage_id = _clean_str(deal.get("stage_id"))
         category_id = _coerce_int(deal.get("category_id"))
         if (
@@ -1829,7 +1977,8 @@ def check_lead_rule2_rule3_violations(
 ) -> list[dict[str, Any]]:
     """Deterministic spam / non-target justification checks (rules 2–3)."""
     violations: list[dict[str, Any]] = []
-    for lead in leads:
+    # Обоснование ищется в таймлайне — нечитаемый таймлайн не равен «нет обоснования».
+    for lead in _skip_incomplete(leads, "lead_id", "Lead rules 2-3"):
         status_id = _lead_status_id(lead)
         status_name = str(lead.get("status_name") or status_id or "—")
         lead_id = _coerce_int(lead.get("lead_id") or lead.get("ID"))
@@ -2029,6 +2178,7 @@ def check_buyer_deal_violations(
     """
     now = _parse_datetime(current_time) or datetime.now(timezone.utc)
     violations: list[dict[str, Any]] = []
+    deals = _skip_incomplete(deals, "deal_id", "Buyer audit")
 
     if rop_map is None:
         rop_map = _build_rop_map()
@@ -2092,7 +2242,7 @@ def check_buyer_deal_violations(
             days_since_comment = _days_since_last_comment_by_authors(
                 timeline, now, allowed_comment_authors,
             )
-            if days_since_comment >= 999:
+            if days_since_comment >= NO_COMMENT_DAYS:
                 idle_days = int(days_on_create)
             else:
                 idle_days = days_since_comment
@@ -2124,7 +2274,7 @@ def check_buyer_deal_violations(
                 if has_non_overdue_contact_plan:
                     continue
 
-                if days_since_comment >= 999:
+                if days_since_comment >= NO_COMMENT_DAYS:
                     if has_overdue_contact_plan:
                         reason = (
                             f"На этапе «{stage_name}» нет комментария ответственного "
@@ -2236,7 +2386,7 @@ def check_buyer_deal_violations(
                 timeline, now, allowed_comment_authors,
             )
             if days_since_comment > 5:
-                if days_since_comment >= 999:
+                if days_since_comment >= NO_COMMENT_DAYS:
                     reason = f"На этапе «{stage_name}» нет комментариев."
                 else:
                     reason = (
@@ -2344,16 +2494,18 @@ def check_buyer_deal_violations(
     return violations
 
 
-def humanize_violation_reason(
-    violation: dict[str, Any],
+def build_stage_name_index(
     *,
     buyers_deals: list[dict[str, Any]] | None = None,
     sellers_deals: list[dict[str, Any]] | None = None,
     general_base_deals: list[dict[str, Any]] | None = None,
     leads: list[dict[str, Any]] | None = None,
-) -> str:
-    """Replace CRM stage/status codes in violation reason with Russian names."""
-    reason = str(violation.get("reason") or "—")
+) -> dict[str, str]:
+    """Build stage/status code → human name map for a whole audit run.
+
+    The map does not depend on the violation, so the dispatcher builds it once
+    instead of rescanning every deal and lead for each reported violation.
+    """
     code_to_name: dict[str, str] = dict(BUYERS_STAGE_NAMES)
 
     for deals in (
@@ -2373,34 +2525,39 @@ def humanize_violation_reason(
         if status_id and status_name and status_id != status_name:
             code_to_name[status_id] = status_name
 
+    return code_to_name
+
+
+def humanize_violation_reason(
+    violation: dict[str, Any],
+    *,
+    buyers_deals: list[dict[str, Any]] | None = None,
+    sellers_deals: list[dict[str, Any]] | None = None,
+    general_base_deals: list[dict[str, Any]] | None = None,
+    leads: list[dict[str, Any]] | None = None,
+    name_index: dict[str, str] | None = None,
+) -> str:
+    """Replace CRM stage/status codes in violation reason with Russian names.
+
+    Pass `name_index` from build_stage_name_index() to avoid rebuilding the map
+    per violation; without it the map is built from the supplied lists.
+    """
+    reason = str(violation.get("reason") or "—")
+    if name_index is None:
+        name_index = build_stage_name_index(
+            buyers_deals=buyers_deals,
+            sellers_deals=sellers_deals,
+            general_base_deals=general_base_deals,
+            leads=leads,
+        )
+    code_to_name = dict(name_index)
+
     details = violation.get("details")
     if isinstance(details, dict):
         stage_name = details.get("stage_name") or details.get("status_name")
         stage_id = str(details.get("stage_id") or details.get("status_id") or "")
         if stage_id and stage_name and stage_id != stage_name:
             code_to_name[stage_id] = str(stage_name)
-
-    entity_id = _coerce_int(violation.get("entity_id", 0))
-    entity_type = violation.get("entity_type")
-    if entity_type == "deal":
-        for deals in (
-            buyers_deals or [],
-            sellers_deals or [],
-            general_base_deals or [],
-        ):
-            for deal in deals:
-                if _coerce_int(deal.get("deal_id")) == entity_id:
-                    sid = str(deal.get("stage_id") or "")
-                    sname = str(deal.get("stage_name") or "")
-                    if sid and sname and sid != sname:
-                        code_to_name[sid] = sname
-    elif entity_type == "lead":
-        for lead in leads or []:
-            if _coerce_int(lead.get("lead_id")) == entity_id:
-                sid = str(lead.get("status_id") or "")
-                sname = str(lead.get("status_name") or "")
-                if sid and sname and sid != sname:
-                    code_to_name[sid] = sname
 
     for code in sorted(code_to_name, key=len, reverse=True):
         if not code:
@@ -2731,7 +2888,7 @@ def _build_crm_link(entity_type: str, entity_id: int) -> str:
 def _fetch_entity_timeline(
     entity_id: int,
     entity_type: str,
-) -> tuple[int, list[dict[str, Any]]]:
+) -> tuple[int, list[dict[str, Any]], bool]:
     """Fetch timeline for a single entity (lead or deal).
 
     Designed for use with ThreadPoolExecutor — creates its own
@@ -2742,7 +2899,9 @@ def _fetch_entity_timeline(
         entity_type: "lead" or "deal".
 
     Returns:
-        Tuple of (entity_id, timeline_comments_list).
+        Tuple of (entity_id, timeline_comments_list, fetch_failed). An empty
+        timeline and a failed fetch must stay distinguishable: "no comments"
+        is a violation, "could not read comments" is not.
     """
     try:
         bx = _get_bitrix()
@@ -2756,20 +2915,22 @@ def _fetch_entity_timeline(
                 "select": ["ID", "AUTHOR_ID", "COMMENT", "CREATED"],
             },
         )
-        return (entity_id, _extract_comments(raw))
+        return (entity_id, _extract_comments(raw), False)
     except Exception:
-        logger.debug(
-            "Timeline fetch failed for %s id=%s",
+        logger.warning(
+            "Timeline fetch failed for %s id=%s — card excluded from audit",
             entity_type,
             entity_id,
         )
-        return (entity_id, [])
+        return (entity_id, [], True)
 
 
-def _fetch_deal_activities(deal_id: int) -> tuple[int, list[dict[str, Any]]]:
+def _fetch_deal_activities(deal_id: int) -> tuple[int, list[dict[str, Any]], bool]:
     """Fetch open+completed CRM activities owned by a deal (timeline evidence).
 
     Thread-pool safe: own Bitrix client per call.
+
+    Returns (deal_id, activities, fetch_failed) — see _fetch_entity_timeline.
     """
     try:
         bx = _get_bitrix()
@@ -2796,10 +2957,13 @@ def _fetch_deal_activities(deal_id: int) -> tuple[int, list[dict[str, Any]]]:
                 ],
             },
         )
-        return (deal_id, _as_list(raw))
+        return (deal_id, _as_list(raw), False)
     except Exception:
-        logger.debug("Activity fetch failed for deal id=%s", deal_id)
-        return (deal_id, [])
+        logger.warning(
+            "Activity fetch failed for deal id=%s — card excluded from audit",
+            deal_id,
+        )
+        return (deal_id, [], True)
 
 
 @tool
@@ -2861,10 +3025,12 @@ def get_all_leads_with_timeline() -> dict[str, Any]:
             for future in as_completed(futures):
                 lid = futures[future]
                 try:
-                    _, timeline = future.result()
+                    _, timeline, failed = future.result()
                     lead_records[lid]["timeline"] = timeline
+                    lead_records[lid]["evidence_incomplete"] = failed
                 except Exception:
-                    pass
+                    logger.warning("Timeline future failed for lead %s", lid)
+                    lead_records[lid]["evidence_incomplete"] = True
 
         calls_cache: dict[int, list[dict[str, Any]]] = {}
         for lid, record in lead_records.items():
@@ -2878,8 +3044,14 @@ def get_all_leads_with_timeline() -> dict[str, Any]:
                         hours_ago=720,
                     )
                 except Exception:
+                    logger.warning("Call history fetch failed for user %s", assigned_id)
                     calls_cache[assigned_id] = []
-            record["calls"] = calls_cache[assigned_id]
+            # Только звонки этого лида: _fetch_user_calls_for_audit отдаёт всю
+            # историю сотрудника, и без сужения один пропущенный звонок
+            # становился нарушением на каждом лиде брокера.
+            record["calls"] = _filter_calls_for_entity(
+                calls_cache[assigned_id], "lead", lid,
+            )
 
         result = list(lead_records.values())
         return {"leads": result, "total": len(result)}
@@ -3031,10 +3203,12 @@ def get_deals_by_funnel_with_timeline(category_id: int) -> dict[str, Any]:
             for future in as_completed(futures):
                 did = futures[future]
                 try:
-                    _, timeline = future.result()
+                    _, timeline, failed = future.result()
                     deal_records[did]["timeline"] = timeline
+                    deal_records[did]["evidence_incomplete"] = failed
                 except Exception:
-                    pass
+                    logger.warning("Timeline future failed for deal %s", did)
+                    deal_records[did]["evidence_incomplete"] = True
 
         if is_sellers:
             with ThreadPoolExecutor(max_workers=MAX_TIMELINE_WORKERS) as pool:
@@ -3045,10 +3219,14 @@ def get_deals_by_funnel_with_timeline(category_id: int) -> dict[str, Any]:
                 for future in as_completed(futures):
                     did = futures[future]
                     try:
-                        _, activities = future.result()
+                        _, activities, failed = future.result()
                         deal_records[did]["deal_activities"] = activities
+                        if failed:
+                            deal_records[did]["evidence_incomplete"] = True
                     except Exception:
+                        logger.warning("Activity future failed for deal %s", did)
                         deal_records[did]["deal_activities"] = []
+                        deal_records[did]["evidence_incomplete"] = True
 
         open_activities_map: dict[int, list[dict[str, Any]]] = {}
         try:
@@ -3108,13 +3286,9 @@ def get_deals_by_funnel_with_timeline(category_id: int) -> dict[str, Any]:
                     )
                 except Exception:
                     calls_cache[assigned_id] = []
-            user_calls = calls_cache[assigned_id]
-            # Sellers audit needs deal-linked calls; buyers keep broker-wide list
-            # for missed-callback logic (existing behavior).
-            if is_sellers:
-                record["calls"] = _filter_calls_for_deal(user_calls, did)
-            else:
-                record["calls"] = user_calls
+            # Звонки сужаются до конкретной сделки в обеих воронках: нарушение
+            # выносится карточке, значит и опираться должно на её звонки.
+            record["calls"] = _filter_calls_for_deal(calls_cache[assigned_id], did)
 
             if assigned_id not in responsible_activities_cache:
                 try:
@@ -3220,10 +3394,12 @@ def get_general_base_deals_with_timeline() -> dict[str, Any]:
             for future in as_completed(futures):
                 did = futures[future]
                 try:
-                    _, timeline = future.result()
+                    _, timeline, failed = future.result()
                     deal_records[did]["timeline"] = timeline
+                    deal_records[did]["evidence_incomplete"] = failed
                 except Exception:
-                    pass
+                    logger.warning("Timeline future failed for deal %s", did)
+                    deal_records[did]["evidence_incomplete"] = True
 
         with ThreadPoolExecutor(max_workers=MAX_TIMELINE_WORKERS) as pool:
             futures = {
@@ -3233,10 +3409,14 @@ def get_general_base_deals_with_timeline() -> dict[str, Any]:
             for future in as_completed(futures):
                 did = futures[future]
                 try:
-                    _, activities = future.result()
+                    _, activities, failed = future.result()
                     deal_records[did]["deal_activities"] = activities
+                    if failed:
+                        deal_records[did]["evidence_incomplete"] = True
                 except Exception:
+                    logger.warning("Activity future failed for deal %s", did)
                     deal_records[did]["deal_activities"] = []
+                    deal_records[did]["evidence_incomplete"] = True
 
         _attach_general_base_moved_at(deal_records)
 
