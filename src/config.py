@@ -249,6 +249,14 @@ class Settings(BaseSettings):
         default=40,
         validation_alias="LEAD_QUALITY_CHUNK_SIZE",
     )
+    client_state_enabled: bool = Field(
+        default=False,
+        validation_alias="CLIENT_STATE_ENABLED",
+    )
+    client_state_transcript_retry_hours: float = Field(
+        default=1.0,
+        validation_alias="CLIENT_STATE_TRANSCRIPT_RETRY_HOURS",
+    )
 
     @property
     def broker_rating_weights(self) -> dict[str, Any]:

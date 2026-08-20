@@ -307,6 +307,32 @@ def init_db() -> None:
             ON lead_quality_findings(found_at);
         """)
 
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS call_transcripts (
+            activity_id INTEGER PRIMARY KEY,
+            deal_id INTEGER NOT NULL,
+            text TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL,
+            fetched_at TEXT NOT NULL,
+            chars INTEGER NOT NULL DEFAULT 0
+        );
+        """)
+        conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_call_transcripts_deal
+            ON call_transcripts(deal_id, fetched_at);
+        """)
+
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS client_states (
+            deal_id INTEGER PRIMARY KEY,
+            state_json TEXT NOT NULL,
+            confidence REAL NOT NULL DEFAULT 0,
+            content_hash TEXT NOT NULL DEFAULT '',
+            analyzed_at TEXT NOT NULL,
+            model TEXT NOT NULL DEFAULT ''
+        );
+        """)
+
 
 def _migrate_exclusive_expiry_notifications(conn: sqlite3.Connection) -> None:
     """Upgrade PK to (item_id, end_date, days_before) for 7/3/1 milestones."""
@@ -1586,3 +1612,106 @@ def list_lead_quality_findings() -> list[dict[str, Any]]:
             """
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def get_call_transcript(activity_id: int) -> dict[str, Any] | None:
+    """Return cached transcript row or None."""
+    init_db()
+    with db_session() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT activity_id, deal_id, text, status, fetched_at, chars
+            FROM call_transcripts
+            WHERE activity_id = ?
+            """,
+            (activity_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def upsert_call_transcript(
+    activity_id: int,
+    deal_id: int,
+    text: str,
+    status: str,
+    fetched_at: str,
+    chars: int,
+) -> None:
+    """Insert or replace a cached call transcript."""
+    init_db()
+    with db_session() as conn:
+        conn.execute(
+            """
+            INSERT INTO call_transcripts (
+                activity_id, deal_id, text, status, fetched_at, chars
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(activity_id) DO UPDATE SET
+                deal_id = excluded.deal_id,
+                text = excluded.text,
+                status = excluded.status,
+                fetched_at = excluded.fetched_at,
+                chars = excluded.chars
+            """,
+            (activity_id, deal_id, text, status, fetched_at, chars),
+        )
+
+
+def list_call_transcripts_for_deal(deal_id: int) -> list[dict[str, Any]]:
+    """Return all cached transcripts for a deal."""
+    init_db()
+    with db_session() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT activity_id, deal_id, text, status, fetched_at, chars
+            FROM call_transcripts
+            WHERE deal_id = ?
+            ORDER BY fetched_at
+            """,
+            (deal_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_client_state(deal_id: int) -> dict[str, Any] | None:
+    """Return stored client-state row for a buyer deal."""
+    init_db()
+    with db_session() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT deal_id, state_json, confidence, content_hash, analyzed_at, model
+            FROM client_states
+            WHERE deal_id = ?
+            """,
+            (deal_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def save_client_state(
+    deal_id: int,
+    state_json: str,
+    confidence: float,
+    content_hash: str,
+    analyzed_at: str,
+    model: str,
+) -> None:
+    """Upsert incremental client-state snapshot for a deal."""
+    init_db()
+    with db_session() as conn:
+        conn.execute(
+            """
+            INSERT INTO client_states (
+                deal_id, state_json, confidence, content_hash, analyzed_at, model
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(deal_id) DO UPDATE SET
+                state_json = excluded.state_json,
+                confidence = excluded.confidence,
+                content_hash = excluded.content_hash,
+                analyzed_at = excluded.analyzed_at,
+                model = excluded.model
+            """,
+            (deal_id, state_json, confidence, content_hash, analyzed_at, model),
+        )
