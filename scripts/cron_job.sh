@@ -26,13 +26,20 @@ if ! flock -n 9; then
 fi
 
 echo "$(date -Is) [$JOB] start"
-OUTPUT="$("$@" 2>&1)"
-CODE=$?
-printf '%s\n' "$OUTPUT"
+
+# Вывод идёт в лог по мере появления и одновременно копится в файл для алерта.
+# Захват в переменную ("$(...)") задерживал бы всё до конца задачи: у аудита
+# это 25 минут тишины в cron.log, неотличимой от зависшего процесса.
+OUT_FILE="$(mktemp -t "b24-${JOB}-XXXXXX.log")"
+trap 'rm -f "$OUT_FILE"' EXIT
+
+"$@" 2>&1 | tee "$OUT_FILE"
+CODE="${PIPESTATUS[0]}"
+
 echo "$(date -Is) [$JOB] finished with code $CODE"
 
 if [ "$CODE" -ne 0 ]; then
-    TAIL="$(printf '%s' "$OUTPUT" | tail -c 1200)"
+    TAIL="$(tail -c 1200 "$OUT_FILE")"
     docker run --rm --env-file .env \
         -v "$(pwd)/logs:/app/logs" -v "$(pwd)/data:/app/data" \
         b24-ai-auditor:latest python src/job_alert.py "$JOB" "$CODE" "$TAIL" \
