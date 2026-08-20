@@ -12,6 +12,7 @@ if str(_SRC_DIR) not in sys.path:
 
 from db import (  # noqa: E402
     get_previous_rating_snapshot,
+    get_resolution_stats,
     get_weekly_stats,
     init_db,
     purge_test_violations,
@@ -190,6 +191,36 @@ def build_rating_section(
     return text, ratings
 
 
+def format_resolution_section(stats: dict) -> str:
+    """Lifecycle block: how fast found problems actually get fixed.
+
+    Counting violations alone cannot distinguish a team that fixes everything
+    same-day from one that lets the same cards rot — both show the same number.
+    """
+    opened = int(stats.get("opened") or 0)
+    resolved = int(stats.get("resolved") or 0)
+    still_open = int(stats.get("still_open") or 0)
+    median = float(stats.get("median_hours_to_fix") or 0.0)
+
+    if not opened and not resolved and not still_open:
+        return ""
+
+    if median >= 24:
+        speed = f"{median / 24:.1f} дн."
+    else:
+        speed = f"{median:.0f} ч"
+
+    lines = [
+        "⏱ Исправление нарушений",
+        f"Появилось за период: {opened}",
+        f"Исправлено за период: {resolved}",
+        f"Остаётся открытыми: {still_open}",
+    ]
+    if resolved:
+        lines.append(f"Медианное время до исправления: {speed}")
+    return "\n".join(lines)
+
+
 def format_weekly_report(
     violators: list[dict],
     clean: list[dict],
@@ -198,6 +229,7 @@ def format_weekly_report(
     dept_name: str = None,
     prev_total_violations: int = 0,
     rating_section: str | None = None,
+    resolution_section: str | None = None,
 ) -> str:
     """Format the weekly report message."""
     start_date = datetime.fromisoformat(week_start).strftime("%d.%m.%Y")
@@ -212,6 +244,9 @@ def format_weekly_report(
         f"Отчёт сформирован с начала недели (с {start_date} по {end_date})",
         "",
     ]
+
+    if resolution_section:
+        lines.extend([resolution_section, ""])
 
     if rating_section:
         lines.extend([
@@ -357,11 +392,16 @@ def main():
     if all_ratings:
         persist_ratings_snapshot(all_ratings, snapshot_date)
 
+    resolution_text = format_resolution_section(
+        get_resolution_stats(week_start, week_end),
+    )
+
     # 1. Main report (all departments)
     main_report = format_weekly_report(
         violators, clean, week_start, now,
         prev_total_violations=prev_total,
         rating_section=rating_text,
+        resolution_section=resolution_text,
     )
     print("Generated MAIN report:")
     print(main_report)

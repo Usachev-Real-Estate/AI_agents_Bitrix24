@@ -704,7 +704,51 @@ def test_process_buyers_skips_missed_callback(monkeypatch):
     process_deals_to_general_base(violations, "buyers")
     assert called == [51]
     assert "Общая база" not in violations[0]["reason"]
-    assert "будет перенесена в воронку «Общая база»" in violations[1]["reason"]
+    # Сделка уже перенесена — констатация, а не предупреждение о будущем.
+    assert "Сделка перенесена в воронку «Общая база»" in violations[1]["reason"]
+    assert "будет перенесена" not in violations[1]["reason"]
+
+
+def test_move_warning_stays_future_tense_when_not_moved(monkeypatch):
+    """DRY_RUN: перенос не выполнен — предупреждение остаётся в будущем времени."""
+    from tools import process_deals_to_general_base
+
+    monkeypatch.setattr("tools.is_general_base_move_enabled", lambda: True)
+    monkeypatch.setattr(
+        "tools.move_buyer_deal_to_general_base",
+        lambda deal_id, stage_id="": {"dry_run_skipped": True},
+    )
+    violations = [{
+        "entity_id": 52,
+        "rule": "buyer_podbor_stale",
+        "reason": "более 7 дней",
+        "details": {"stage_id": "C18:NEW"},
+    }]
+    process_deals_to_general_base(violations, "buyers")
+    assert "будет перенесена в воронку «Общая база»" in violations[0]["reason"]
+    assert "Сделка перенесена" not in violations[0]["reason"]
+
+
+def test_prebaked_warning_is_replaced_after_a_real_move(monkeypatch):
+    """buyer_stage_3 вшивает предупреждение в текст до попытки переноса."""
+    from tools import GENERAL_BASE_MOVE_WARNING, process_deals_to_general_base
+
+    monkeypatch.setattr("tools.is_general_base_move_enabled", lambda: True)
+    monkeypatch.setattr(
+        "tools.move_buyer_deal_to_general_base",
+        lambda deal_id, stage_id="": {"ok": True},
+    )
+    violations = [{
+        "entity_id": 53,
+        "rule": "buyer_stage_3",
+        "reason": f"На этапе «Первый показ» нет дела. {GENERAL_BASE_MOVE_WARNING}",
+        "details": {"stage_id": "C18:UC_UFPFKK"},
+    }]
+    process_deals_to_general_base(violations, "buyers")
+    reason = violations[0]["reason"]
+    assert "будет перенесена" not in reason, reason
+    assert reason.count("Общая база") == 1, reason
+    assert "Сделка перенесена в воронку «Общая база»" in reason
 
 
 def test_process_buyers_skips_ofer_and_lost(monkeypatch):

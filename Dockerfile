@@ -1,17 +1,25 @@
-FROM python:3.11-slim
+# Build stage: compile wheels so the runtime image carries no toolchain.
+FROM python:3.11-slim AS build
 
-WORKDIR /app
+WORKDIR /build
 
-# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy and install dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.txt
 
-# Copy application code
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY --from=build /wheels /wheels
+COPY requirements.txt .
+RUN pip install --no-cache-dir --no-index --find-links=/wheels -r requirements.txt \
+    && rm -rf /wheels
+
 COPY src/ ./src/
 
 # Run as non-root user

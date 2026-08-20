@@ -228,6 +228,32 @@ def init_db() -> None:
         );
         """)
 
+        # Жизненный цикл нарушения. Таблица violations — журнал прогонов
+        # (одна и та же проблема даёт новую строку каждый раз), здесь же
+        # хранится текущее состояние проблемы с момента появления до закрытия.
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS violation_states (
+            entity_type TEXT NOT NULL,
+            entity_id INTEGER NOT NULL,
+            rule TEXT NOT NULL,
+            responsible_id INTEGER NOT NULL DEFAULT 0,
+            responsible_name TEXT NOT NULL DEFAULT '',
+            department TEXT NOT NULL DEFAULT '',
+            department_id INTEGER,
+            severity TEXT NOT NULL DEFAULT '',
+            first_detected_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            resolved_at TEXT,
+            times_seen INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (entity_type, entity_id, rule)
+        );
+        """)
+
+        conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_violation_states_open
+            ON violation_states(responsible_id, resolved_at);
+        """)
+
         conn.execute("""
         CREATE TABLE IF NOT EXISTS broker_ratings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -479,6 +505,222 @@ def save_violations(audit_run_id: int, violations: list[dict[str, Any]],
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, records)
         return cursor.rowcount
+
+
+# Правило → область аудита. Закрывать нарушения можно только в тех областях,
+# по которым прогон реально получил данные: пустой сбор из-за сбоя API иначе
+# отрапортует «всё исправлено».
+VIOLATION_SCOPES: dict[str, str] = {
+    "lead": "leads",
+    "buyer": "buyers",
+    "seller": "sellers",
+    "general_base": "general_base",
+}
+
+
+def violation_scope(rule: str) -> str:
+    """Return the audit scope a rule belongs to ('' when unknown)."""
+    text = str(rule or "")
+    if text.startswith("general_base"):
+        return "general_base"
+    for prefix, scope in VIOLATION_SCOPES.items():
+        if text.startswith(f"{prefix}_"):
+            return scope
+    return ""
+
+
+def sync_violation_states(
+    violations: list[dict[str, Any]],
+    now: str,
+    *,
+    scopes_with_data: set[str],
+    user_map: dict[int, str] | None = None,
+    dept_id_map: dict[int, int] | None = None,
+) -> dict[str, int]:
+    """Track each violation from first detection to resolution.
+
+    Args:
+        violations: Violations found in the current run (already filtered).
+        now: ISO timestamp of the run.
+        scopes_with_data: Scopes whose collectors actually returned records.
+            Scopes missing here are left untouched — an empty collector result
+            must never be read as "everything got fixed".
+        user_map: responsible_id → "Имя (Отдел)" for enriching new rows.
+        dept_id_map: responsible_id → department_id.
+
+    Returns:
+        Counters: opened, still_open, reopened, resolved.
+    """
+    init_db()
+    user_map = user_map or {}
+    dept_id_map = dept_id_map or {}
+    stats = {"opened": 0, "still_open": 0, "reopened": 0, "resolved": 0}
+
+    current: dict[tuple[str, int, str], dict[str, Any]] = {}
+    for v in violations:
+        entity_type = str(v.get("entity_type") or "")
+        entity_id = int(v.get("entity_id") or 0)
+        rule = str(v.get("rule") or "")
+        if not entity_type or entity_id <= 0 or not rule:
+            continue
+        current[(entity_type, entity_id, rule)] = v
+
+    with db_session() as conn:
+        for (entity_type, entity_id, rule), v in current.items():
+            resp_id = int(v.get("responsible_id") or 0)
+            display = user_map.get(resp_id, "")
+            name = display.split(" (")[0].strip() if display else str(resp_id)
+            dept = ""
+            if "(" in display and ")" in display:
+                dept = display.split("(")[-1].rstrip(")")
+            row = conn.execute(
+                """
+                SELECT first_detected_at, resolved_at, times_seen
+                FROM violation_states
+                WHERE entity_type = ? AND entity_id = ? AND rule = ?
+                """,
+                (entity_type, entity_id, rule),
+            ).fetchone()
+
+            if row is None:
+                stats["opened"] += 1
+                conn.execute(
+                    """
+                    INSERT INTO violation_states (
+                        entity_type, entity_id, rule, responsible_id,
+                        responsible_name, department, department_id, severity,
+                        first_detected_at, last_seen_at, resolved_at, times_seen
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1)
+                    """,
+                    (
+                        entity_type, entity_id, rule, resp_id, name, dept,
+                        dept_id_map.get(resp_id), str(v.get("severity") or ""),
+                        now, now,
+                    ),
+                )
+                continue
+
+            was_resolved = row[1] is not None
+            if was_resolved:
+                stats["reopened"] += 1
+                # Повторное появление — новый отсчёт, старая длительность закрыта.
+                conn.execute(
+                    """
+                    UPDATE violation_states
+                    SET first_detected_at = ?, last_seen_at = ?, resolved_at = NULL,
+                        times_seen = 1, responsible_id = ?, responsible_name = ?,
+                        department = ?, department_id = ?, severity = ?
+                    WHERE entity_type = ? AND entity_id = ? AND rule = ?
+                    """,
+                    (
+                        now, now, resp_id, name, dept, dept_id_map.get(resp_id),
+                        str(v.get("severity") or ""),
+                        entity_type, entity_id, rule,
+                    ),
+                )
+            else:
+                stats["still_open"] += 1
+                conn.execute(
+                    """
+                    UPDATE violation_states
+                    SET last_seen_at = ?, times_seen = times_seen + 1,
+                        responsible_id = ?, responsible_name = ?,
+                        department = ?, department_id = ?, severity = ?
+                    WHERE entity_type = ? AND entity_id = ? AND rule = ?
+                    """,
+                    (
+                        now, resp_id, name, dept, dept_id_map.get(resp_id),
+                        str(v.get("severity") or ""),
+                        entity_type, entity_id, rule,
+                    ),
+                )
+
+        if not scopes_with_data:
+            logger.warning(
+                "sync_violation_states: no scope had data — nothing resolved",
+            )
+            return stats
+
+        open_rows = conn.execute(
+            """
+            SELECT entity_type, entity_id, rule
+            FROM violation_states
+            WHERE resolved_at IS NULL
+            """,
+        ).fetchall()
+        for entity_type, entity_id, rule in open_rows:
+            key = (str(entity_type), int(entity_id), str(rule))
+            if key in current:
+                continue
+            if violation_scope(str(rule)) not in scopes_with_data:
+                continue
+            conn.execute(
+                """
+                UPDATE violation_states SET resolved_at = ?
+                WHERE entity_type = ? AND entity_id = ? AND rule = ?
+                """,
+                (now, *key),
+            )
+            stats["resolved"] += 1
+
+    logger.info("Violation states: %s", stats)
+    return stats
+
+
+def get_open_violations_for_broker(broker_id: int) -> list[dict[str, Any]]:
+    """Currently open violations for one broker, oldest first."""
+    init_db()
+    with db_session() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT entity_type, entity_id, rule, severity,
+                   first_detected_at, last_seen_at, times_seen
+            FROM violation_states
+            WHERE responsible_id = ? AND resolved_at IS NULL
+            ORDER BY first_detected_at
+            """,
+            (broker_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_resolution_stats(since: str, until: str | None = None) -> dict[str, Any]:
+    """Aggregate lifecycle metrics for the period: counts and time-to-fix."""
+    init_db()
+    upper = until or datetime.now(timezone.utc).isoformat()
+    with db_session() as conn:
+        opened = conn.execute(
+            "SELECT COUNT(*) FROM violation_states "
+            "WHERE first_detected_at >= ? AND first_detected_at < ?",
+            (since, upper),
+        ).fetchone()[0]
+        resolved_rows = conn.execute(
+            """
+            SELECT first_detected_at, resolved_at FROM violation_states
+            WHERE resolved_at IS NOT NULL AND resolved_at >= ? AND resolved_at < ?
+            """,
+            (since, upper),
+        ).fetchall()
+        still_open = conn.execute(
+            "SELECT COUNT(*) FROM violation_states WHERE resolved_at IS NULL",
+        ).fetchone()[0]
+
+    hours: list[float] = []
+    for first_seen, resolved in resolved_rows:
+        start = _parse_iso_datetime(str(first_seen))
+        end = _parse_iso_datetime(str(resolved))
+        if start and end and end >= start:
+            hours.append((end - start).total_seconds() / 3600.0)
+    hours.sort()
+    median = hours[len(hours) // 2] if hours else 0.0
+    return {
+        "opened": int(opened),
+        "resolved": len(hours),
+        "still_open": int(still_open),
+        "median_hours_to_fix": round(median, 1),
+        "avg_hours_to_fix": round(sum(hours) / len(hours), 1) if hours else 0.0,
+    }
 
 
 def upsert_brokers(
@@ -1058,21 +1300,33 @@ def get_violations_for_broker(
     since: str,
     until: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Return routine violations for broker in period."""
+    """Return DISTINCT routine violations for broker in period.
+
+    One row per (entity_type, entity_id, rule) — a problem, not an observation.
+    The violations table logs every run, so counting rows made the score depend
+    on how often cron happens to fire: doubling the schedule doubled everyone's
+    penalty without anyone working differently.
+    """
     init_db()
     upper = until or datetime.now(timezone.utc).isoformat()
     with db_session() as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
-            SELECT v.entity_type, v.rule, v.severity, v.detected_at
+            SELECT v.entity_type,
+                   v.entity_id,
+                   v.rule,
+                   MAX(v.severity) AS severity,
+                   MIN(v.detected_at) AS detected_at,
+                   COUNT(*) AS times_detected
             FROM violations v
             JOIN audit_runs r ON v.audit_run_id = r.id
             WHERE v.responsible_id = ?
               AND v.detected_at >= ?
               AND v.detected_at < ?
               AND r.is_routine = 1
-            ORDER BY v.detected_at
+            GROUP BY v.entity_type, v.entity_id, v.rule
+            ORDER BY detected_at
             """,
             (broker_id, since, upper),
         ).fetchall()
@@ -1080,19 +1334,26 @@ def get_violations_for_broker(
 
 
 def count_violations_on_date(broker_id: int, metric_date: str) -> int:
-    """Count routine violations detected on a calendar date (YYYY-MM-DD)."""
+    """Count DISTINCT routine violations detected on a date (YYYY-MM-DD).
+
+    Two audit runs a day used to report the same problem twice; the stored
+    `violations_today` metric is meant to be a problem count.
+    """
     init_db()
     day_start = f"{metric_date}T00:00:00+00:00"
     day_end = f"{metric_date}T23:59:59+00:00"
     with db_session() as conn:
         row = conn.execute(
             """
-            SELECT COUNT(*) FROM violations v
-            JOIN audit_runs r ON v.audit_run_id = r.id
-            WHERE v.responsible_id = ?
-              AND v.detected_at >= ?
-              AND v.detected_at <= ?
-              AND r.is_routine = 1
+            SELECT COUNT(*) FROM (
+                SELECT 1 FROM violations v
+                JOIN audit_runs r ON v.audit_run_id = r.id
+                WHERE v.responsible_id = ?
+                  AND v.detected_at >= ?
+                  AND v.detected_at <= ?
+                  AND r.is_routine = 1
+                GROUP BY v.entity_type, v.entity_id, v.rule
+            )
             """,
             (broker_id, day_start, day_end),
         ).fetchone()

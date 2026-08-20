@@ -1,45 +1,51 @@
 # b24-ai-auditor: расписание отчётов
+#
+# Каждая задача запускается через scripts/cron_job.sh:
+#   * flock — запуск не накладывается на предыдущий (важно для chat-poller,
+#     который тикает каждую минуту и делит data/chat_last_id.txt);
+#   * при ненулевом коде возврата уходит уведомление ADMIN_USER_ID —
+#     иначе упавший аудит виден только тем, что отчёт не пришёл.
 
 # Вариант 2: запуск в Docker-контейнере
 
 # 1. Аудит нарушений (лиды/сделки): ежедневно в 10:00 и 17:00 МСК (07:00 и 14:00 UTC), пн-пт (в чаты отделов)
-0 7,14 * * 1-5 cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest >> logs/cron.log 2>&1
+0 7,14 * * 1-5 cd /home/Ai_agents_crm && scripts/cron_job.sh audit docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest >> logs/cron.log 2>&1
 
 # 2. Аудит просроченных задач: каждую пятницу в 17:00 МСК (14:00 UTC) (в чат 22358)
-0 14 * * 5 cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/task_auditor.py >> logs/cron.log 2>&1
+0 14 * * 5 cd /home/Ai_agents_crm && scripts/cron_job.sh task-auditor docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/task_auditor.py >> logs/cron.log 2>&1
 
 # 3. Еженедельный отчёт по брокерам: каждую пятницу в 18:00 МСК (15:00 UTC) (в чаты отделов)
-0 15 * * 5 cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/weekly_report.py >> logs/cron.log 2>&1
+0 15 * * 5 cd /home/Ai_agents_crm && scripts/cron_job.sh weekly-report docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/weekly_report.py >> logs/cron.log 2>&1
 
 # 4. Отчёт KPI по собственникам: каждую пятницу в 18:00 МСК (15:00 UTC) (в чат 22358)
-0 15 * * 5 cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/owner_tracker.py >> logs/cron.log 2>&1
+0 15 * * 5 cd /home/Ai_agents_crm && scripts/cron_job.sh owner-tracker docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/owner_tracker.py >> logs/cron.log 2>&1
 
 # 5. Чат-команды (скоринг брокеров): каждую минуту
-* * * * * cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/chat_poller.py >> logs/cron.log 2>&1
+* * * * * cd /home/Ai_agents_crm && scripts/cron_job.sh chat-poller docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/chat_poller.py >> logs/cron.log 2>&1
 
 # 6. Напоминания по эксклюзивам (за 7 / 3 / 1 день): ежедневно в 10:00 МСК (07:00 UTC)
-0 7 * * * cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/exclusive_expiry.py >> logs/cron.log 2>&1
+0 7 * * * cd /home/Ai_agents_crm && scripts/cron_job.sh exclusive-expiry docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/exclusive_expiry.py >> logs/cron.log 2>&1
 
 # 7. Запрет смены «Источник» у контактов брокерами/РОПами: каждые 5 минут
-*/5 * * * * cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/contact_source_lock.py >> logs/cron.log 2>&1
+*/5 * * * * cd /home/Ai_agents_crm && scripts/cron_job.sh contact-source-lock docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/contact_source_lock.py >> logs/cron.log 2>&1
 
 # 8. Запрет смены «Источник» у сделок «Продавцы» брокерами/РОПами: каждые 5 минут
-*/5 * * * * cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/deal_source_lock.py >> logs/cron.log 2>&1
+*/5 * * * * cd /home/Ai_agents_crm && scripts/cron_job.sh deal-source-lock docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/deal_source_lock.py >> logs/cron.log 2>&1
 
 # 9. «Базовая ставка» в сделках «Покупатели»: автозаполнение + откат брокеров/РОПов: каждые 5 минут
-*/5 * * * * cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/buyer_base_rate_lock.py >> logs/cron.log 2>&1
+*/5 * * * * cd /home/Ai_agents_crm && scripts/cron_job.sh buyer-base-rate-lock docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/buyer_base_rate_lock.py >> logs/cron.log 2>&1
 
 # 10. «Комиссия» (OPPORTUNITY): только напоминания — пн–пт каждый час 9–19 МСК (06–16 UTC)
-0 6-16 * * 1-5 cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/buyer_commission_reminder.py >> logs/cron.log 2>&1
+0 6-16 * * 1-5 cd /home/Ai_agents_crm && scripts/cron_job.sh buyer-commission docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/buyer_commission_reminder.py >> logs/cron.log 2>&1
 
 # 11. Рейтинг CRM: ежедневный сбор метрик (CRM-визиты, чистые дни, лента): пн–пт 19:00 МСК (16:00 UTC)
-0 16 * * 1-5 cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/broker_rating_collectors.py --daily >> logs/cron.log 2>&1
+0 16 * * 1-5 cd /home/Ai_agents_crm && scripts/cron_job.sh broker-rating-daily docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/broker_rating_collectors.py --daily >> logs/cron.log 2>&1
 
 # 12. Рейтинг CRM: ежедневная публикация в REPORT_CHAT (после вечернего аудита): пн–пт 17:30 МСК (14:30 UTC)
-30 14 * * 1-5 cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/broker_rating_report.py >> logs/cron.log 2>&1
+30 14 * * 1-5 cd /home/Ai_agents_crm && scripts/cron_job.sh broker-rating-report docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/broker_rating_report.py >> logs/cron.log 2>&1
 
 # 13. Контроль Спам/Нецелевой (слитые / неверная квалификация): пн–пт 11:00 МСК (08:00 UTC) → чат 22358
-0 8 * * 1-5 cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/lead_quality_audit.py >> logs/cron.log 2>&1
+0 8 * * 1-5 cd /home/Ai_agents_crm && scripts/cron_job.sh lead-quality docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/lead_quality_audit.py >> logs/cron.log 2>&1
 
 # 14. Первый перенос в Общую базу: 13.08.2026 19:05 МСК (16:05 UTC). После этой даты перенос идёт на штатных 10:00/17:00.
-5 16 13 8 * cd /home/Ai_agents_crm && docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest >> logs/cron.log 2>&1
+5 16 13 8 * cd /home/Ai_agents_crm && scripts/cron_job.sh general-base-first-move docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest >> logs/cron.log 2>&1

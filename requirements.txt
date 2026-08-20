@@ -1,7 +1,11 @@
-langgraph>=0.2.0
-langchain-openai>=0.2.0
-fast-bitrix24>=1.0.0
-python-dotenv>=1.0.0
-pydantic-settings>=2.0.0
+# Верхние границы защищают от неожиданного мажорного апгрейда при пересборке
+# образа. Для полностью воспроизводимого деплоя сгенерируйте лок-файл:
+#   pip install pip-tools && pip-compile requirements.txt -o requirements.lock
+# и ставьте из него: pip install -r requirements.lock
+langgraph>=0.2.0,<1.0
+langchain-openai>=0.2.0,<1.0
+fast-bitrix24>=1.0.0,<2.0
+python-dotenv>=1.0.0,<2.0
+pydantic-settings>=2.0.0,<3.0
 # используется напрямую в exclusive_expiry.py и notify.py
-httpx>=0.27.0
+httpx>=0.27.0,<1.0
