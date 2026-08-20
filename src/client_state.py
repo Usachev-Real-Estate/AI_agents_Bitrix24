@@ -207,6 +207,64 @@ def filter_new_events(
     return fresh
 
 
+def trim_events_to_budget(
+    events: list[dict[str, Any]],
+    max_chars: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Keep the most recent events within a character budget.
+
+    Returns (kept, dropped). The first analysis of a card sends its whole
+    history, so a card with two dozen calls would otherwise blow past the
+    model's context limit.
+    """
+    if max_chars <= 0:
+        return list(events), 0
+    kept: list[dict[str, Any]] = []
+    used = 0
+    for event in reversed(events):
+        text = str(event.get("text") or "")
+        size = len(text) + len(str(event.get("note") or ""))
+        if kept and used + size > max_chars:
+            break
+        if not kept and size > max_chars:
+            # Одна расшифровка длинного разговора может сама не влезть в лимит.
+            # Обрезаем её, а не выбрасываем: начало звонка обычно и несёт суть.
+            event = dict(event, text=text[:max_chars], truncated=True)
+            size = max_chars
+        used += size
+        kept.append(event)
+    kept.reverse()
+    return kept, len(events) - len(kept)
+
+
+def _normalize_for_match(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip().casefold()
+
+
+def verify_evidence(
+    quotes: list[str],
+    events: list[dict[str, Any]],
+) -> tuple[list[str], list[str]]:
+    """Split quotes into (found in the card, not found).
+
+    The prompt demands verbatim citations, but nothing stopped the model from
+    inventing one. A quote that is not in the source is the clearest signal
+    that the rest of the answer was imagined too.
+    """
+    corpus = _normalize_for_match(
+        " ".join(str(e.get("text") or "") for e in events),
+    )
+    verified: list[str] = []
+    invented: list[str] = []
+    for quote in quotes:
+        needle = _normalize_for_match(quote)
+        if needle and needle in corpus:
+            verified.append(quote)
+        else:
+            invented.append(quote)
+    return verified, invented
+
+
 def _parse_state_json(content: str) -> dict[str, Any] | None:
     if "{" not in content:
         return None
@@ -258,6 +316,27 @@ def _normalize_state(raw: dict[str, Any]) -> dict[str, Any]:
         "confidence": max(0.0, min(1.0, _coerce_float(raw.get("confidence"), 0.0))),
         "evidence": [_clean_str(x) for x in evidence if _clean_str(x)],
     }
+
+
+def unmask_state(state: dict[str, Any], mask_map: MaskMap) -> dict[str, Any]:
+    """Human-facing copy with real names restored.
+
+    The stored copy stays masked: it is fed back to the model as
+    previous_state on the next run, and unmasking before saving would leak
+    the contacts the masking exists to protect.
+    """
+    out = json.loads(json.dumps(state, ensure_ascii=False))
+    for key in ("client_goal", "situation"):
+        out[key] = unmask(out.get(key, ""), mask_map)
+    for key in ("last_event", "next_step"):
+        block = out.get(key)
+        if isinstance(block, dict):
+            block["what"] = unmask(block.get("what", ""), mask_map)
+    for key in ("blockers", "missing", "evidence"):
+        values = out.get(key)
+        if isinstance(values, list):
+            out[key] = [unmask(str(v), mask_map) for v in values]
+    return out
 
 
 def build_llm_payload(
@@ -357,6 +436,7 @@ def analyze_buyer_deal(
     settings: Settings | None = None,
     llm: LLMClient | None = None,
     prepared: bool = False,
+    force: bool = False,
 ) -> dict[str, Any]:
     """Analyze one buyer deal; returns result envelope with state or skip reason."""
     settings = settings or get_settings()
@@ -373,7 +453,16 @@ def analyze_buyer_deal(
         envelope["reason"] = "invalid_deal_id"
         return envelope
 
-    record = prepare_deal_record(deal, settings=settings) if not prepared else deal
+    if prepared:
+        record = deal
+    else:
+        try:
+            record = prepare_deal_record(deal, settings=settings)
+        except Exception as exc:  # noqa: BLE001 — одна карточка не роняет батч
+            logger.warning("Card collection failed for deal %s: %s", deal_id, exc)
+            envelope["skipped"] = True
+            envelope["reason"] = "collect_error"
+            return envelope
     if _evidence_incomplete(record):
         envelope["skipped"] = True
         envelope["reason"] = "evidence_incomplete"
@@ -389,8 +478,10 @@ def analyze_buyer_deal(
     content_hash = compute_content_hash(events)
     envelope["content_hash"] = content_hash
 
-    stored = get_client_state(deal_id) if not settings.dry_run else None
-    if stored and stored.get("content_hash") == content_hash:
+    # Кэш читается и в DRY_RUN: чтение ничего не меняет, а без него тестовый
+    # прогон заново гоняет модель по всем карточкам. Повторный разбор — по force.
+    stored = get_client_state(deal_id)
+    if stored and stored.get("content_hash") == content_hash and not force:
         envelope["skipped"] = True
         envelope["reason"] = "unchanged"
         envelope["state"] = json.loads(stored.get("state_json") or "{}")
@@ -408,6 +499,15 @@ def analyze_buyer_deal(
     new_events = filter_new_events(events, analyzed_at)
     if previous_state is None:
         new_events = events
+    new_events, dropped = trim_events_to_budget(
+        new_events, int(settings.client_state_max_event_chars),
+    )
+    if dropped:
+        logger.info(
+            "Deal %s: %d oldest events dropped to fit the context budget",
+            deal_id,
+            dropped,
+        )
 
     model = llm or _make_llm(settings)
     try:
@@ -424,9 +524,25 @@ def analyze_buyer_deal(
         envelope["reason"] = "parse_error"
         return envelope
 
-    # Restore names in evidence for downstream human reports.
-    state["evidence"] = [unmask(item, mask_map) for item in state.get("evidence", [])]
-    envelope["state"] = state
+    verified, invented = verify_evidence(state.get("evidence", []), events)
+    state["evidence"] = verified
+    if invented:
+        logger.warning(
+            "Deal %s: %d quote(s) not found in the card — dropped as invented",
+            deal_id,
+            len(invented),
+        )
+    if not verified:
+        # Ни одной подтверждённой цитаты — доверять такому выводу нельзя,
+        # каким бы уверенным он ни выглядел.
+        state["confidence"] = min(float(state.get("confidence") or 0.0), 0.3)
+        if "подтверждённые цитаты" not in state["missing"]:
+            state["missing"].append("подтверждённые цитаты")
+    envelope["evidence_dropped"] = len(invented)
+
+    # В БД уходит замаскированная копия: на следующем прогоне она вернётся
+    # в модель как previous_state. Разворачиваем только то, что читают люди.
+    envelope["state"] = unmask_state(state, mask_map)
 
     if not settings.dry_run:
         init_db()
@@ -454,6 +570,7 @@ def run_buyer_client_state(
     *,
     settings: Settings | None = None,
     llm: LLMClient | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     """Batch runner for buyer deals. Reads open deals when list is omitted."""
     settings = settings or get_settings()
@@ -478,10 +595,27 @@ def run_buyer_client_state(
         "skipped_other": 0,
         "errors": 0,
         "unrecoverable": 0,
+        "evidence_dropped": 0,
         "results": [],
     }
     for deal in deals:
-        result = analyze_buyer_deal(deal, settings=settings, llm=llm)
+        try:
+            result = analyze_buyer_deal(
+                deal, settings=settings, llm=llm, force=force,
+            )
+        except Exception as exc:  # noqa: BLE001 — одна карточка не роняет батч
+            logger.warning(
+                "Client state failed for deal %s: %s",
+                _coerce_int(deal.get("ID") or deal.get("id")),
+                exc,
+            )
+            result = {
+                "deal_id": _coerce_int(deal.get("ID") or deal.get("id")),
+                "skipped": True,
+                "reason": "unexpected_error",
+                "state": None,
+                "content_hash": "",
+            }
         stats["results"].append(result)
         reason = result.get("reason") or ""
         if result.get("skipped"):
@@ -489,12 +623,15 @@ def run_buyer_client_state(
                 stats["skipped_unchanged"] += 1
             elif reason == "evidence_incomplete":
                 stats["skipped_incomplete"] += 1
-            elif reason in {"llm_error", "parse_error"}:
+            elif reason in {
+                "llm_error", "parse_error", "collect_error", "unexpected_error",
+            }:
                 stats["errors"] += 1
             else:
                 stats["skipped_other"] += 1
             continue
         stats["analyzed"] += 1
+        stats["evidence_dropped"] += int(result.get("evidence_dropped") or 0)
         state = result.get("state") or {}
         if state.get("recoverable") is False:
             stats["unrecoverable"] += 1

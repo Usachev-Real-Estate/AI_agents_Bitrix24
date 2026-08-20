@@ -264,3 +264,164 @@ def test_three_synthetic_cards(monkeypatch):
     # Visible in pytest -vv output for manual review.
     assert len(outputs) == 3
     print("\n".join(outputs))
+
+
+# ── Маскировка не должна обходиться через сохранённое состояние ────────
+def _card_with_contact() -> dict[str, Any]:
+    return {
+        "ID": 900,
+        "TITLE": "Покупка",
+        "STAGE_ID": "C18:NEW",
+        "contacts": [{
+            "ID": 5,
+            "NAME": "Ирина",
+            "LAST_NAME": "Логутина",
+            "PHONE": [{"VALUE": "+7 916 123-45-67"}],
+            "EMAIL": [],
+        }],
+        "timeline": [{
+            "author_id": 10,
+            "created": "2026-08-14T10:00:00+03:00",
+            "comment": "Созвонился с Ириной Логутиной, ищет 2к до 25 млн",
+        }],
+        "activities": [],
+        "transcripts": [],
+        "evidence_incomplete": False,
+    }
+
+
+def _state_payload(evidence: list[str], **over: Any) -> dict[str, Any]:
+    payload = {
+        "client_goal": "2к до 25 млн",
+        "situation": "подбор",
+        "last_event": {"what": "звонок", "when": "2026-08-14"},
+        "next_step": {"what": "показ", "when": "неделя", "who": "broker"},
+        "blockers": [],
+        "risk": "low",
+        "recoverable": True,
+        "missing": [],
+        "confidence": 0.9,
+        "evidence": evidence,
+    }
+    payload.update(over)
+    return payload
+
+
+def test_stored_state_stays_masked(temp_db, monkeypatch):
+    """В БД уходит маска: на следующем прогоне она вернётся в модель."""
+    monkeypatch.setenv("DRY_RUN", "false")
+    from config import get_settings
+    get_settings.cache_clear()
+
+    quote = "Созвонился с КЛИЕНТ_1, ищет 2к до 25 млн"
+    llm = _FakeLLM(_state_payload([quote]))
+    result = analyze_buyer_deal(_card_with_contact(), llm=llm, prepared=True)
+
+    stored = json.loads(db.get_client_state(900)["state_json"])
+    assert stored["evidence"] == [quote]
+    for secret in ("Ирин", "Логутин", "916"):
+        assert secret not in json.dumps(stored, ensure_ascii=False)
+
+    # Человеку возвращается расшифрованная копия.
+    assert "Ирина" in result["state"]["evidence"][0]
+
+
+def test_invented_quote_is_dropped_and_confidence_capped(temp_db, monkeypatch):
+    monkeypatch.setenv("DRY_RUN", "false")
+    from config import get_settings
+    get_settings.cache_clear()
+
+    llm = _FakeLLM(_state_payload(["клиент готов внести задаток завтра"]))
+    result = analyze_buyer_deal(_card_with_contact(), llm=llm, prepared=True)
+
+    assert result["state"]["evidence"] == []
+    assert result["evidence_dropped"] == 1
+    assert result["state"]["confidence"] <= 0.3
+    assert "подтверждённые цитаты" in result["state"]["missing"]
+
+
+def test_unchanged_card_is_skipped_in_dry_run(temp_db, monkeypatch):
+    """DRY_RUN обязан пользоваться кэшем, иначе это самый дорогой режим."""
+    from config import get_settings
+
+    monkeypatch.setenv("DRY_RUN", "false")
+    get_settings.cache_clear()
+    quote = "Созвонился с КЛИЕНТ_1, ищет 2к до 25 млн"
+    analyze_buyer_deal(
+        _card_with_contact(), llm=_FakeLLM(_state_payload([quote])), prepared=True,
+    )
+
+    monkeypatch.setenv("DRY_RUN", "true")
+    get_settings.cache_clear()
+
+    class _Boom:
+        def invoke(self, messages):
+            raise AssertionError("модель не должна вызываться для неизменной карточки")
+
+    again = analyze_buyer_deal(_card_with_contact(), llm=_Boom(), prepared=True)
+    assert again["reason"] == "unchanged"
+
+    forced = analyze_buyer_deal(
+        _card_with_contact(),
+        llm=_FakeLLM(_state_payload([quote])),
+        prepared=True,
+        force=True,
+    )
+    assert forced["reason"] != "unchanged"
+
+
+# ── Бюджет контекста и устойчивость ────────────────────────────────────
+def test_trim_events_keeps_the_most_recent():
+    from client_state import trim_events_to_budget
+
+    events = [{"text": "x" * 100, "note": ""} for _ in range(10)]
+    events[-1]["text"] = "самое свежее"
+    kept, dropped = trim_events_to_budget(events, 250)
+    assert dropped == 10 - len(kept)
+    assert kept[-1]["text"] == "самое свежее"
+    assert sum(len(e["text"]) for e in kept) <= 250
+
+
+def test_trim_keeps_at_least_one_event():
+    from client_state import trim_events_to_budget
+
+    kept, dropped = trim_events_to_budget([{"text": "x" * 5000, "note": ""}], 100)
+    assert len(kept) == 1 and dropped == 0
+
+
+def test_collect_failure_skips_only_that_card(temp_db, monkeypatch):
+    import client_state as cs
+
+    def _boom(deal, settings=None):
+        raise RuntimeError("Bitrix недоступен")
+
+    monkeypatch.setattr(cs, "prepare_deal_record", _boom)
+    result = cs.analyze_buyer_deal({"ID": 1}, llm=_FakeLLM(_state_payload([])))
+    assert result["skipped"] is True
+    assert result["reason"] == "collect_error"
+
+
+def test_batch_survives_a_failing_card(temp_db, monkeypatch):
+    import client_state as cs
+
+    def _explode(deal, **kwargs):
+        if deal.get("ID") == 2:
+            raise RuntimeError("неожиданная ошибка")
+        return {"deal_id": deal.get("ID"), "skipped": False, "reason": "",
+                "state": {"recoverable": True}, "content_hash": "h"}
+
+    monkeypatch.setattr(cs, "analyze_buyer_deal", _explode)
+    stats = cs.run_buyer_client_state([{"ID": 1}, {"ID": 2}, {"ID": 3}])
+    assert stats["total"] == 3
+    assert stats["analyzed"] == 2
+    assert stats["errors"] == 1
+
+
+def test_single_oversized_event_is_truncated_not_dropped():
+    """Одна длинная расшифровка не должна ни вылетать, ни рвать контекст."""
+    from client_state import trim_events_to_budget
+
+    kept, dropped = trim_events_to_budget([{"text": "я" * 5000, "note": ""}], 1000)
+    assert dropped == 0
+    assert len(kept[0]["text"]) == 1000
+    assert kept[0]["truncated"] is True
