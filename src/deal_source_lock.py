@@ -74,6 +74,13 @@ def _list_deals(
         nxt = raw.get("next")
         if nxt is None:
             break
+        # Bitrix обязан двигать курсор вперёд. Если не двигает — выходим,
+        # иначе цикл крутится вечно и список растёт до OOM.
+        if int(nxt) <= start:
+            logger.warning(
+                "Pagination stalled at start=%s (next=%s) — stopping", start, nxt,
+            )
+            break
         start = int(nxt)
     return items
 
@@ -172,7 +179,7 @@ def process_modified_deals(
                     notify_uid = settings.contact_source_lock_notify_user
                     msg = (
                         f"Откат поля «Источник» у сделки ({SELLERS_FUNNEL_LABEL}).\n"
-                        f"Кто менял: {who}\n"
+                        f"Последний редактор карточки: {who}\n"
                         f"Сделка: [url=/crm/deal/details/{did}/]{title}[/url]\n"
                         f"Восстановлено: {snapshot or '—'} "
                         f"(попытка: {current or '—'})."
@@ -235,7 +242,8 @@ def run(settings: Settings | None = None) -> dict[str, Any]:
         len(restricted_ids),
         settings.dry_run,
     )
-    print_deal_ui_checklist(restricted_ids, labels)
+    if "--checklist" in sys.argv:
+        print_deal_ui_checklist(restricted_ids, labels)
 
     seeded = seed_snapshots_if_needed(now_iso)
 

@@ -98,7 +98,10 @@ def export(
         activities: list[dict[str, Any]] = d.get("deal_activities") or []
         if not isinstance(activities, list):
             activities = []
-        evidence_activities = [a for a in activities if isinstance(a, dict) and _activity_has_evidence(a)]
+        evidence_activities = [
+            a for a in activities
+            if isinstance(a, dict) and _activity_has_evidence(a)
+        ]
         if not evidence_activities:
             continue
 
@@ -127,9 +130,15 @@ def export(
                 "source_id": src,
                 "source_name": source_name,
                 "date_create": str(d.get("date_create") or d.get("DATE_CREATE") or "").strip(),
-                "assigned_by_id": str(d.get("assigned_by_id") or d.get("ASSIGNED_BY_ID") or "").strip(),
-                "comment_author_id": str(comment_rec.get("author_id") or comment_rec.get("AUTHOR_ID") or "").strip(),
-                "comment_created": str(comment_rec.get("created") or comment_rec.get("CREATED") or "").strip(),
+                "assigned_by_id": str(
+                    d.get("assigned_by_id") or d.get("ASSIGNED_BY_ID") or ""
+                ).strip(),
+                "comment_author_id": str(
+                    comment_rec.get("author_id") or comment_rec.get("AUTHOR_ID") or ""
+                ).strip(),
+                "comment_created": str(
+                    comment_rec.get("created") or comment_rec.get("CREATED") or ""
+                ).strip(),
                 "comment_text": comment_text,
                 "deal_activity_count": len(evidence_activities),
                 "deal_activity_subjects": "; ".join(act_subjects),
@@ -201,4 +210,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -62,10 +62,16 @@ class Settings(BaseSettings):
     analyst_chunk_size: int = Field(default=100, validation_alias="ANALYST_CHUNK_SIZE")
     back_office_dept_id: int = Field(default=0, validation_alias="BACK_OFFICE_DEPT_ID")
     back_office_chat_id: int = Field(default=0, validation_alias="BACK_OFFICE_CHAT_ID")
-    contact_owner_type_id: str = Field(default="UC_2G0TD3", validation_alias="CONTACT_OWNER_TYPE_ID")
+    contact_owner_type_id: str = Field(
+        default="UC_2G0TD3",
+        validation_alias="CONTACT_OWNER_TYPE_ID",
+    )
     owner_kpi_since: str = Field(default="2026-06-01", validation_alias="OWNER_KPI_SINCE")
     owner_kpi_target: int = Field(default=10, validation_alias="OWNER_KPI_TARGET")
-    owner_exclude_user_ids_json: str = Field(default="[]", validation_alias="OWNER_EXCLUDE_USER_IDS_JSON")
+    owner_exclude_user_ids_json: str = Field(
+        default="[]",
+        validation_alias="OWNER_EXCLUDE_USER_IDS_JSON",
+    )
     rules_advice_json: str = Field(
         default='{}',
         validation_alias="RULES_ADVICE_JSON",
@@ -75,7 +81,10 @@ class Settings(BaseSettings):
         validation_alias="OWNER_SALES_DEPT_IDS_JSON",
     )
     task_auditor_exclude_users_json: str = Field(
-        default='["Агентство Недвижимости", "Вера Волкова", "Светлана Щербакова", "Марина Володина"]',
+        default=(
+            '["Агентство Недвижимости", "Вера Волкова", '
+            '"Светлана Щербакова", "Марина Володина"]'
+        ),
         validation_alias="TASK_AUDITOR_EXCLUDE_USERS_JSON",
     )
     # Exclusive (smart process) expiry reminders

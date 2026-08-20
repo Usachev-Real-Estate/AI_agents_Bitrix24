@@ -242,6 +242,13 @@ def fetch_exclusive_items(settings: Settings) -> list[dict[str, Any]]:
         next_start = data.get("next")
         if next_start is None:
             break
+        if int(next_start) <= start:
+            logger.warning(
+                "Pagination stalled at start=%s (next=%s) — stopping",
+                start,
+                next_start,
+            )
+            break
         start = int(next_start)
 
     return items

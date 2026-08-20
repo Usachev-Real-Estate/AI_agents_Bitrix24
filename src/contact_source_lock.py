@@ -31,6 +31,9 @@ from notify import send_user_chat_message  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+# Время портала: Bitrix отдаёт и фильтрует DATE_MODIFY в МСК.
+PORTAL_TZ = timezone(timedelta(hours=3))
+
 
 def _coerce_int(value: Any) -> int:
     try:
@@ -159,6 +162,13 @@ def _list_contacts(
         nxt = raw.get("next")
         if nxt is None:
             break
+        # Bitrix обязан двигать курсор вперёд. Если не двигает — выходим,
+        # иначе цикл крутится вечно и список растёт до OOM.
+        if int(nxt) <= start:
+            logger.warning(
+                "Pagination stalled at start=%s (next=%s) — stopping", start, nxt,
+            )
+            break
         start = int(nxt)
     return items
 
@@ -265,7 +275,7 @@ def process_modified_contacts(
                     notify_uid = settings.contact_source_lock_notify_user
                     msg = (
                         "Откат поля «Источник» у контакта.\n"
-                        f"Кто менял: {who}\n"
+                        f"Последний редактор карточки: {who}\n"
                         f"Контакт: [url=/crm/contact/details/{cid}/]{title}[/url]\n"
                         f"Восстановлено: {snapshot or '—'} "
                         f"(попытка: {current or '—'})."
@@ -328,20 +338,17 @@ def run(settings: Settings | None = None) -> dict[str, Any]:
         len(restricted_ids),
         settings.dry_run,
     )
-    print_ui_checklist(restricted_ids, labels)
+    if "--checklist" in sys.argv:
+        print_ui_checklist(restricted_ids, labels)
 
     seeded = seed_snapshots_if_needed(bx, now_iso)
 
     lookback = max(1, int(settings.contact_source_lock_lookback_minutes))
-    since = (now - timedelta(minutes=lookback)).isoformat()
-    # Bitrix filter prefers local-ish datetime; use ISO without micros
-    since_b24 = (now - timedelta(minutes=lookback)).strftime("%Y-%m-%dT%H:%M:%S%z")
-    if since_b24.endswith("+0000"):
-        since_b24 = since_b24[:-5] + "+00:00"
-    # Prefer simple date-time used elsewhere in project
-    since_filter = (now - timedelta(minutes=lookback)).astimezone(
-        timezone(timedelta(hours=3)),
-    ).strftime("%Y-%m-%dT%H:%M:%S+03:00")
+    since_dt = now - timedelta(minutes=lookback)
+    since = since_dt.isoformat()
+    # Bitrix фильтрует DATE_MODIFY по времени портала (МСК).
+    since_filter = since_dt.astimezone(PORTAL_TZ).strftime("%Y-%m-%dT%H:%M:%S%z")
+    since_filter = since_filter[:-2] + ":" + since_filter[-2:]
 
     contacts = _list_contacts(bx, modified_since=since_filter)
     logger.info(

@@ -30,7 +30,7 @@ if str(_SRC_DIR) not in sys.path:
 
 from config import Settings, get_settings, setup_logging  # noqa: E402
 from db import (  # noqa: E402
-    get_buyer_commission_notified_at,
+    get_buyer_commission_notified_map,
     init_db,
     mark_buyer_commission_enforced,
     mark_buyer_commission_notified,
@@ -129,6 +129,13 @@ def list_open_buyer_deals(bx: Bitrix, category_id: int) -> list[dict[str, Any]]:
         items.extend(batch)
         nxt = raw.get("next")
         if nxt is None:
+            break
+        # Bitrix обязан двигать курсор вперёд. Если не двигает — выходим,
+        # иначе цикл крутится вечно и список растёт до OOM.
+        if int(nxt) <= start:
+            logger.warning(
+                "Pagination stalled at start=%s (next=%s) — stopping", start, nxt,
+            )
             break
         start = int(nxt)
     return items
@@ -294,6 +301,8 @@ def collect_due_notifications(
     """Group deals due for broker/ROP reminders by recipient user id."""
     broker_groups: dict[int, list[dict[str, Any]]] = defaultdict(list)
     rop_groups: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    # Один запрос вместо двух обращений к SQLite на каждую сделку.
+    notified = get_buyer_commission_notified_map([int(d["id"]) for d in deals])
 
     for deal in deals:
         deal_id = int(deal["id"])
@@ -302,7 +311,7 @@ def collect_due_notifications(
         if (
             (active_user_ids is None or broker_id in active_user_ids)
             and is_notify_due(
-                get_buyer_commission_notified_at(deal_id, ROLE_BROKER),
+                notified.get((deal_id, ROLE_BROKER)),
                 broker_interval_hours,
                 now,
             )
@@ -315,7 +324,7 @@ def collect_due_notifications(
             and rop_id != broker_id
             and (active_user_ids is None or rop_id in active_user_ids)
             and is_notify_due(
-                get_buyer_commission_notified_at(deal_id, ROLE_ROP),
+                notified.get((deal_id, ROLE_ROP)),
                 rop_interval_hours,
                 now,
             )

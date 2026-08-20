@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from pathlib import Path
 
 from fill_buyer_base_rate import (
@@ -70,8 +72,17 @@ def test_plan_deal_updates_skips_same_and_unknown() -> None:
     assert unknown == [16]
 
 
+_PROJECT_CSV = Path(
+    "data/Мотивация брокеров 3 кв 2026 - Мотивация брокеров 3 кв 2026.csv"
+)
+
+
+@pytest.mark.skipif(
+    not _PROJECT_CSV.exists(),
+    reason="data/ не в репозитории (gitignored) — проверка идёт только локально",
+)
 def test_load_csv_rates_from_project_file() -> None:
-    path = Path("data/Мотивация брокеров 3 кв 2026 - Мотивация брокеров 3 кв 2026.csv")
+    path = _PROJECT_CSV
     rows = load_csv_rates(path)
     assert len(rows) == 40
     by_fio = {r.fio: r.rate for r in rows}

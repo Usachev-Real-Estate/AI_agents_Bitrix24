@@ -11,8 +11,8 @@ _SRC_DIR = Path(__file__).resolve().parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
-from config import get_settings
-from fast_bitrix24 import Bitrix
+from config import get_settings  # noqa: E402
+from fast_bitrix24 import Bitrix  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,10 @@ async def fetch_owner_contacts(bx: Bitrix, type_id: str, since_date: str) -> lis
             "TYPE_ID": type_id,
             ">=DATE_CREATE": since_date,
         },
-        "select": ["ID", "NAME", "LAST_NAME", "CREATED_BY_ID", "ASSIGNED_BY_ID", "DATE_CREATE", "TYPE_ID"],
+        "select": [
+            "ID", "NAME", "LAST_NAME", "CREATED_BY_ID",
+            "ASSIGNED_BY_ID", "DATE_CREATE", "TYPE_ID",
+        ],
     })
     return contacts
 
@@ -241,7 +244,11 @@ async def async_main():
     bx = Bitrix(settings.b24_webhook_url)
 
     # 1. Получить контакты
-    logger.info("Fetching owner contacts (type_id=%s) since %s", settings.contact_owner_type_id, settings.owner_kpi_since)
+    logger.info(
+        "Fetching owner contacts (type_id=%s) since %s",
+        settings.contact_owner_type_id,
+        settings.owner_kpi_since,
+    )
     contacts = await fetch_owner_contacts(
         bx, settings.contact_owner_type_id, settings.owner_kpi_since
     )
@@ -265,9 +272,9 @@ async def async_main():
         logger.warning("Failed to fetch active users from Bitrix: %s", e)
 
     # Также добавим брокеров из БД на случай, если кто-то не попал по отделам
-    from db import get_connection
+    from db import db_session
     try:
-        with get_connection() as conn:
+        with db_session() as conn:
             rows = conn.execute(
                 "SELECT responsible_id FROM brokers WHERE lead_count > 0 OR deal_count > 0"
             ).fetchall()

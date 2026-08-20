@@ -2,8 +2,8 @@
 import sys
 
 sys.path.insert(0, "src")
-from config import get_settings
-from fast_bitrix24 import Bitrix
+from config import get_settings  # noqa: E402
+from fast_bitrix24 import Bitrix  # noqa: E402
 
 bx = Bitrix(get_settings().b24_webhook_url)
 depts = bx.get_all("department.get")

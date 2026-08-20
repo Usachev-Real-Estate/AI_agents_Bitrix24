@@ -10,16 +10,24 @@ _SRC_DIR = Path(__file__).resolve().parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
-from db import get_previous_rating_snapshot, get_weekly_stats, init_db, purge_test_violations
-from notify import send_chat_message_chunked, _bx_call_sync
-from config import get_settings
-from broker_rating import (
+from db import (  # noqa: E402
+    get_previous_rating_snapshot,
+    get_weekly_stats,
+    init_db,
+    purge_test_violations,
+)
+from notify import send_chat_message_chunked, _bx_call_sync  # noqa: E402
+from config import get_settings  # noqa: E402
+from broker_rating import (  # noqa: E402
     compute_all_ratings,
     format_rating_leaderboard,
     get_rating_period,
     persist_ratings_snapshot,
 )
-from broker_rating_collectors import fetch_all_broker_tasks, fetch_important_feed_posts
+from broker_rating_collectors import (  # noqa: E402
+    fetch_all_broker_tasks,
+    fetch_important_feed_posts,
+)
 
 logger = logging.getLogger(__name__)
 EXCLUDED_WEEKLY_DEPARTMENTS = {"ТО"}
@@ -46,7 +54,10 @@ def _is_active_user(user_id: int) -> bool:
     return True
 
 
-def filter_active_brokers(violators: list[dict], clean: list[dict]) -> tuple[list[dict], list[dict]]:
+def filter_active_brokers(
+    violators: list[dict],
+    clean: list[dict],
+) -> tuple[list[dict], list[dict]]:
     """Exclude terminated users from report sections."""
     user_ids = {
         int(row.get("responsible_id") or 0)
@@ -64,8 +75,14 @@ def filter_weekly_scope(violators: list[dict], clean: list[dict]) -> tuple[list[
     """Apply weekly report visibility rules."""
     violators, clean = filter_active_brokers(violators, clean)
     return (
-        [row for row in violators if (row.get("department") or "").strip() not in EXCLUDED_WEEKLY_DEPARTMENTS],
-        [row for row in clean if (row.get("department") or "").strip() not in EXCLUDED_WEEKLY_DEPARTMENTS],
+        [
+            row for row in violators
+            if (row.get("department") or "").strip() not in EXCLUDED_WEEKLY_DEPARTMENTS
+        ],
+        [
+            row for row in clean
+            if (row.get("department") or "").strip() not in EXCLUDED_WEEKLY_DEPARTMENTS
+        ],
     )
 
 
@@ -75,27 +92,56 @@ def _get_rule_advice() -> dict[str, str]:
     if not advice:
         # Fallback to defaults
         return {
-            "lead_rule_1": "обратить внимание на скорость квалификации лидов (статус «Новый» > 2 часов)",
+            "lead_rule_1": (
+                "обратить внимание на скорость квалификации лидов "
+                "(статус «Новый» > 2 часов)"
+            ),
             "lead_rule_2": "указывать причину перевода лида в «Спам» (JUNK)",
             "lead_rule_3": "указывать причину перевода лида в нецелевые",
             "lead_missed_callback": "не пропускать входящие звонки по лидам без обратного",
-            "buyer_stage_1": "не задерживать сделки на этапе «Первый контакт» более 1 дня (стадия снята)",
+            "buyer_stage_1": (
+                "не задерживать сделки на этапе «Первый контакт» "
+                "более 1 дня (стадия снята)"
+            ),
             "buyer_stage_2": "не держать сделки на этапе «Подбор» более 2 дней без комментария",
-            "buyer_stage_3": "на «Первый показ» и «Повторный показ» — живое дело с датой не дальше 14 дней от этапа",
+            "buyer_stage_3": (
+                "на «Первый показ» и «Повторный показ» — живое дело "
+                "с датой не дальше 14 дней от этапа"
+            ),
             "buyer_stage_4": "устаревшее правило (стадии Переговоры/Дожим сняты с аудита)",
-            "buyer_stage_5": "на этапе «Отложенный спрос» держать запланированное дело в карточке сделки",
+            "buyer_stage_5": (
+                "на этапе «Отложенный спрос» держать запланированное дело "
+                "в карточке сделки"
+            ),
             "buyer_podbor_stale": "не держать сделки на этапе «Подбор» более 7 дней",
-            "buyer_ofer_comment": "на этапе «Офер» оставлять развёрнутый комментарий (от 30 символов)",
+            "buyer_ofer_comment": (
+                "на этапе «Офер» оставлять развёрнутый комментарий "
+                "(от 30 символов)"
+            ),
             "buyer_lost_no_reason": "на «Сделка проиграна» нужен комментарий брокера/РОПа или дело",
             "buyer_agent_no_comment": "при переводе в «Агент» оставлять комментарий",
             "buyer_missed_callback": "не пропускать входящие звонки по сделкам без обратного",
-            "lead_new_over_24h": "квалифицировать лид «Новый» за 24 часа, иначе он уйдёт в «Общие лиды»",
-            "seller_stage_stale": "на этапах воронки Продавцы оставлять комментарий (на «Подготовке в рекламу» — комментарий или дело) в срок регламента",
-            "seller_deferred_no_activity": "на этапе «Отложенная продажа» держать запланированное дело",
+            "lead_new_over_24h": (
+                "квалифицировать лид «Новый» за 24 часа, "
+                "иначе он уйдёт в «Общие лиды»"
+            ),
+            "seller_stage_stale": (
+                "на этапах воронки Продавцы оставлять комментарий "
+                "(на «Подготовке в рекламу» — комментарий или дело) "
+                "в срок регламента"
+            ),
+            "seller_deferred_no_activity": (
+                "на этапе «Отложенная продажа» держать запланированное дело"
+            ),
             "seller_negotiations_max": "не держать сделки на «Переговорах» более 14 дней",
-            "seller_lost_no_reason": "на «Сделка проиграна» нужен комментарий брокера/РОПа или дело",
+            "seller_lost_no_reason": (
+                "на «Сделка проиграна» нужен комментарий брокера/РОПа или дело"
+            ),
             "seller_afina_id_missing": "на «Закрытая продажа» и «Поиск клиента» заполнять ID Афины",
-            "general_base_no_plan": "в «Общей базе» за 2 дня после переноса запланировать дело или написать комментарий с планом дальнейших действий",
+            "general_base_no_plan": (
+                "в «Общей базе» за 2 дня после переноса запланировать дело "
+                "или написать комментарий с планом дальнейших действий"
+            ),
         }
     return advice
 
@@ -187,7 +233,10 @@ def format_weekly_report(
         total_violations += v['total_violations']
         # If dept_name is set, we don't need to show department for each broker
         dept_str = "" if dept_name else (f" ({v['department']})" if v['department'] else "")
-        lines.append(f"{i}. 🔴 {v['responsible_name']}{dept_str} — {v['total_violations']} нарушений")
+        lines.append(
+            f"{i}. 🔴 {v['responsible_name']}{dept_str} — "
+            f"{v['total_violations']} нарушений"
+        )
 
         if v['lead_violations'] > 0:
             lines.append(f"   📋 Лиды: {v['lead_violations']}")
@@ -221,7 +270,10 @@ def format_weekly_report(
 
     for i, c in enumerate(clean, 1):
         dept_str = "" if dept_name else (f" ({c['department']})" if c['department'] else "")
-        lines.append(f"{i}. 🟢 {c['responsible_name']}{dept_str} — {c['lead_count']} лидов, {c['deal_count']} сделок")
+        lines.append(
+            f"{i}. 🟢 {c['responsible_name']}{dept_str} — "
+            f"{c['lead_count']} лидов, {c['deal_count']} сделок"
+        )
 
     lines.append("")
     lines.extend([
@@ -258,15 +310,27 @@ def format_weekly_report(
         total_deal = sum(v['deal_violations'] for v in violators)
         total_missed = sum(v['missed_call_violations'] for v in violators)
         if total_violations > 0:
-            lines.append(f"По типам: 📋лиды {total_lead} ({(total_lead/total_violations)*100:.0f}%), 🏠сделки {total_deal} ({(total_deal/total_violations)*100:.0f}%), 📞звонки {total_missed} ({(total_missed/total_violations)*100:.0f}%)")
+            lines.append(
+                f"По типам: 📋лиды {total_lead} "
+                f"({(total_lead/total_violations)*100:.0f}%), "
+                f"🏠сделки {total_deal} "
+                f"({(total_deal/total_violations)*100:.0f}%), "
+                f"📞звонки {total_missed} "
+                f"({(total_missed/total_violations)*100:.0f}%)"
+            )
 
     return "\n".join(lines)
 
 
 def main():
     init_db()
-    purge_test_violations()
     settings = get_settings()
+    # purge_test_violations() удаляет строки из violations/audit_runs. Генератор
+    # отчёта не должен чистить базу как побочный эффект — только по явному флагу
+    # и никогда в DRY_RUN. Ручной запуск: python src/weekly_report.py --purge
+    if "--purge" in sys.argv and not settings.dry_run:
+        removed = purge_test_violations()
+        print(f"Purged {removed} non-routine violations")
     now = datetime.now(timezone.utc)
     # Week-to-date: from Monday 00:00 UTC till now.
     week_start_dt = (now - timedelta(days=now.weekday())).replace(

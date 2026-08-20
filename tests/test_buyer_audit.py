@@ -83,7 +83,11 @@ def test_rule2_no_violation_when_deal_younger_than_2_days_without_comment():
         audit_rule=2,
         date_create="2026-06-07T12:00:00+00:00",
         timeline=[
-            {"author_id": 154, "comment": "https://cian.ru/...", "created": "2026-06-07T12:00:00+00:00"},
+            {
+                "author_id": 154,
+                "comment": "https://cian.ru/...",
+                "created": "2026-06-07T12:00:00+00:00",
+            },
         ],
     )
     violations = check_buyer_deal_violations(
@@ -267,7 +271,11 @@ def test_rule3_comment_without_activity_is_violation():
         uf_fields={},
         open_activities=[],
         timeline=[
-            {"author_id": 100, "comment": "Показ назначен на 27.06", "created": "2026-06-24T10:00:00+00:00"},
+            {
+                "author_id": 100,
+                "comment": "Показ назначен на 27.06",
+                "created": "2026-06-24T10:00:00+00:00",
+            },
         ],
         stage_entered_at="2026-06-20T10:00:00+00:00",
     )
@@ -392,7 +400,11 @@ def test_rule5_violation_without_planned_activity():
         audit_rule=5,
         assigned_by_id=100,
         timeline=[
-            {"author_id": 100, "comment": "свежий комментарий", "created": "2026-06-08T10:00:00+00:00"},
+            {
+                "author_id": 100,
+                "comment": "свежий комментарий",
+                "created": "2026-06-08T10:00:00+00:00",
+            },
         ],
         open_activities=[],
     )

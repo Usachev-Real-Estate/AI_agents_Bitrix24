@@ -27,6 +27,7 @@ from tools import (
     get_all_leads_with_timeline,
     get_deals_by_funnel_with_timeline,
     get_general_base_deals_with_timeline,
+    build_stage_name_index,
     humanize_violation_reason,
     list_seller_meeting_reminders,
     process_deals_to_general_base,
@@ -38,6 +39,7 @@ from tools import (
     LEAD_STATUS_JUNK,
     LEAD_STATUS_NECELEVOY,
     LEAD_STATUS_AGENT,
+    NO_COMMENT_DAYS,
 )
 
 logger = logging.getLogger(__name__)
@@ -88,6 +90,18 @@ class AuditState(TypedDict, total=False):
     messages: Annotated[list[str], operator.add]
     report_sent: bool
     last_violation_count: int
+
+
+def _is_reportable_days(value: Any) -> bool:
+    """True when a details day counter is a real number worth showing.
+
+    NO_COMMENT_DAYS is the «no comment at all» sentinel and is never printed.
+    Non-numeric values are rejected outright: comparing a str with an int
+    raises TypeError, which used to abort the whole dispatcher send loop.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return value < NO_COMMENT_DAYS
 
 
 def _filter_zero_entity_violations(
@@ -237,8 +251,9 @@ async def buyer_deal_analyst(state: AuditState, settings: Settings) -> AuditStat
     current_time = state.get("current_time", "")
     rop_map = _build_rop_map()
     all_violations = check_buyer_deal_violations(deals, current_time, rop_map)
-    process_deals_to_general_base(all_violations, "buyers")
-
+    # Перенос в «Общую базу» выполняет диспетчер — после отсева уволенных
+    # сотрудников и исключённых отделов. Иначе сделка уезжала бы молча,
+    # не попав ни в один отчёт.
     logger.info("Agent 5: found %d buyer deal violations total", len(all_violations))
     return {"violations": all_violations}
 
@@ -293,8 +308,6 @@ async def seller_deal_analyst(state: AuditState, settings: Settings) -> AuditSta
                     uid,
                     deal_id,
                 )
-
-    process_deals_to_general_base(all_violations, "sellers")
 
     return {"violations": all_violations}
 
@@ -612,6 +625,11 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
 
     violations = active_violations
 
+    # Мутации CRM выполняются здесь, на уже отфильтрованном наборе: то, что
+    # переносится в «Общую базу», обязано совпадать с тем, что уходит в отчёт.
+    process_deals_to_general_base(violations, "buyers")
+    process_deals_to_general_base(violations, "sellers")
+
     dept_groups = _group_by_department(violations, user_map)
     seller_deals_count = len(state.get("raw_sellers_deals", []))
     buyers_deals = state.get("raw_buyers_deals", [])
@@ -635,6 +653,12 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
     )
     agent_count = sum(
         1 for lead in raw_leads if _lead_status_id(lead) == LEAD_STATUS_AGENT
+    )
+    stage_names = build_stage_name_index(
+        buyers_deals=buyers_deals,
+        sellers_deals=sellers_deals,
+        general_base_deals=gb_deals,
+        leads=raw_leads,
     )
     audited_buyers = sum(
         1 for d in buyers_deals if d.get("audit_rule") is not None
@@ -720,13 +744,7 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
                 ]
                 for v in gb_violations:
                     entity_id = _coerce_int(v.get("entity_id", 0))
-                    reason = humanize_violation_reason(
-                        v,
-                        buyers_deals=buyers_deals,
-                        sellers_deals=sellers_deals,
-                        general_base_deals=gb_deals,
-                        leads=raw_leads,
-                    )
+                    reason = humanize_violation_reason(v, name_index=stage_names)
                     link = _build_crm_link("deal", entity_id)
                     uid = _coerce_int(v.get("responsible_id", 0))
                     user_display = user_map.get(uid, f"ID:{uid}")
@@ -739,7 +757,7 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
                     details = v.get("details", {})
                     if isinstance(details, dict):
                         days = details.get("days_on_stage")
-                        if days is not None and days != "" and days < 999:
+                        if _is_reportable_days(days):
                             days_info = f" ({days} дн.)"
                     gb_lines.append(
                         f"🟡 Сделка #{entity_id} | {name_only} | "
@@ -846,11 +864,7 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
                         entity_type = str(v.get("entity_type", "?"))
                         entity_id = _coerce_int(v.get("entity_id", 0))
                         reason = humanize_violation_reason(
-                            v,
-                            buyers_deals=buyers_deals,
-                            sellers_deals=sellers_deals,
-                            general_base_deals=gb_deals,
-                            leads=raw_leads,
+                            v, name_index=stage_names,
                         )
                         link = _build_crm_link(entity_type, entity_id)
                         uid = _coerce_int(v.get("responsible_id", 0))
@@ -867,7 +881,7 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
                             days = details.get("days_on_stage") or details.get(
                                 "days_since_last_comment",
                             )
-                            if days is not None and days != "" and days < 999:
+                            if _is_reportable_days(days):
                                 days_info = f" ({days} дн.)"
 
                         lines.append(
@@ -950,6 +964,25 @@ async def report_dispatcher(state: AuditState, settings: Settings) -> AuditState
             settings.report_chat_id,
         )
 
+    if settings.dry_run:
+        # DRY_RUN — режим чтения. Записанные нарушения питают рейтинг брокеров
+        # (broker_rating.get_violations_for_broker), поэтому тестовый прогон
+        # не должен оставлять следов в БД.
+        logger.info(
+            "Dispatcher: DRY_RUN — %d violations not persisted", current_count,
+        )
+        return {
+            "messages": [
+                f"dispatcher: dry-run, {len(dept_groups)} dept reports prepared "
+                f"({len(violations)} violations)",
+            ],
+            "status": "completed_dry_run",
+            # Проход диспетчера состоялся: флаг гасит повторный вызов
+            # (см. защиту «violations unchanged» выше).
+            "report_sent": True,
+            "last_violation_count": current_count,
+        }
+
     from db import init_db, is_routine_audit_run, save_audit_run, save_violations, upsert_brokers
 
     init_db()
@@ -1003,6 +1036,18 @@ async def merge_node(state: AuditState) -> dict[str, Any]:
     return {}
 
 
+async def passthrough_node(state: AuditState) -> dict[str, Any]:
+    """No-op step that keeps every branch the same length before `merge`.
+
+    LangGraph schedules a node whenever any incoming edge is written. The
+    seller and general-base branches were one hop shorter than the lead and
+    buyer branches, so `merge` fired twice and the dispatcher ran twice —
+    duplicate department reports whenever the violation count differed
+    between the two passes.
+    """
+    return {}
+
+
 def build_graph_v2(settings: Settings):
     """Build v2 audit graph: 4 collectors → analysts → merge → dispatcher."""
     graph = StateGraph(AuditState)
@@ -1019,6 +1064,8 @@ def build_graph_v2(settings: Settings):
     graph.add_node("missed_calls_controller", partial(missed_calls_controller, settings=settings))
     graph.add_node("report_dispatcher", partial(report_dispatcher, settings=settings))
     graph.add_node("merge", merge_node)
+    graph.add_node("seller_gate", passthrough_node)
+    graph.add_node("general_base_gate", passthrough_node)
 
     graph.add_edge(START, "lead_collector")
     graph.add_edge(START, "buyer_collector")
@@ -1034,10 +1081,13 @@ def build_graph_v2(settings: Settings):
     graph.add_edge("seller_collector", "seller_deal_analyst")
     graph.add_edge("general_base_collector", "general_base_analyst")
 
+    # Все четыре ветки приходят в merge на одной глубине.
     graph.add_edge("missed_calls_controller", "merge")
     graph.add_edge("buyer_calls_controller", "merge")
-    graph.add_edge("seller_deal_analyst", "merge")
-    graph.add_edge("general_base_analyst", "merge")
+    graph.add_edge("seller_deal_analyst", "seller_gate")
+    graph.add_edge("seller_gate", "merge")
+    graph.add_edge("general_base_analyst", "general_base_gate")
+    graph.add_edge("general_base_gate", "merge")
 
     graph.add_edge("merge", "report_dispatcher")
     graph.add_edge("report_dispatcher", END)
