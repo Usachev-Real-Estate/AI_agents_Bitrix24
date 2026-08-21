@@ -14,6 +14,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from config import Settings, get_settings
 from db import get_client_state, init_db, save_client_state
 from lead_quality_audit import _make_llm, _message_content_to_str
+from funnel_profiles import BUYER_PROFILE, SELLER_PROFILE, FunnelProfile
 from masking import MaskMap, apply_mask, build_mask_map, unmask
 from tools import (
     _as_list,
@@ -48,6 +49,13 @@ BUYER_CLIENT_STATE_SYSTEM_PROMPT = """\
 4. null / отсутствие расшифровки означает «текст ещё не готов», а не «звонка не было».
 5. recoverable=false — если по карточке нельзя восстановить картину клиента
    (типичный пример: «созвонился, договорились» без деталей).
+6. Сверяй источники. Комментарий брокера — это пересказ, расшифровка звонка —
+   первоисточник. Если они расходятся, занеси это в contradictions с ДВУМЯ
+   цитатами: что записано в карточке и что слышно в разговоре. Не расходятся —
+   оставь contradictions пустым. Расхождение ≠ обвинение: возможно, брокер
+   просто не обновил карточку.
+7. signals — только факты, каждый с цитатой. Не выводи их «по ощущению»:
+   не нашёл подтверждения — ставь false / unknown.
 
 Ответ — один JSON-объект (без markdown), строго по схеме:
 {
@@ -60,7 +68,22 @@ BUYER_CLIENT_STATE_SYSTEM_PROMPT = """\
   "recoverable": true,
   "missing": ["string"],
   "confidence": 0.0,
-  "evidence": ["string"]
+  "evidence": ["string"],
+  "contradictions": [
+    {"what": "в чём расходится", "in_card": "цитата из карточки",
+     "in_call": "цитата из разговора", "severity": "low|medium|high"}
+  ],
+  "signals": {
+    "budget_named": false,
+    "budget_value": "string or unknown",
+    "timeline_named": false,
+    "timeline_horizon": "до месяца|1-3 месяца|более 3 месяцев|unknown",
+    "next_step_agreed": false,
+    "next_step_date": "YYYY-MM-DD or unknown",
+    "client_responsive": true,
+    "shows_count": 0,
+    "objections": ["string"]
+  }
 }
 """
 
@@ -265,6 +288,68 @@ def verify_evidence(
     return verified, invented
 
 
+def split_corpora(events: list[dict[str, Any]]) -> tuple[str, str]:
+    """Split card evidence into (what the broker wrote, what was said on calls).
+
+    A contradiction only means something if its two quotes come from different
+    sources: the card is the retelling, the transcript is the primary record.
+    """
+    card_parts: list[str] = []
+    call_parts: list[str] = []
+    for event in events:
+        text = str(event.get("text") or "")
+        if not text:
+            continue
+        if event.get("kind") == "transcript":
+            call_parts.append(text)
+        else:
+            card_parts.append(text)
+    return (
+        _normalize_for_match(" ".join(card_parts)),
+        _normalize_for_match(" ".join(call_parts)),
+    )
+
+
+def verify_contradictions(
+    rows: list[dict[str, Any]],
+    card_corpus: str,
+    call_corpus: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Keep only contradictions whose both quotes are real and from both sides.
+
+    A fabricated contradiction is an accusation against a broker, so the bar is
+    higher than for a plain summary: each side must be found in its own source.
+    """
+    verified: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for row in rows:
+        in_card = _normalize_for_match(row.get("in_card"))
+        in_call = _normalize_for_match(row.get("in_call"))
+        if in_card and in_call and in_card in card_corpus and in_call in call_corpus:
+            verified.append(row)
+        else:
+            rejected.append(row)
+    return verified, rejected
+
+
+def compute_temperature(
+    signals: dict[str, Any],
+    *,
+    recoverable: bool = True,
+    profile: FunnelProfile = BUYER_PROFILE,
+) -> tuple[str, str]:
+    """Derive client temperature from extracted signals. Returns (level, why).
+
+    Deliberately computed here rather than asked of the model: the definition
+    belongs to the agency, must not drift between runs, and has to be arguable
+    with a ROP. The rule itself lives in the funnel profile — buyers and
+    sellers are ready for different things.
+    """
+    if not recoverable:
+        return "unknown", "по карточке нельзя восстановить картину клиента"
+    return profile.temperature(signals)
+
+
 def _parse_state_json(content: str) -> dict[str, Any] | None:
     if "{" not in content:
         return None
@@ -285,7 +370,47 @@ def _coerce_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def _normalize_state(raw: dict[str, Any]) -> dict[str, Any]:
+VALID_HORIZONS = frozenset({
+    "до месяца", "1-3 месяца", "более 3 месяцев", "unknown",
+})
+VALID_SEVERITY = frozenset({"low", "medium", "high"})
+
+
+def _normalize_signals(raw: Any, profile: FunnelProfile) -> dict[str, Any]:
+    """Facts the temperature rules are computed from (funnel-specific)."""
+    data = raw if isinstance(raw, dict) else {}
+    signals = profile.normalize_signals(
+        data, lambda v: int(_coerce_float(v, 0)),
+    )
+    objections = data.get("objections") if isinstance(data.get("objections"), list) else []
+    signals["objections"] = [_clean_str(x) for x in objections if _clean_str(x)]
+    return signals
+
+
+def _normalize_contradictions(raw: Any) -> list[dict[str, Any]]:
+    rows = raw if isinstance(raw, list) else []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        severity = str(row.get("severity") or "medium").strip().lower()
+        if severity not in VALID_SEVERITY:
+            severity = "medium"
+        item = {
+            "what": _clean_str(row.get("what")),
+            "in_card": _clean_str(row.get("in_card")),
+            "in_call": _clean_str(row.get("in_call")),
+            "severity": severity,
+        }
+        if item["what"] and item["in_card"] and item["in_call"]:
+            out.append(item)
+    return out
+
+
+def _normalize_state(
+    raw: dict[str, Any],
+    profile: FunnelProfile = BUYER_PROFILE,
+) -> dict[str, Any]:
     last_event = raw.get("last_event") if isinstance(raw.get("last_event"), dict) else {}
     next_step = raw.get("next_step") if isinstance(raw.get("next_step"), dict) else {}
     blockers = raw.get("blockers") if isinstance(raw.get("blockers"), list) else []
@@ -315,10 +440,16 @@ def _normalize_state(raw: dict[str, Any]) -> dict[str, Any]:
         "missing": [_clean_str(x) for x in missing if _clean_str(x)],
         "confidence": max(0.0, min(1.0, _coerce_float(raw.get("confidence"), 0.0))),
         "evidence": [_clean_str(x) for x in evidence if _clean_str(x)],
+        "contradictions": _normalize_contradictions(raw.get("contradictions")),
+        "signals": _normalize_signals(raw.get("signals"), profile),
     }
 
 
-def unmask_state(state: dict[str, Any], mask_map: MaskMap) -> dict[str, Any]:
+def unmask_state(
+    state: dict[str, Any],
+    mask_map: MaskMap,
+    profile: FunnelProfile = BUYER_PROFILE,
+) -> dict[str, Any]:
     """Human-facing copy with real names restored.
 
     The stored copy stays masked: it is fed back to the model as
@@ -336,6 +467,18 @@ def unmask_state(state: dict[str, Any], mask_map: MaskMap) -> dict[str, Any]:
         values = out.get(key)
         if isinstance(values, list):
             out[key] = [unmask(str(v), mask_map) for v in values]
+    for row in out.get("contradictions") or []:
+        if isinstance(row, dict):
+            for key in ("what", "in_card", "in_call"):
+                row[key] = unmask(str(row.get(key) or ""), mask_map)
+    signals = out.get("signals")
+    if isinstance(signals, dict):
+        for key in profile.text_signals:
+            if key in signals:
+                signals[key] = unmask(str(signals.get(key) or ""), mask_map)
+        signals["objections"] = [
+            unmask(str(v), mask_map) for v in signals.get("objections") or []
+        ]
     return out
 
 
@@ -363,18 +506,19 @@ def analyze_with_llm(
     new_events: list[dict[str, Any]],
     all_events: list[dict[str, Any]],
     llm: LLMClient,
+    profile: FunnelProfile = BUYER_PROFILE,
 ) -> dict[str, Any] | None:
     """Call LLM and return normalized client state."""
     human = build_llm_payload(deal, previous_state, new_events, all_events)
     response = llm.invoke([
-        SystemMessage(content=BUYER_CLIENT_STATE_SYSTEM_PROMPT),
+        SystemMessage(content=profile.prompt),
         HumanMessage(content=human),
     ])
     content = _message_content_to_str(getattr(response, "content", response))
     parsed = _parse_state_json(content)
     if not parsed:
         return None
-    return _normalize_state(parsed)
+    return _normalize_state(parsed, profile)
 
 
 def fetch_deal_contacts(deal: dict[str, Any]) -> list[dict[str, Any]]:
@@ -430,15 +574,16 @@ def prepare_deal_record(deal: dict[str, Any], settings: Settings | None = None) 
     return record
 
 
-def analyze_buyer_deal(
+def analyze_deal(
     deal: dict[str, Any],
     *,
+    profile: FunnelProfile = BUYER_PROFILE,
     settings: Settings | None = None,
     llm: LLMClient | None = None,
     prepared: bool = False,
     force: bool = False,
 ) -> dict[str, Any]:
-    """Analyze one buyer deal; returns result envelope with state or skip reason."""
+    """Analyze one deal by its funnel profile; returns state or skip reason."""
     settings = settings or get_settings()
     deal_id = _coerce_int(deal.get("ID") or deal.get("id"))
     envelope: dict[str, Any] = {
@@ -511,7 +656,9 @@ def analyze_buyer_deal(
 
     model = llm or _make_llm(settings)
     try:
-        state = analyze_with_llm(record, previous_state, new_events, events, model)
+        state = analyze_with_llm(
+            record, previous_state, new_events, events, model, profile,
+        )
     except Exception as exc:  # noqa: BLE001 — one card must not abort the batch
         logger.warning("Client state LLM failed for deal %s: %s", deal_id, exc)
         envelope["skipped"] = True
@@ -540,9 +687,33 @@ def analyze_buyer_deal(
             state["missing"].append("подтверждённые цитаты")
     envelope["evidence_dropped"] = len(invented)
 
+    # Расхождение — это претензия к брокеру, поэтому планка выше, чем у
+    # обычной цитаты: обе стороны должны найтись каждая в своём источнике.
+    card_corpus, call_corpus = split_corpora(events)
+    confirmed, unfounded = verify_contradictions(
+        state.get("contradictions", []), card_corpus, call_corpus,
+    )
+    state["contradictions"] = confirmed
+    if unfounded:
+        logger.warning(
+            "Deal %s: %d contradiction(s) not confirmed by both sources — dropped",
+            deal_id,
+            len(unfounded),
+        )
+    envelope["contradictions_dropped"] = len(unfounded)
+
+    level, why = compute_temperature(
+        state.get("signals", {}),
+        recoverable=bool(state.get("recoverable", True)),
+        profile=profile,
+    )
+    state["temperature"] = level
+    state["temperature_reason"] = why
+    envelope["temperature"] = level
+
     # В БД уходит замаскированная копия: на следующем прогоне она вернётся
     # в модель как previous_state. Разворачиваем только то, что читают люди.
-    envelope["state"] = unmask_state(state, mask_map)
+    envelope["state"] = unmask_state(state, mask_map, profile)
 
     if not settings.dry_run:
         init_db()
@@ -565,21 +736,27 @@ def analyze_buyer_deal(
     return envelope
 
 
-def run_buyer_client_state(
+def run_client_state(
+    profile: FunnelProfile = BUYER_PROFILE,
     deals: list[dict[str, Any]] | None = None,
     *,
     settings: Settings | None = None,
     llm: LLMClient | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
-    """Batch runner for buyer deals. Reads open deals when list is omitted."""
+    """Batch runner for one funnel. Reads its open deals when list is omitted."""
     settings = settings or get_settings()
+    category_id = (
+        settings.sellers_category_id
+        if profile.key == "sellers"
+        else settings.buyers_category_id
+    )
     if deals is None:
         raw = _bx_get_all_sync(
             "crm.deal.list",
             {
                 "filter": {
-                    "CATEGORY_ID": settings.buyers_category_id,
+                    "CATEGORY_ID": category_id,
                     "CLOSED": "N",
                 },
                 "select": ["ID", "TITLE", "STAGE_ID", "ASSIGNED_BY_ID", "CONTACT_ID"],
@@ -587,7 +764,9 @@ def run_buyer_client_state(
         )
         deals = [d for d in _as_list(raw) if isinstance(d, dict)]
 
-    stats = {
+    stats: dict[str, Any] = {
+        "funnel": profile.key,
+        "funnel_label": profile.label,
         "total": len(deals),
         "analyzed": 0,
         "skipped_unchanged": 0,
@@ -596,12 +775,15 @@ def run_buyer_client_state(
         "errors": 0,
         "unrecoverable": 0,
         "evidence_dropped": 0,
+        "contradictions_found": 0,
+        "contradictions_dropped": 0,
+        "temperature": {"hot": 0, "warm": 0, "cold": 0, "unknown": 0},
         "results": [],
     }
     for deal in deals:
         try:
-            result = analyze_buyer_deal(
-                deal, settings=settings, llm=llm, force=force,
+            result = analyze_deal(
+                deal, profile=profile, settings=settings, llm=llm, force=force,
             )
         except Exception as exc:  # noqa: BLE001 — одна карточка не роняет батч
             logger.warning(
@@ -632,7 +814,36 @@ def run_buyer_client_state(
             continue
         stats["analyzed"] += 1
         stats["evidence_dropped"] += int(result.get("evidence_dropped") or 0)
+        stats["contradictions_dropped"] += int(
+            result.get("contradictions_dropped") or 0,
+        )
         state = result.get("state") or {}
+        stats["contradictions_found"] += len(state.get("contradictions") or [])
+        level = str(state.get("temperature") or "unknown")
+        if level in stats["temperature"]:
+            stats["temperature"][level] += 1
         if state.get("recoverable") is False:
             stats["unrecoverable"] += 1
     return stats
+
+
+def run_buyer_client_state(
+    deals: list[dict[str, Any]] | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Backwards-compatible entry point for the buyers funnel."""
+    return run_client_state(BUYER_PROFILE, deals, **kwargs)
+
+
+def run_seller_client_state(
+    deals: list[dict[str, Any]] | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Entry point for the sellers funnel."""
+    return run_client_state(SELLER_PROFILE, deals, **kwargs)
+
+
+def analyze_buyer_deal(deal: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    """Backwards-compatible wrapper used by existing callers and tests."""
+    kwargs.setdefault("profile", BUYER_PROFILE)
+    return analyze_deal(deal, **kwargs)
