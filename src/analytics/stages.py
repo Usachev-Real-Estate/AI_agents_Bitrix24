@@ -73,7 +73,6 @@ def build_stage_events(
     category_id: int,
     date_create: str | None,
     current_stage_id: str,
-    closed_at: str | None = None,
 ) -> list[dict[str, Any]]:
     """Собрать непрерывную ленту интервалов пребывания на стадиях.
 
@@ -89,6 +88,13 @@ def build_stage_events(
        жизни сделки исчезает, и цикл сделки систематически занижается.
        Выдумывать стадию, на которой сделка стояла до начала истории, мы не
        можем — и не выдумываем.
+
+    Последний интервал остаётся открытым даже у закрытой сделки: left_at
+    означает «ушла на другую стадию», а выигранная или проигранная сделка со
+    своей финальной стадии никуда не уходит. Закрывать интервал по closedate
+    значило бы получить «на стадии „Проиграна“ осталось 0» при сотне
+    карточек, реально на ней стоящих. Длительность жизни сделки считается
+    отдельно, от создания до закрытия.
 
     Returns:
         Список словарей под вставку в fact_stage_event, seq с нуля.
@@ -118,10 +124,7 @@ def build_stage_events(
     events: list[dict[str, Any]] = []
     for seq, row in enumerate(deduped):
         is_last = seq == len(deduped) - 1
-        if is_last:
-            left_at = closed_at if closed_at and closed_at > row["entered_at"] else None
-        else:
-            left_at = deduped[seq + 1]["entered_at"]
+        left_at = None if is_last else deduped[seq + 1]["entered_at"]
         events.append({
             "entity_type": entity_type,
             "entity_id": entity_id,

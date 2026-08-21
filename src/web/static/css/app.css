@@ -1,0 +1,545 @@
+/* Дизайн-система дашборда.
+   Палитра проверена валидатором из навыка dataviz: категориальные слоты
+   проходят все проверки на разделимость при дальтонизме в обоих режимах,
+   ординальная шкала тепловой карты — монотонная, с различимыми ступенями. */
+
+:root {
+  color-scheme: light;
+
+  --surface-0: #f4f4f2;
+  --surface-1: #fcfcfb;
+  --surface-2: #eeeeeb;
+  --border: #dedcd6;
+  --border-strong: #c6c4bc;
+
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #7d7b74;
+
+  /* Категориальные слоты — только идентичность рядов. Порядок фиксирован. */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+
+  /* Ординальная шкала: одна синяя гамма, светлое → тёмное. */
+  --seq-1: #86b6ef;
+  --seq-2: #5598e7;
+  --seq-3: #2a78d6;
+  --seq-4: #1c5cab;
+  --seq-5: #104281;
+  --seq-0: #eef4fd;
+
+  /* Расходящаяся пара: тёплый ↔ холодный, нейтральная середина. */
+  --diverge-pos: #2a78d6;
+  --diverge-neg: #d03b3b;
+  --diverge-mid: #f0efec;
+
+  /* Статус — только состояние, никогда не «ряд номер 4». */
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+
+  --grid: #e6e4de;
+  --shadow: 0 1px 2px rgba(11, 11, 11, .05), 0 4px 12px rgba(11, 11, 11, .04);
+  --radius: 10px;
+  --radius-sm: 6px;
+
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, "Noto Sans", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    --surface-0: #111110;
+    --surface-1: #1a1a19;
+    --surface-2: #232322;
+    --border: #333331;
+    --border-strong: #4a4a47;
+
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #8e8d84;
+
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+
+    --seq-1: #cde2fb;
+    --seq-2: #9ec5f4;
+    --seq-3: #6da7ec;
+    --seq-4: #3987e5;
+    --seq-5: #256abf;
+    --seq-0: #1f2a38;
+
+    --diverge-pos: #3987e5;
+    --diverge-neg: #e66767;
+    --diverge-mid: #383835;
+
+    --grid: #2c2c2a;
+    --shadow: none;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: var(--surface-0);
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--series-1); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ---------------------------------------------------------------- шапка */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 0 24px;
+  height: 56px;
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.brand {
+  font-weight: 650;
+  font-size: 15px;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+.brand:hover { text-decoration: none; }
+
+.nav { display: flex; gap: 2px; flex: 1; overflow-x: auto; }
+
+.nav a {
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  font-weight: 500;
+}
+.nav a:hover { background: var(--surface-2); text-decoration: none; }
+.nav a.active { background: var(--surface-2); color: var(--text-primary); font-weight: 600; }
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  color: var(--text-muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------- фильтры */
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 24px;
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--border);
+}
+
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+
+.chip {
+  padding: 5px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+.chip:hover { background: var(--surface-2); text-decoration: none; }
+.chip.active {
+  background: var(--series-1);
+  border-color: var(--series-1);
+  color: #fff;
+  font-weight: 500;
+}
+
+label.field { display: flex; align-items: center; gap: 6px; font-size: 13px;
+  color: var(--text-secondary); }
+
+select, input[type="text"], input[type="date"], input[type="search"],
+input[type="password"], input[type="number"] {
+  font-family: inherit;
+  font-size: 13px;
+  padding: 5px 9px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-1);
+  color: var(--text-primary);
+}
+select:focus-visible, input:focus-visible, button:focus-visible, a:focus-visible {
+  outline: 2px solid var(--series-1);
+  outline-offset: 1px;
+}
+
+.btn {
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 6px 13px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-1);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.btn:hover { background: var(--surface-2); text-decoration: none; }
+.btn-primary {
+  background: var(--series-1);
+  border-color: var(--series-1);
+  color: #fff;
+}
+.btn-primary:hover { filter: brightness(1.08); }
+
+/* ------------------------------------------------------------- разметка */
+
+main { padding: 20px 24px 48px; max-width: 1560px; }
+
+.grid { display: grid; gap: 16px; }
+.grid-kpi { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+.grid-2 { grid-template-columns: repeat(auto-fit, minmax(440px, 1fr)); }
+
+.card {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  box-shadow: var(--shadow);
+  min-width: 0;
+}
+
+.card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.card h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 620;
+  color: var(--text-primary);
+}
+
+.card-sub { font-size: 12px; color: var(--text-muted); margin: 2px 0 0; }
+
+.section-title {
+  margin: 28px 0 12px;
+  font-size: 16px;
+  font-weight: 640;
+}
+.section-title:first-child { margin-top: 0; }
+
+/* --------------------------------------------------------- плитки KPI */
+
+.tile-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.tile-value {
+  font-size: 26px;
+  font-weight: 640;
+  letter-spacing: -.02em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+}
+
+.tile-value.hero { font-size: 40px; }
+
+.tile-delta {
+  margin-top: 5px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.delta-up { color: var(--status-good); font-weight: 600; }
+.delta-down { color: var(--status-critical); font-weight: 600; }
+
+/* Покрытие — не украшение: сумма без него вводит в заблуждение. */
+.coverage {
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.coverage-track {
+  flex: 0 0 52px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--seq-0);
+  overflow: hidden;
+}
+/* display:block обязателен: инлайновый span игнорирует width, и полоса
+   покрытия остаётся пустой при любом значении. */
+.coverage-fill { display: block; height: 100%; border-radius: 2px;
+  background: var(--seq-3); transition: width .2s; }
+.coverage-fill.warn { background: var(--status-warning); }
+.coverage-fill.bad { background: var(--status-critical); }
+
+/* ------------------------------------------------------------- таблицы */
+
+.table-wrap { overflow-x: auto; }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-secondary);
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border-strong);
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  background: var(--surface-1);
+}
+th a { color: inherit; }
+
+td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--grid);
+  vertical-align: top;
+}
+tbody tr:hover td { background: var(--surface-2); }
+tbody tr:last-child td { border-bottom: none; }
+
+.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.muted { color: var(--text-muted); }
+.nowrap { white-space: nowrap; }
+.ellipsis { max-width: 340px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+
+/* Ключ идентичности: цвет носит метка рядом с текстом, не сам текст. */
+.key {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  margin-right: 6px;
+  vertical-align: baseline;
+}
+
+.badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 500;
+  border: 1px solid var(--border-strong);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.badge-won { border-color: var(--status-good); color: var(--status-good); }
+.badge-lost { border-color: var(--status-critical); color: var(--status-critical); }
+
+/* --------------------------------------------------------------- графики */
+
+.chart { width: 100%; display: block; }
+.chart text { font-family: var(--font); }
+.axis-label { font-size: 11px; fill: var(--text-muted); }
+.value-label { font-size: 11.5px; fill: var(--text-secondary);
+  font-variant-numeric: tabular-nums; }
+.value-label-strong { font-size: 11.5px; fill: var(--text-primary); font-weight: 600;
+  font-variant-numeric: tabular-nums; }
+.gridline { stroke: var(--grid); stroke-width: 1; }
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.legend-item { display: flex; align-items: center; gap: 6px; }
+
+.scale-legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin-top: 10px;
+}
+.scale-swatch { width: 22px; height: 9px; border-radius: 2px; }
+
+.tooltip {
+  position: fixed;
+  pointer-events: none;
+  z-index: 60;
+  background: var(--surface-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  font-size: 12px;
+  color: var(--text-primary);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, .16);
+  max-width: 280px;
+  opacity: 0;
+  transition: opacity .08s;
+}
+.tooltip.visible { opacity: 1; }
+.tooltip-title { font-weight: 620; margin-bottom: 3px; }
+.tooltip-row { display: flex; justify-content: space-between; gap: 14px;
+  font-variant-numeric: tabular-nums; }
+
+/* ------------------------------------------------------------ тепловая карта */
+
+.heat td, .heat th { text-align: center; padding: 0; border: none; }
+.heat .cell {
+  display: block;
+  padding: 7px 8px;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  border-radius: 3px;
+  margin: 2px;   /* зазор поверхностью, а не обводка */
+}
+.heat .row-head, .heat .col-head {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  padding: 6px 8px;
+  white-space: nowrap;
+  text-align: left;
+}
+.heat .col-head { text-align: center; }
+
+/* --------------------------------------------------------------- прочее */
+
+.empty {
+  padding: 32px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.notice {
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin-bottom: 16px;
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+.notice-warn { border-color: var(--status-warning); }
+.notice-bad { border-color: var(--status-critical); }
+
+.pagination { display: flex; gap: 6px; align-items: center; margin-top: 14px;
+  font-size: 13px; color: var(--text-secondary); }
+
+.definition {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--grid);
+  line-height: 1.45;
+}
+
+/* --------------------------------------------------------------- логин */
+
+.login-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--surface-0);
+}
+
+.login-card {
+  width: 100%;
+  max-width: 340px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 28px;
+  box-shadow: var(--shadow);
+}
+.login-card h1 { margin: 0 0 4px; font-size: 18px; font-weight: 640; }
+.login-card p.sub { margin: 0 0 20px; font-size: 13px; color: var(--text-muted); }
+.login-card label { display: block; margin-bottom: 14px; font-size: 13px;
+  color: var(--text-secondary); }
+.login-card input { width: 100%; margin-top: 5px; padding: 8px 10px; font-size: 14px; }
+.login-card .btn { width: 100%; padding: 9px; font-size: 14px; margin-top: 6px; }
+
+.form-error {
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--status-critical);
+  color: var(--status-critical);
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+
+@media (max-width: 720px) {
+  main { padding: 16px 12px 40px; }
+  .topbar, .filters { padding-left: 12px; padding-right: 12px; }
+  .grid-2 { grid-template-columns: 1fr; }
+}
+
+/* --------------------------------------------------------- утилиты
+   Строгий CSP (style-src 'self') запрещает инлайновый style="" в разметке.
+   Ослаблять политику ради отступов и цветов нельзя: 'unsafe-inline' в
+   style-src открывает подмену интерфейса через внедрённую разметку. Поэтому
+   всё статическое — классами, а единственная по-настоящему динамическая
+   величина (ширина полосы покрытия) выставляется из JS через CSSOM, на
+   который CSP не распространяется. */
+
+.mt-14 { margin-top: 14px; }
+.mt-16 { margin-top: 16px; }
+.mt-18 { margin-top: 18px; }
+.mt-0 { margin-top: 0; }
+.ml-14 { margin-left: 14px; }
+.stack { display: grid; gap: 14px; }
+
+.key-1 { background: var(--series-1); }
+.key-2 { background: var(--series-2); }
+.key-3 { background: var(--series-3); }
+.key-pos { background: var(--diverge-pos); }
+.key-neg { background: var(--diverge-neg); }
+
+/* Ступени тепловой карты: пять уровней синей шкалы плюс пустая клетка.
+   Подпись на трёх тёмных ступенях переключается на белую, чтобы всегда
+   держать контраст. */
+.heat-0 { background: var(--seq-0); color: var(--text-muted); }
+.heat-1 { background: var(--seq-1); color: var(--text-primary); }
+.heat-2 { background: var(--seq-2); color: var(--text-primary); }
+.heat-3 { background: var(--seq-3); color: #fff; }
+.heat-4 { background: var(--seq-4); color: #fff; }
+.heat-5 { background: var(--seq-5); color: #fff; }

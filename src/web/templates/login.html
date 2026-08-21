@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Вход · Аналитика Афина CRM</title>
+  <link rel="stylesheet" href="{{ base_path }}/static/css/app.css">
+  <link rel="icon" href="data:,">
+</head>
+<body class="login-page">
+  <form class="login-card" method="post" action="{{ base_path }}/login">
+    <h1>Аналитика Bitrix24</h1>
+    <p class="sub">Доступ только для сотрудников компании</p>
+
+    {% if error %}<div class="form-error">{{ error }}</div>{% endif %}
+
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="next" value="{{ next }}">
+
+    <label>Логин
+      <input type="text" name="username" autocomplete="username"
+             autocapitalize="none" spellcheck="false" required autofocus>
+    </label>
+    <label>Пароль
+      <input type="password" name="password" autocomplete="current-password" required>
+    </label>
+    <button class="btn btn-primary" type="submit">Войти</button>
+  </form>
+</body>
+</html>

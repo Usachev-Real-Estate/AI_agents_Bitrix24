@@ -119,14 +119,13 @@ def test_cohort_reach_counts_ever_reached_not_current_stage(seeded):
     assert by_stage["C18:NEW"]["reached"] == 3
 
 
-def test_step_conversion_skips_terminal_stages(seeded):
+def test_step_conversion_runs_along_the_working_chain(seeded):
     """Цепочка шагов идёт по стадиям «в работе»: WON и LOSE стоят параллельно."""
     with analytics_session(readonly=True) as conn:
         funnel = metrics.deal_funnel(conn, 18, AUG["since"], AUG["until"])
     by_stage = {s["stage_id"]: s for s in funnel["stages"]}
+    assert by_stage["C18:NEW"]["conversion_step"] is None  # первая стадия — не из чего
     assert by_stage["C18:SHOW"]["conversion_step"] == pytest.approx(66.7)  # 2 из 3
-    # Проигранная стадия считается от последней стадии «в работе», а не от себя.
-    assert by_stage["C18:APOLOGY"]["conversion_step"] == pytest.approx(50.0)  # 1 из 2
 
 
 def test_win_rate_counts_only_closed_deals(seeded):
@@ -263,3 +262,80 @@ def test_percentile_is_robust_to_outliers():
     values = [1, 2, 3, 4, 5, 1000]
     assert metrics.percentile(values, 0.5) in (3.0, 4.0)
     assert metrics.percentile([], 0.5) is None
+
+
+def test_lost_stage_has_no_step_conversion(seeded):
+    """Проиграть сделку можно с любой стадии — «доля от предыдущей» тут бессмысленна.
+
+    Раньше проигрыш делился на последнюю рабочую стадию и выдавал 400%:
+    цифра, по которой нельзя принять ни одного решения.
+    """
+    with analytics_session(readonly=True) as conn:
+        funnel = metrics.deal_funnel(conn, 18, AUG["since"], AUG["until"])
+    by_stage = {s["stage_id"]: s for s in funnel["stages"]}
+    assert by_stage["C18:APOLOGY"]["conversion_step"] is None
+    assert by_stage["C18:APOLOGY"]["conversion_from_start"] == pytest.approx(33.3)
+    # Выигрыш — законный конец цепочки, у него шаг считается.
+    assert by_stage["C18:WON"]["conversion_step"] == pytest.approx(50.0)
+
+
+def test_remaining_on_stage_agrees_with_current_snapshot(seeded):
+    """Инвариант: «осталось на стадии» обязано сходиться с текущим срезом.
+
+    Расхождение здесь означает дыру в модели пребывания на стадии — ровно
+    такую, из-за которой на стадии «Проиграна» показывалось «осталось 0» при
+    сотне реально стоящих там карточек. Числа, противоречащие друг другу на
+    одной странице, стоят доверия ко всему дашборду.
+    """
+    far_future = "2999-01-01T00:00:00+00:00"
+    with analytics_session(readonly=True) as conn:
+        movement = {
+            row["stage_id"]: row["remaining"]
+            for row in metrics.stage_movement(conn, 18, "0001-01-01T00:00:00+00:00", far_future)
+        }
+        funnel = {
+            row["stage_id"]: row["count_now"]
+            for row in metrics.deal_funnel(conn, 18, AUG["since"], AUG["until"])["stages"]
+        }
+    for stage_id, snapshot in funnel.items():
+        assert movement.get(stage_id, 0) == snapshot, (
+            f"стадия {stage_id}: «осталось» {movement.get(stage_id)} "
+            f"против среза {snapshot}"
+        )
+
+
+def test_junk_threshold_comes_from_the_data_not_a_guess(analytics_db, seeded):
+    """«Плохой источник» — это хуже остальных каналов, а не хуже выдуманных 20%."""
+    with analytics_session() as conn:
+        conn.execute(
+            "INSERT INTO dim_source(source_id, name, synced_at) VALUES ('WEB', 'Сайт', 'x')"
+        )
+        for lead_id, status in ((20, "JUNK"), (21, "JUNK"), (22, "NEW")):
+            conn.execute(
+                "INSERT INTO fact_lead(lead_id, title, status_id, source_id, "
+                "assigned_by_id, date_create, is_converted, is_deleted, synced_at) "
+                "VALUES (?, 'Лид', ?, 'WEB', 32, '2026-08-01T00:00:00+00:00', 0, 0, 'x')",
+                (lead_id, status),
+            )
+    with analytics_session(readonly=True) as conn:
+        by_source = {row["source_id"]: row for row in metrics.lead_sources(conn, **AUG)}
+    # У «Сайта» мусора 2 из 3, у «Звонка» — 0 из 2: выше среднего только первый.
+    assert by_source["WEB"]["junk_above_average"] is True
+    assert by_source["CALL"]["junk_above_average"] is False
+
+
+def test_future_stage_entry_shows_as_zero_and_is_flagged(analytics_db, seeded):
+    """«На стадии −482 ч» — не число, а мусор. Аномалия уходит в качество данных."""
+    with analytics_session() as conn:
+        conn.execute(
+            "INSERT INTO fact_stage_event(entity_type, entity_id, category_id, "
+            "stage_id, entered_at, left_at, duration_sec, seq) "
+            "VALUES ('deal', 2, 18, 'C18:NEW', '2099-01-01T00:00:00+00:00', NULL, NULL, 9)"
+        )
+    with analytics_session(readonly=True) as conn:
+        table = metrics.entity_table(conn, entity="deal", category_id=18)
+        quality = metrics.data_quality(conn, 18)
+    assert all(
+        row["days_in_stage"] is None or row["days_in_stage"] >= 0 for row in table["rows"]
+    )
+    assert quality["future_stage_events"] >= 1

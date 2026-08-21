@@ -108,3 +108,122 @@ docker build -t b24-ai-auditor:latest .
 | Шпырная (66) | 23130 |
 
 Сводный отчёт: чат **22358** (`REPORT_CHAT_ID` в `src/graph.py`).
+
+---
+
+# Аналитический дашборд (pars.afina-crm.ru/dashboard)
+
+Отдельный веб-сервис в том же образе: витрина `data/analytics.db`, наполняемая
+ETL из Bitrix24, и FastAPI поверх неё. Дашборд читает витрину, а не Bitrix,
+поэтому открывается за миллисекунды и не нагружает портал при просмотре.
+
+## 1. Настройка
+
+Сгенерировать ключ подписи сессий и дописать в `.env`:
+
+```bash
+python src/web/manage.py gen-secret >> .env
+```
+
+Проверить в `.env`:
+
+- `DASHBOARD_SECRET_KEY` — заполнен (без него сервис не стартует, и это
+  намеренно: генерация ключа при запуске разлогинивала бы всех при рестарте);
+- `DASHBOARD_COOKIE_SECURE=true` — обязательно в проде;
+- `ANALYTICS_MONTHS_BACK=12` — глубина истории.
+
+## 2. Первичная загрузка витрины
+
+Сначала проверить доступность API и поддержку истории стадий лидов:
+
+```bash
+docker run --rm --env-file .env -v $(pwd)/data:/app/data \
+  b24-ai-auditor:latest python src/analytics/etl.py --probe
+```
+
+Затем бэкфилл за 12 месяцев. Идёт десятки минут — это разовая операция:
+
+```bash
+docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data \
+  b24-ai-auditor:latest python src/analytics/etl.py --backfill
+```
+
+## 3. Пользователи
+
+Пароль читается из потока ввода и никогда не передаётся аргументом командной
+строки: аргумент осел бы в истории шелла и был бы виден в `ps`.
+
+```bash
+docker run --rm -it --env-file .env -v $(pwd)/data:/app/data \
+  b24-ai-auditor:latest python src/web/manage.py adduser director
+
+# посмотреть список
+docker run --rm --env-file .env -v $(pwd)/data:/app/data \
+  b24-ai-auditor:latest python src/web/manage.py list
+```
+
+Прочие команды: `passwd` (меняет пароль и отзывает все сессии), `disable`,
+`enable`, `sessions`, `revoke`, `purge`.
+
+## 4. Запуск сервиса
+
+```bash
+docker compose up -d dashboard
+docker compose logs -f dashboard
+curl -s localhost:8080/healthz     # {"status":"ok"}
+```
+
+Сервис слушает только `127.0.0.1:8080` на хосте. Публиковать порт как
+`8080:8080` нельзя: Docker пробивает такую публикацию мимо ufw через цепочку
+`DOCKER-USER`, и дашборд оказывается в интернете без TLS.
+
+## 5. nginx и TLS
+
+```bash
+cp deploy/nginx-dashboard.conf /etc/nginx/sites-available/pars.afina-crm.ru
+ln -s /etc/nginx/sites-available/pars.afina-crm.ru /etc/nginx/sites-enabled/
+nginx -t && systemctl reload nginx
+certbot --nginx -d pars.afina-crm.ru
+```
+
+Наружу отдаются только `/dashboard/` и `/healthz`; остальные пути — 404.
+
+## 6. Регулярное обновление данных
+
+Две задачи уже есть в `crontab.txt` (пункты 15 и 16):
+
+| Задача | Расписание | Зачем |
+|---|---|---|
+| `etl.py --incremental` | каждые 15 мин | догрузка изменённого |
+| `etl.py --full` | 05:30 МСК | полная сверка + вычисление удалённых |
+
+Полная сверка обязательна: инкремент по `DATE_MODIFY` принципиально не видит
+удалений, и без неё удалённая сделка навсегда осталась бы в счётчиках воронки.
+
+## 7. Проверка после установки
+
+```bash
+# 1. Анонимный доступ отклоняется, тело пустое
+curl -si https://pars.afina-crm.ru/dashboard/api/overview | head -3     # 401
+curl -si https://pars.afina-crm.ru/dashboard/ | head -3                 # 303 на /login
+
+# 2. Порт не торчит наружу
+curl -m 5 http://<внешний-ip>:8080/                                     # отказ в соединении
+
+# 3. Витрина сходится с Bitrix
+#    Открыть «Качество данных» → блок «Сходимость с Bitrix» и сверить
+#    число открытых сделок с интерфейсом воронки в CRM.
+```
+
+Разница за счёт карточек старше окна витрины ожидаема и ошибкой не является —
+это написано прямо на странице.
+
+## 8. Диагностика
+
+| Симптом | Куда смотреть |
+|---|---|
+| «Витрина пуста» на всех страницах | ETL ни разу не отработал: `--backfill` |
+| «Данные загружались N минут назад» | упала cron-задача: `tail logs/cron.log` |
+| Суммы кажутся маленькими | «Качество данных» → покрытие поля «Комиссия» |
+| Не сходится с Bitrix | «Качество данных» → «Сходимость», проверить окно витрины |
+| Сервис не стартует | `docker compose logs dashboard` — скорее всего пустой `DASHBOARD_SECRET_KEY` |

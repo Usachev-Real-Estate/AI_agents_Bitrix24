@@ -242,13 +242,23 @@ def deal_funnel(conn, category_id: int, since: str, until: str) -> dict[str, Any
     previous_reached: int | None = None
     for row in rows:
         row["conversion_from_start"] = _share(row["reached"], cohort_size)
-        row["conversion_step"] = (
-            _share(row["reached"], previous_reached) if previous_reached else None
-        )
-        # Шаговая конверсия считается только по стадиям «в работе»: WON и LOSE
-        # стоят в конце списка параллельно, и цепочка через них не идёт.
+        # Шаговая конверсия осмысленна только внутри цепочки «в работе».
+        # Проиграть сделку можно с любой стадии, поэтому «доля от предыдущей»
+        # для проигрыша — не конверсия, а бессмыслица: делённое на последнюю
+        # рабочую стадию, оно легко даёт 400%.
         if row["semantic"] == "in_progress":
+            row["conversion_step"] = (
+                _share(row["reached"], previous_reached) if previous_reached else None
+            )
             previous_reached = row["reached"]
+        elif row["semantic"] == "won":
+            # Выигрыш — законный конец цепочки: доля дошедших до последней
+            # рабочей стадии, которые её закрыли.
+            row["conversion_step"] = (
+                _share(row["reached"], previous_reached) if previous_reached else None
+            )
+        else:
+            row["conversion_step"] = None
 
     return {"cohort_size": cohort_size, "stages": rows}
 
@@ -548,10 +558,18 @@ def lead_sources(conn, since: str, until: str) -> list[dict[str, Any]]:
         """,
         {"since": since, "until": until},
     )
+    total_leads = sum(row["leads"] for row in rows)
+    total_junk = sum(row["junk"] or 0 for row in rows)
+    average_junk = _share(total_junk, total_leads)
+
     for row in rows:
         row["conversion"] = _share(row["converted"], row["leads"])
         row["junk_share"] = _share(row["junk"], row["leads"])
         row["amount_per_lead"] = round(row["won_amount"] / row["leads"], 0) if row["leads"] else 0
+        # Порог — средняя доля мусора по всем источникам, а не выдуманное
+        # число: «плохо» здесь значит «хуже остальных каналов», и по такому
+        # сравнению уже можно принимать решение о канале.
+        row["junk_above_average"] = row["junk_share"] > average_junk
     return rows
 
 
@@ -1019,8 +1037,13 @@ def entity_table(
         {**params, "limit": page_size, "offset": (page - 1) * page_size},
     )
     for row in rows:
-        if row.get("days_in_stage") is not None:
-            row["days_in_stage"] = round(row["days_in_stage"], 1)
+        days = row.get("days_in_stage")
+        if days is None:
+            continue
+        # Отрицательное время на стадии означает дату входа из будущего — это
+        # аномалия данных, а не «−482 часа». В таблице показываем ноль, а сам
+        # факт выносим на страницу качества, где ему и место.
+        row["days_in_stage"] = round(max(0.0, days), 1)
     return {
         "rows": rows, "total": total, "page": page, "page_size": page_size,
         "pages": max(1, -(-total // page_size)), "entity": entity,
@@ -1071,6 +1094,14 @@ def data_quality(conn, category_id: int | None = None) -> dict[str, Any]:
             WHERE s.stage_id = d.stage_id AND s.category_id = d.category_id)
         """,
     ).get("n", 0)
+    # Дата входа в стадию из будущего — почти всегда сбитые часы на портале
+    # или ошибка приведения таймзоны. Молча обрезать её нельзя: она портит
+    # время на стадии и списки зависших карточек.
+    future_stages = _one(
+        conn,
+        "SELECT COUNT(*) AS n FROM fact_stage_event WHERE entered_at > :now",
+        {"now": datetime.now(timezone.utc).isoformat()},
+    ).get("n", 0)
 
     total_deals = int(deals.get("total") or 0)
     total_leads = int(leads.get("total") or 0)
@@ -1085,6 +1116,7 @@ def data_quality(conn, category_id: int | None = None) -> dict[str, Any]:
             "source_coverage": _share(total_leads - int(leads.get("no_source") or 0), total_leads),
         },
         "orphan_stage_deals": orphan_stages,
+        "future_stage_events": future_stages,
     }
 
 

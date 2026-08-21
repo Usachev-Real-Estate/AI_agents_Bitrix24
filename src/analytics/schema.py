@@ -187,42 +187,6 @@ _DDL: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_stage_event_stage "
     "ON fact_stage_event(category_id, stage_id, entered_at);",
     "CREATE INDEX IF NOT EXISTS idx_stage_event_entered ON fact_stage_event(entered_at);",
-    # ---------- авторизация дашборда ----------
-    """
-    CREATE TABLE IF NOT EXISTS dash_user (
-        username       TEXT PRIMARY KEY,
-        password_hash  TEXT NOT NULL,
-        display_name   TEXT NOT NULL DEFAULT '',
-        is_active      INTEGER NOT NULL DEFAULT 1,
-        created_at     TEXT NOT NULL,
-        last_login_at  TEXT
-    );
-    """,
-    # Сессии серверные, а не самодостаточная подписанная кука: только так
-    # работает настоящий разлогин и отзыв доступа с потерянного устройства.
-    """
-    CREATE TABLE IF NOT EXISTS dash_session (
-        sid          TEXT PRIMARY KEY,
-        username     TEXT NOT NULL,
-        created_at   TEXT NOT NULL,
-        last_seen_at TEXT NOT NULL,
-        expires_at   TEXT NOT NULL,
-        ip           TEXT NOT NULL DEFAULT '',
-        user_agent   TEXT NOT NULL DEFAULT '',
-        revoked_at   TEXT
-    );
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS dash_login_attempt (
-        id        INTEGER PRIMARY KEY AUTOINCREMENT,
-        username  TEXT NOT NULL DEFAULT '',
-        ip        TEXT NOT NULL DEFAULT '',
-        ok        INTEGER NOT NULL DEFAULT 0,
-        at        TEXT NOT NULL
-    );
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_login_attempt ON dash_login_attempt(username, ip, at);",
-    "CREATE INDEX IF NOT EXISTS idx_session_user ON dash_session(username, expires_at);",
 )
 
 

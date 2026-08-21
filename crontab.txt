@@ -49,3 +49,13 @@
 
 # 14. Первый перенос в Общую базу: 13.08.2026 19:05 МСК (16:05 UTC). После этой даты перенос идёт на штатных 10:00/17:00.
 5 16 13 8 * cd /home/Ai_agents_crm && scripts/cron_job.sh general-base-first-move docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest >> logs/cron.log 2>&1
+
+# 15. Аналитическая витрина: догрузка изменённого — каждые 15 минут.
+#     Дашборд читает витрину, а не Bitrix, поэтому от свежести этой задачи
+#     зависит, насколько цифры на экране отстают от CRM.
+*/15 * * * * cd /home/Ai_agents_crm && scripts/cron_job.sh analytics-etl docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/analytics/etl.py --incremental >> logs/cron.log 2>&1
+
+# 16. Аналитическая витрина: полная сверка — ежедневно в 05:30 МСК (02:30 UTC).
+#     Инкремент принципиально не видит удалений: удалённая сделка навсегда
+#     осталась бы в счётчиках воронки. Эта задача помечает пропавшие записи.
+30 2 * * * cd /home/Ai_agents_crm && scripts/cron_job.sh analytics-full docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/analytics/etl.py --full >> logs/cron.log 2>&1

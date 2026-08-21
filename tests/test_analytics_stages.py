@@ -52,17 +52,27 @@ def test_consecutive_intervals_are_chained():
     assert events[-1]["duration_sec"] is None
 
 
-def test_closed_deal_closes_last_interval():
+def test_closed_deal_still_occupies_its_final_stage():
+    """left_at означает «ушла на другую стадию», а не «закрылась».
+
+    Закрывать последний интервал по дате закрытия значило бы получить
+    «на стадии „Проиграна“ осталось 0» при сотне карточек, реально на ней
+    стоящих: сделка закрыта, но со стадии никуда не ушла. Срок жизни сделки
+    считается отдельно, от создания до закрытия.
+    """
     events = build_stage_events(
         "deal", 7,
-        _history(("C18:NEW", "2026-08-01T10:00:00+03:00")),
+        _history(
+            ("C18:NEW", "2026-08-01T10:00:00+03:00"),
+            ("C18:APOLOGY", "2026-08-02T10:00:00+03:00"),
+        ),
         category_id=18,
         date_create="2026-08-01T07:00:00+00:00",
-        current_stage_id="C18:NEW",
-        closed_at="2026-08-02T07:00:00+00:00",
+        current_stage_id="C18:APOLOGY",
     )
-    assert events[-1]["left_at"] == "2026-08-02T07:00:00+00:00"
-    assert events[-1]["duration_sec"] == 24 * 3600
+    assert events[-1]["stage_id"] == "C18:APOLOGY"
+    assert events[-1]["left_at"] is None
+    assert events[-1]["duration_sec"] is None
 
 
 def test_history_starting_after_creation_is_stretched_back():

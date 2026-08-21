@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}Обзор{% endblock %}
+
+{% block content %}
+{% set cur = overview.current %}
+{% set delta = overview.delta %}
+
+<h1 class="section-title">Обзор · {{ period.label }}</h1>
+
+<div class="grid grid-kpi">
+  {{ ui.tile('Новых лидов', cur.leads | int_ru, delta.leads) }}
+  {{ ui.tile('Конверсия лид → сделка', cur.lead_conversion | pct, delta.lead_conversion) }}
+  {{ ui.tile('Новых сделок', cur.deals_created | int_ru, delta.deals_created) }}
+  {{ ui.tile('Выиграно сделок', cur.won | int_ru, delta.won) }}
+  {{ ui.tile('Доля выигранных', cur.win_rate | pct, delta.win_rate) }}
+  {{ ui.tile('Средний цикл сделки', overview.cycle.median | days,
+             hint='медиана по ' ~ (overview.cycle.count | int_ru) ~ ' закрытым') }}
+</div>
+
+<div class="grid grid-2 mt-16">
+  <div class="card">
+    <div class="card-head">
+      <div>
+        <h2>Деньги</h2>
+        <p class="card-sub">Поле «Комиссия» — сколько зайдёт в компанию при успехе</p>
+      </div>
+    </div>
+    <div class="tile-label">Выиграно за период</div>
+    <div class="tile-value hero">{{ overview.money.won_amount | money(short=True) }}</div>
+    {{ ui.coverage(overview.money.won_coverage, overview.money.won_filled,
+                   overview.money.won_deals, 'выигранных сделок') }}
+
+    <div class="mt-18" class="tile-label">Сумма в работе (открытые сделки)</div>
+    <div class="tile-value">{{ overview.money.open_amount | money(short=True) }}</div>
+    {{ ui.coverage(overview.money.open_coverage, overview.money.open_filled,
+                   overview.money.open_deals, 'открытых сделок') }}
+
+    <div class="mt-18" class="tile-label">Средний чек выигранной сделки</div>
+    <div class="tile-value">{{ overview.money.avg_check | money }}</div>
+
+    {{ ui.definition('Суммы считаются только по карточкам с заполненным полем. Полоса
+      рядом показывает, какая доля сделок его имеет: при низком покрытии сумма
+      занижена, а не «маленькая».') }}
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div>
+        <h2>Динамика</h2>
+        <p class="card-sub">Создано и выиграно по периодам</p>
+      </div>
+    </div>
+    <div data-chart="line" data-source="timeseries-data"></div>
+    <div class="legend">
+      <span class="legend-item"><span class="key key-1"></span>Лиды</span>
+      <span class="legend-item"><span class="key key-2"></span>Сделки созданы</span>
+      <span class="legend-item"><span class="key key-3"></span>Сделки выиграны</span>
+    </div>
+    <script type="application/json" id="timeseries-data">{{ charts.timeseries | tojson }}</script>
+  </div>
+</div>
+
+<h2 class="section-title">Воронки</h2>
+<div class="card">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Воронка</th>
+          <th class="num">Всего сделок</th>
+          <th class="num">Открытых</th>
+          <th class="num">Сумма открытых</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in pipeline_counts %}
+        <tr>
+          <td>{{ row.name }}</td>
+          <td class="num">{{ row.deals | int_ru }}</td>
+          <td class="num">{{ row.open_deals | int_ru }}</td>
+          <td class="num">{{ row.open_amount | money }}</td>
+          <td class="num nowrap">
+            <a href="{{ base_path }}/deals?{{ qs(request, category=row.category_id) }}">воронка →</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {{ ui.definition('«Всего сделок» — все неудалённые карточки воронки за всё окно
+    витрины, а не за выбранный период: это состояние базы, а не поток.') }}
+</div>
+
+<h2 class="section-title">Лиды за период</h2>
+<div class="card">
+  <div class="grid grid-kpi">
+    {{ ui.tile('Создано', leads.total | int_ru) }}
+    {{ ui.tile('Дошли до сделки', leads.converted | int_ru) }}
+    {{ ui.tile('Конверсия', leads.conversion | pct) }}
+  </div>
+  <p class="mt-14 mt-0"><a href="{{ base_path }}/leads?{{ qs(request) }}">
+    разбор по источникам и статусам →</a></p>
+</div>
+{% endblock %}

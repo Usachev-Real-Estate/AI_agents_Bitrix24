@@ -481,7 +481,6 @@ def sync_stage_history(
         ("fact_deal", "deal_id") if entity_type == ENTITY_DEAL else ("fact_lead", "lead_id")
     )
     stage_col = "stage_id" if entity_type == ENTITY_DEAL else "status_id"
-    closed_col = "closedate" if entity_type == ENTITY_DEAL else "date_closed"
     cat_col = "category_id" if entity_type == ENTITY_DEAL else "0 AS category_id"
 
     written = 0
@@ -490,8 +489,8 @@ def sync_stage_history(
         placeholders = ",".join("?" * len(chunk))
         meta = {
             row[pk]: row for row in conn.execute(
-                f"SELECT {pk}, {cat_col}, {stage_col} AS cur_stage, date_create, "
-                f"{closed_col} AS closed_at FROM {table} WHERE {pk} IN ({placeholders})",
+                f"SELECT {pk}, {cat_col}, {stage_col} AS cur_stage, date_create "
+                f"FROM {table} WHERE {pk} IN ({placeholders})",
                 chunk,
             )
         }
@@ -507,7 +506,6 @@ def sync_stage_history(
                 category_id=int(info["category_id"] or 0),
                 date_create=info["date_create"],
                 current_stage_id=info["cur_stage"] or "",
-                closed_at=info["closed_at"],
             )
             replace_stage_events(conn, entity_type, entity_id, events)
             written += len(events)

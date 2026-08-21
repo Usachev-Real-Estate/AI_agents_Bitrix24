@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}Таблица{% endblock %}
+
+{% block extra_filters %}
+  <label class="field">Воронка
+    <select name="category">
+      <option value="all" {{ 'selected' if category_id is none else '' }}>Все</option>
+      {% for pipeline in pipelines %}
+        <option value="{{ pipeline.category_id }}"
+          {{ 'selected' if category_id == pipeline.category_id else '' }}>{{ pipeline.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field">Объект
+    <select name="entity">
+      <option value="deal" {{ 'selected' if entity == 'deal' else '' }}>Сделки</option>
+      <option value="lead" {{ 'selected' if entity == 'lead' else '' }}>Лиды</option>
+    </select>
+  </label>
+  <label class="field">Стадия
+    <select name="stage">
+      <option value="">Любая</option>
+      {% for stage in stages %}
+        <option value="{{ stage.stage_id }}"
+          {{ 'selected' if selected.stage == stage.stage_id else '' }}>{{ stage.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field">Ответственный
+    <select name="assignee">
+      <option value="">Любой</option>
+      {% for person in users %}
+        <option value="{{ person.user_id }}"
+          {{ 'selected' if selected.assignee == person.user_id | string else '' }}>{{ person.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field">Источник
+    <select name="source">
+      <option value="">Любой</option>
+      {% for source in sources %}
+        <option value="{{ source.source_id }}"
+          {{ 'selected' if selected.source == source.source_id else '' }}>{{ source.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field">
+    <input type="search" name="q" placeholder="название или ID" value="{{ selected.q }}">
+  </label>
+  <input type="hidden" name="period" value="{{ period.preset }}">
+  <button class="btn" type="submit">Найти</button>
+{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="card-head">
+    <div>
+      <h2>{{ 'Сделки' if entity == 'deal' else 'Лиды' }} · найдено {{ table.total | int_ru }}</h2>
+      <p class="card-sub">
+        {% if selected.all_time == '1' %}за всё окно витрины{% else %}созданы в период: {{ period.label }}{% endif %}
+      </p>
+    </div>
+    <div class="chips">
+      <a class="chip {{ 'active' if selected.all_time == '1' else '' }}"
+         href="?{{ qs(request, all_time='1' if selected.all_time != '1' else None) }}">всё время</a>
+      <a class="chip {{ 'active' if selected.open == '1' else '' }}"
+         href="?{{ qs(request, open='1' if selected.open != '1' else None) }}">только открытые</a>
+      <a class="chip" href="{{ base_path }}/api/export.csv?{{ qs(request) }}">выгрузить CSV</a>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          {% for key, label in [('id','ID'), ('title','Название'), ('stage','Стадия'),
+                                ('assignee','Ответственный')] %}
+            <th><a href="?{{ qs(request, sort=key, dir='asc' if selected.sort == key and selected.dir == 'desc' else 'desc') }}">
+              {{ label }}{% if selected.sort == key %} {{ '↓' if selected.dir == 'desc' else '↑' }}{% endif %}</a></th>
+          {% endfor %}
+          <th>Отдел</th>
+          <th>Источник</th>
+          <th class="num"><a href="?{{ qs(request, sort='amount', dir='asc' if selected.sort == 'amount' and selected.dir == 'desc' else 'desc') }}">
+            Сумма{% if selected.sort == 'amount' %} {{ '↓' if selected.dir == 'desc' else '↑' }}{% endif %}</a></th>
+          <th class="num"><a href="?{{ qs(request, sort='created', dir='asc' if selected.sort == 'created' and selected.dir == 'desc' else 'desc') }}">
+            Создана{% if selected.sort == 'created' %} {{ '↓' if selected.dir == 'desc' else '↑' }}{% endif %}</a></th>
+          <th class="num"><a href="?{{ qs(request, sort='days_in_stage', dir='asc' if selected.sort == 'days_in_stage' and selected.dir == 'desc' else 'desc') }}">
+            На стадии{% if selected.sort == 'days_in_stage' %} {{ '↓' if selected.dir == 'desc' else '↑' }}{% endif %}</a></th>
+          <th>Карточка</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in table.rows %}
+        <tr>
+          <td class="muted num">{{ row.id }}</td>
+          <td class="ellipsis" title="{{ row.title }}">
+            {{ row.title or '(без названия)' }}
+            {% if row.is_won %}<span class="badge badge-won">успех</span>
+            {% elif row.is_lost %}<span class="badge badge-lost">провал</span>{% endif %}
+          </td>
+          <td class="nowrap">{{ row.stage_name }}</td>
+          <td class="nowrap">{{ row.assignee or '—' }}</td>
+          <td class="muted nowrap">{{ row.department or '—' }}</td>
+          <td class="muted nowrap">{{ row.source_name or '—' }}</td>
+          <td class="num">{{ row.amount | money if row.amount else '—' }}</td>
+          <td class="num nowrap">{{ row.created | date_ru }}</td>
+          <td class="num nowrap">{{ row.days_in_stage | days if row.days_in_stage is not none else '—' }}</td>
+          <td class="nowrap">
+            <a href="{{ crm_link(entity, row.id) }}" target="_blank" rel="noopener">открыть ↗</a>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="10" class="empty">Ничего не найдено</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  {% if table.pages > 1 %}
+  <div class="pagination">
+    {% if table.page > 1 %}
+      <a class="btn" href="?{{ qs(request, page=table.page - 1) }}">← назад</a>
+    {% endif %}
+    <span>страница {{ table.page }} из {{ table.pages }}</span>
+    {% if table.page < table.pages %}
+      <a class="btn" href="?{{ qs(request, page=table.page + 1) }}">вперёд →</a>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {{ ui.definition('Ссылка «открыть» ведёт прямо в карточку Bitrix24. Выгрузка CSV
+    отдаёт текущую выборку с теми же фильтрами, до 10 000 строк.') }}
+</div>
+{% endblock %}

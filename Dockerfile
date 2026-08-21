@@ -27,4 +27,8 @@ RUN useradd -m auditor && chown -R auditor:auditor /app && \
     mkdir -p /app/logs /app/data && chown auditor:auditor /app/logs /app/data
 USER auditor
 
+# Справочно: веб-дашборд слушает 8080. Публикуется только на 127.0.0.1 хоста
+# (см. docker-compose.yml), наружу его выставляет nginx с TLS.
+EXPOSE 8080
+
 CMD ["python", "src/main.py"]
