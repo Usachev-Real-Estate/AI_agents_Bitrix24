@@ -410,7 +410,7 @@ def test_batch_survives_a_failing_card(temp_db, monkeypatch):
         return {"deal_id": deal.get("ID"), "skipped": False, "reason": "",
                 "state": {"recoverable": True}, "content_hash": "h"}
 
-    monkeypatch.setattr(cs, "analyze_buyer_deal", _explode)
+    monkeypatch.setattr(cs, "analyze_deal", _explode)
     stats = cs.run_buyer_client_state([{"ID": 1}, {"ID": 2}, {"ID": 3}])
     assert stats["total"] == 3
     assert stats["analyzed"] == 2
