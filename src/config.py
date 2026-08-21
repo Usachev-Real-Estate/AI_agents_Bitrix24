@@ -267,6 +267,95 @@ class Settings(BaseSettings):
         validation_alias="CLIENT_STATE_TRANSCRIPT_RETRY_HOURS",
     )
 
+    # --- Аналитическая витрина (ETL) ---
+    analytics_db_path: str = Field(
+        default="data/analytics.db",
+        validation_alias="ANALYTICS_DB_PATH",
+    )
+    analytics_months_back: int = Field(
+        default=12,
+        validation_alias="ANALYTICS_MONTHS_BACK",
+    )
+    analytics_rate_limit_rps: float = Field(
+        default=2.0,
+        validation_alias="ANALYTICS_RATE_LIMIT_RPS",
+    )
+    # Инкремент по >=DATE_MODIFY теряет записи, изменённые в ту же секунду,
+    # что и watermark, и во время самого прогона. Читаем с перекрытием —
+    # upsert делает повтор безвредным.
+    analytics_etl_overlap_minutes: int = Field(
+        default=5,
+        validation_alias="ANALYTICS_ETL_OVERLAP_MINUTES",
+    )
+    # Поле суммы по воронкам: {"0": "UF_CRM_XXX"}. Пусто → OPPORTUNITY.
+    analytics_amount_field_by_category_json: str = Field(
+        default="{}",
+        validation_alias="ANALYTICS_AMOUNT_FIELD_BY_CATEGORY_JSON",
+    )
+    # Переопределение семантики стадии: {"C18:UC_RUCRAH": "won"}.
+    analytics_stage_semantic_overrides_json: str = Field(
+        default="{}",
+        validation_alias="ANALYTICS_STAGE_SEMANTIC_OVERRIDES_JSON",
+    )
+
+    # --- Веб-дашборд ---
+    dashboard_secret_key: str = Field(
+        default="",
+        validation_alias="DASHBOARD_SECRET_KEY",
+    )
+    dashboard_host: str = Field(
+        default="127.0.0.1",
+        validation_alias="DASHBOARD_HOST",
+    )
+    dashboard_port: int = Field(
+        default=8080,
+        validation_alias="DASHBOARD_PORT",
+    )
+    dashboard_base_path: str = Field(
+        default="/dashboard",
+        validation_alias="DASHBOARD_BASE_PATH",
+    )
+    dashboard_session_ttl_hours: int = Field(
+        default=12,
+        validation_alias="DASHBOARD_SESSION_TTL_HOURS",
+    )
+    dashboard_session_idle_hours: int = Field(
+        default=2,
+        validation_alias="DASHBOARD_SESSION_IDLE_HOURS",
+    )
+    # Отключать только для локальной отладки по http: без Secure кука уедет
+    # по незашифрованному каналу.
+    dashboard_cookie_secure: bool = Field(
+        default=True,
+        validation_alias="DASHBOARD_COOKIE_SECURE",
+    )
+    dashboard_login_max_attempts: int = Field(
+        default=5,
+        validation_alias="DASHBOARD_LOGIN_MAX_ATTEMPTS",
+    )
+    dashboard_login_lockout_minutes: int = Field(
+        default=15,
+        validation_alias="DASHBOARD_LOGIN_LOCKOUT_MINUTES",
+    )
+
+    @property
+    def analytics_amount_field_by_category(self) -> dict[int, str]:
+        """Поле суммы по воронкам. Пусто → OPPORTUNITY."""
+        try:
+            raw = json.loads(self.analytics_amount_field_by_category_json)
+            return {int(k): str(v) for k, v in raw.items() if str(v).strip()}
+        except Exception:
+            return {}
+
+    @property
+    def analytics_stage_semantic_overrides(self) -> dict[str, str]:
+        """stage_id → in_progress|won|lost поверх вывода по суффиксу."""
+        try:
+            raw = json.loads(self.analytics_stage_semantic_overrides_json)
+            return {str(k): str(v).strip().lower() for k, v in raw.items()}
+        except Exception:
+            return {}
+
     @property
     def broker_rating_weights(self) -> dict[str, Any]:
         defaults: dict[str, Any] = {
