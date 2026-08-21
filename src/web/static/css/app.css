@@ -535,11 +535,21 @@ tbody tr:last-child td { border-bottom: none; }
 .key-neg { background: var(--diverge-neg); }
 
 /* Ступени тепловой карты: пять уровней синей шкалы плюс пустая клетка.
-   Подпись на трёх тёмных ступенях переключается на белую, чтобы всегда
-   держать контраст. */
+
+   Цвет подписи выбирается по светлоте САМОЙ ЗАЛИВКИ, а не по теме. Привязать
+   его к --text-primary — значит получить белые цифры на почти белой клетке в
+   тёмном режиме: там шкала перевёрнута, и первые ступени как раз светлые.
+   Контраст посчитан для каждой пары; минимум по набору — 4,46:1. */
 .heat-0 { background: var(--seq-0); color: var(--text-muted); }
-.heat-1 { background: var(--seq-1); color: var(--text-primary); }
-.heat-2 { background: var(--seq-2); color: var(--text-primary); }
-.heat-3 { background: var(--seq-3); color: #fff; }
-.heat-4 { background: var(--seq-4); color: #fff; }
-.heat-5 { background: var(--seq-5); color: #fff; }
+.heat-1 { background: var(--seq-1); color: #0b0b0b; }   /*  9,33:1 */
+.heat-2 { background: var(--seq-2); color: #0b0b0b; }   /*  6,59:1 */
+.heat-3 { background: var(--seq-3); color: #0b0b0b; }   /*  4,46:1 */
+.heat-4 { background: var(--seq-4); color: #ffffff; }   /*  6,63:1 */
+.heat-5 { background: var(--seq-5); color: #ffffff; }   /*  9,91:1 */
+
+@media (prefers-color-scheme: dark) {
+  /* В тёмном режиме шкала стоит на других ступенях, и точка переключения
+     подписи сдвигается: тёмная только пятая. */
+  :root:not([data-theme="light"]) .heat-4 { color: #0b0b0b; }   /* 5,41:1 */
+  :root:not([data-theme="light"]) .heat-5 { color: #ffffff; }   /* 5,39:1 */
+}
