@@ -103,7 +103,8 @@ async def api_export_csv(request: Request) -> StreamingResponse:
     """
     settings = request.app.state.settings
     params = dict(request.query_params)
-    params["size"] = str(min(CSV_MAX_ROWS, int(params.get("size") or CSV_MAX_ROWS)))
+    requested = _int_or_none(params.get("size")) or CSV_MAX_ROWS
+    params["size"] = str(max(1, min(CSV_MAX_ROWS, requested)))
     params["page"] = "1"
 
     with read_analytics() as conn:
@@ -156,12 +157,30 @@ def _table_from_request(
     )
 
 
+# Символы, с которых Excel и LibreOffice начинают разбирать ячейку как
+# формулу. Заголовок сделки пишет человек со стороны — лид приходит с формы
+# на сайте, — поэтому «=HYPERLINK(...)» в выгрузке исполнится у того, кто её
+# откроет, и утащит соседние ячейки на чужой домен.
+_FORMULA_STARTERS = ("=", "+", "-", "@", "\t", "\r")
+
+
 def _csv_cell(value: Any) -> str:
+    """Значение для CSV. Текст обезвреживается, числа остаются числами."""
     if value is None:
         return ""
+    if isinstance(value, bool):
+        return "да" if value else "нет"
     if isinstance(value, float):
         return f"{value:.2f}".replace(".", ",")
-    return str(value)
+    if isinstance(value, int):
+        return str(value)
+
+    text = str(value)
+    if text.startswith(_FORMULA_STARTERS):
+        # Апостроф — штатный для табличных редакторов способ сказать «это
+        # текст». Содержимое при этом сохраняется полностью.
+        return "'" + text
+    return text
 
 
 def _int_or_none(value: str | None) -> int | None:
