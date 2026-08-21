@@ -14,8 +14,6 @@ from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
-
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -24,6 +22,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from config import Settings, get_settings, setup_logging  # noqa: E402
+from llm import make_llm  # noqa: E402
 from db import (  # noqa: E402
     delete_lead_quality_finding,
     init_db,
@@ -90,15 +89,6 @@ _AGENT_PROBE_PATTERNS = (
     re.compile(r"риелтор\w*\s+звон", re.I),
     re.compile(r"звон\w*\s+риелтор", re.I),
 )
-
-
-def _make_llm(settings: Settings) -> ChatOpenAI:
-    return ChatOpenAI(
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url,
-        model=settings.deepseek_model,
-        temperature=0.1,
-    )
 
 
 def _message_content_to_str(content: Any) -> str:
@@ -562,7 +552,7 @@ def analyze_leads_with_llm(
     """Run DeepSeek quality analyst in chunks."""
     if not leads:
         return []
-    llm = _make_llm(settings)
+    llm = make_llm(settings)
     chunk_size = max(1, int(settings.lead_quality_chunk_size))
     fields = (
         "lead_id",

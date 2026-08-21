@@ -8,7 +8,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -29,18 +29,20 @@ class Settings(BaseSettings):
     buyers_category_id: int = Field(default=0, validation_alias="BUYERS_CATEGORY_ID")
     sellers_category_id: int = Field(default=0, validation_alias="SELLERS_CATEGORY_ID")
     report_since: str = Field(default="", validation_alias="REPORT_SINCE")
-    deepseek_api_key: str = Field(validation_alias="DEEPSEEK_API_KEY")
-    deepseek_base_url: str = Field(
-        default="https://api.deepseek.com",
-        validation_alias="DEEPSEEK_BASE_URL",
+    llm_api_key: str = Field(
+        validation_alias=AliasChoices("LLM_API_KEY", "DEEPSEEK_API_KEY"),
     )
-    deepseek_model: str = Field(
-        default="deepseek-v4-flash",
-        validation_alias="DEEPSEEK_MODEL",
+    llm_base_url: str = Field(
+        default="https://routerai.ru/api/v1",
+        validation_alias=AliasChoices("LLM_BASE_URL", "DEEPSEEK_BASE_URL"),
     )
-    deepseek_v3_model: str = Field(
-        default="deepseek-v4-flash",
-        validation_alias="DEEPSEEK_V3_MODEL",
+    llm_model: str = Field(
+        default="google/gemini-3.7-flash",
+        validation_alias=AliasChoices("LLM_MODEL", "DEEPSEEK_MODEL"),
+    )
+    llm_v3_model: str = Field(
+        default="google/gemini-3.7-flash",
+        validation_alias=AliasChoices("LLM_V3_MODEL", "DEEPSEEK_V3_MODEL"),
     )
     dry_run: bool = Field(default=True, validation_alias="DRY_RUN")
     general_base_move_after: str = Field(

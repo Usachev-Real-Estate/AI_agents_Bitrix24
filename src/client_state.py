@@ -13,8 +13,9 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from config import Settings, get_settings
 from db import get_client_state, init_db, save_client_state
-from lead_quality_audit import _make_llm, _message_content_to_str
+from lead_quality_audit import _message_content_to_str
 from funnel_profiles import BUYER_PROFILE, SELLER_PROFILE, FunnelProfile
+from llm import make_llm
 from masking import MaskMap, apply_mask, build_mask_map, unmask
 from tools import (
     _as_list,
@@ -654,7 +655,7 @@ def analyze_deal(
             dropped,
         )
 
-    model = llm or _make_llm(settings)
+    model = llm or make_llm(settings)
     try:
         state = analyze_with_llm(
             record, previous_state, new_events, events, model, profile,
@@ -724,7 +725,7 @@ def analyze_deal(
             confidence=float(state.get("confidence") or 0.0),
             content_hash=content_hash,
             analyzed_at=now_iso,
-            model=settings.deepseek_model,
+            model=settings.llm_model,
         )
     else:
         logger.info(

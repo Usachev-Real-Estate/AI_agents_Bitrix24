@@ -14,7 +14,7 @@ if str(_SRC) not in sys.path:
 # Без них любой тест, который дотянется до get_settings(), падал на ValidationError.
 _TEST_ENV = {
     "B24_WEBHOOK_URL": "https://example.bitrix24.ru/rest/1/test-token/",
-    "DEEPSEEK_API_KEY": "sk-test",
+    "LLM_API_KEY": "sk-test",
     "BUYERS_CATEGORY_ID": "18",
     "SELLERS_CATEGORY_ID": "0",
     "REPORT_SINCE": "2026-06-02",
