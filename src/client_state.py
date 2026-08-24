@@ -472,9 +472,11 @@ def compute_completeness_verdict(
     if material:
         return "poor", f"существенных расхождений: {len(material)}"
 
-    required_keys = [
-        key for key, _name in profile.stage_requirements.get(stage_id, ())
-    ]
+    requirements = profile.stage_requirements.get(stage_id, ())
+    required_keys = [key for key, _name in requirements]
+    # Человеческие названия фактов — их читает РОП. Служебному ключу
+    # («budget», «timeline») в отчёте делать нечего.
+    fact_names = {key: name for key, name in requirements}
     if not required_keys:
         # Этап не покрыт правилами — не судим.
         return "out_of_qc", "для этапа не заданы требования"
@@ -487,7 +489,7 @@ def compute_completeness_verdict(
 
     stage_facts = state.get("stage_facts") or {}
     missing = [
-        key for key in required_keys
+        fact_names.get(key, key) for key in required_keys
         if not (stage_facts.get(key) or {}).get("present")
     ]
 
@@ -916,7 +918,11 @@ def analyze_deal(
     if stored and stored.get("content_hash") == content_hash and not force:
         envelope["skipped"] = True
         envelope["reason"] = "unchanged"
-        envelope["state"] = json.loads(stored.get("state_json") or "{}")
+        # В БД состояние лежит замаскированным — разворачиваем, иначе отчёт
+        # покажет КЛИЕНТ_1 вместо имени всюду, где карточка взята из кэша.
+        envelope["state"] = unmask_state(
+            json.loads(stored.get("state_json") or "{}"), mask_map, profile,
+        )
         return envelope
 
     previous_state = None
@@ -1206,6 +1212,19 @@ def run_client_state(
                 stats["errors"] += 1
             else:
                 stats["skipped_other"] += 1
+            if reason in {"unchanged", "no_new_events"}:
+                # Карточка из кэша — состояние по ней известно и попадает в
+                # отчёт, значит должна попадать и в сводку. Иначе шапка
+                # покажет 4 тёплых из 20, пока в теле их пятнадцать.
+                cached = result.get("state") or {}
+                cached_level = str(cached.get("temperature") or "unknown")
+                if cached_level in stats["temperature"]:
+                    stats["temperature"][cached_level] += 1
+                cached_verdict = str(cached.get("verdict") or "")
+                if cached_verdict in stats["verdicts"]:
+                    stats["verdicts"][cached_verdict] += 1
+                if cached.get("recoverable") is False:
+                    stats["unrecoverable"] += 1
             continue
         stats["analyzed"] += 1
         stats["evidence_dropped"] += int(result.get("evidence_dropped") or 0)

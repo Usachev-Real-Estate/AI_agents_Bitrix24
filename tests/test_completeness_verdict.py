@@ -70,7 +70,9 @@ def test_tolerable_when_one_required_missing():
         "C18:NEW", state, BUYER_PROFILE, hours_on_stage=100,
     )
     assert level == "tolerable"
-    assert "next_step" in why
+    # Причину читает РОП — в ней человеческое название факта, не ключ.
+    assert "следующий шаг с датой" in why
+    assert "next_step" not in why
 
 
 def test_tolerable_when_only_minor_contradictions():
@@ -290,3 +292,20 @@ def test_verdict_good_when_facts_and_qualification_ok():
         qualification_ok=True,
     )
     assert level == "good"
+
+
+def test_verdict_reason_never_leaks_service_keys():
+    """Причина вердикта уходит в отчёт РОПу — служебных ключей там быть не должно."""
+    from funnel_profiles import BUYER_STAGE_REQUIREMENTS, SELLER_STAGE_REQUIREMENTS
+
+    for profile, table in (
+        (BUYER_PROFILE, BUYER_STAGE_REQUIREMENTS),
+        (SELLER_PROFILE, SELLER_STAGE_REQUIREMENTS),
+    ):
+        for stage, requirements in table.items():
+            _, why = compute_completeness_verdict(
+                stage, _state(stage_facts={}), profile, hours_on_stage=1000,
+            )
+            for key, name in requirements:
+                assert key not in why, f"{stage}: ключ {key!r} попал в отчёт"
+            assert any(name in why for _key, name in requirements), stage
