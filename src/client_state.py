@@ -903,6 +903,71 @@ def prepare_deal_record(deal: dict[str, Any], settings: Settings | None = None) 
     return record
 
 
+def apply_derived_verdict(
+    state: dict[str, Any],
+    record: dict[str, Any],
+    profile: FunnelProfile,
+    envelope: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Пересчитать температуру и вердикт по уже извлечённым фактам.
+
+    И то и другое — чистые функции от state, этапа и его возраста, а не ответ
+    модели. Считать их один раз и класть в кэш нельзя по двум причинам:
+
+    * возраст этапа растёт. Карточка, разобранная внутри отсрочки, навсегда
+      осталась бы «рано судить», даже если после этого в ней месяц ничего не
+      происходит — а это ровно тот случай, ради которого аудит и существует;
+    * правила меняются. content_hash покрывает содержимое карточки, но не
+      порог вердикта, поэтому после правки правил кэш выдавал бы старые
+      оценки как текущие.
+
+    Поэтому дорогое (разбор моделью) кэшируется, а дешёвое считается заново
+    на каждом прогоне.
+    """
+    deal_id = _coerce_int(record.get("ID") or record.get("id"))
+    envelope = envelope if envelope is not None else {}
+
+    level, why = compute_temperature(
+        state.get("signals", {}),
+        recoverable=bool(state.get("recoverable", True)),
+        profile=profile,
+    )
+    state["temperature"] = level
+    state["temperature_reason"] = why
+    envelope["temperature"] = level
+
+    stage_id = _clean_str(record.get("STAGE_ID") or record.get("stage_id"))
+    hours_on_stage = _stage_hours(record, datetime.now(timezone.utc))
+    envelope["stage_age_known"] = hours_on_stage is not None
+    if hours_on_stage is None:
+        logger.info(
+            "Deal %s: момент входа на этап неизвестен — отсрочка не применяется",
+            deal_id,
+        )
+
+    # Прямая проверка полей квалификации — только на этапе, для которого
+    # она настроена. Иначе qualification_ok=None, вердикт её не учитывает.
+    qualification_ok: bool | None = None
+    if stage_id == profile.qualification_stage:
+        qualification_ok, missing_fields = check_qualification_fields(record, profile)
+        envelope["qualification_missing"] = missing_fields
+        if missing_fields:
+            logger.info(
+                "Deal %s: unfilled qualification fields: %s",
+                deal_id, ", ".join(missing_fields),
+            )
+
+    verdict, verdict_reason = compute_completeness_verdict(
+        stage_id, state, profile,
+        hours_on_stage=hours_on_stage,
+        qualification_ok=qualification_ok,
+    )
+    state["verdict"] = verdict
+    state["verdict_reason"] = verdict_reason
+    envelope["verdict"] = verdict
+    return state
+
+
 def analyze_deal(
     deal: dict[str, Any],
     *,
@@ -969,11 +1034,23 @@ def analyze_deal(
     if stored and stored.get("content_hash") == content_hash and not force:
         envelope["skipped"] = True
         envelope["reason"] = "unchanged"
+        cached = json.loads(stored.get("state_json") or "{}")
+        # Факты берём из кэша, оценку считаем заново: этап успел постареть,
+        # а правила могли поменяться с прошлого прогона.
+        apply_derived_verdict(cached, record, profile, envelope)
         # В БД состояние лежит замаскированным — разворачиваем, иначе отчёт
         # покажет КЛИЕНТ_1 вместо имени всюду, где карточка взята из кэша.
-        envelope["state"] = unmask_state(
-            json.loads(stored.get("state_json") or "{}"), mask_map, profile,
-        )
+        envelope["state"] = unmask_state(cached, mask_map, profile)
+        if not settings.dry_run:
+            save_client_state(
+                deal_id=deal_id,
+                state_json=json.dumps(cached, ensure_ascii=False),
+                confidence=float(cached.get("confidence") or 0.0),
+                content_hash=content_hash,
+                analyzed_at=str(stored.get("analyzed_at") or ""),
+                model=str(stored.get("model") or ""),
+                analyzed_events=str(stored.get("analyzed_events") or ""),
+            )
         return envelope
 
     previous_state = None
@@ -999,6 +1076,7 @@ def analyze_deal(
         # верным. Перезаписываем хэш, чтобы следующий прогон не пришёл сюда же.
         envelope["skipped"] = True
         envelope["reason"] = "no_new_events"
+        apply_derived_verdict(previous_state, record, profile, envelope)
         envelope["state"] = unmask_state(previous_state, mask_map, profile)
         if not settings.dry_run:
             init_db()
@@ -1083,15 +1161,6 @@ def analyze_deal(
         )
     envelope["contradictions_dropped"] = len(unfounded)
 
-    level, why = compute_temperature(
-        state.get("signals", {}),
-        recoverable=bool(state.get("recoverable", True)),
-        profile=profile,
-    )
-    state["temperature"] = level
-    state["temperature_reason"] = why
-    envelope["temperature"] = level
-
     # Проверить цитаты stage_facts: любая невалидная цитата → factum отсутствует.
     # Если модель поставила present=True, но цитаты нет в карточке — это
     # выдумка, обнуляем факт вместо того чтобы засчитать его.
@@ -1115,35 +1184,7 @@ def analyze_deal(
         )
     envelope["stage_facts_dropped"] = unquoted
 
-    stage_id = _clean_str(record.get("STAGE_ID") or record.get("stage_id"))
-    hours_on_stage = _stage_hours(record, datetime.now(timezone.utc))
-    envelope["stage_age_known"] = hours_on_stage is not None
-    if hours_on_stage is None:
-        logger.info(
-            "Deal %s: момент входа на этап неизвестен — отсрочка не применяется",
-            deal_id,
-        )
-
-    # Прямая проверка полей квалификации — только на этапе, для которого
-    # она настроена. Иначе qualification_ok=None, вердикт её не учитывает.
-    qualification_ok: bool | None = None
-    if stage_id == profile.qualification_stage:
-        qualification_ok, missing_fields = check_qualification_fields(record, profile)
-        envelope["qualification_missing"] = missing_fields
-        if missing_fields:
-            logger.info(
-                "Deal %s: unfilled qualification fields: %s",
-                deal_id, ", ".join(missing_fields),
-            )
-
-    verdict, verdict_reason = compute_completeness_verdict(
-        stage_id, state, profile,
-        hours_on_stage=hours_on_stage,
-        qualification_ok=qualification_ok,
-    )
-    state["verdict"] = verdict
-    state["verdict_reason"] = verdict_reason
-    envelope["verdict"] = verdict
+    apply_derived_verdict(state, record, profile, envelope)
 
     # В БД уходит замаскированная копия: на следующем прогоне она вернётся
     # в модель как previous_state. Разворачиваем только то, что читают люди.

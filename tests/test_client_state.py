@@ -1232,3 +1232,145 @@ def test_run_counts_empty_cards(monkeypatch):
         {"ID": 1, "STAGE_ID": "C18:NEW"}, {"ID": 2, "STAGE_ID": "C18:NEW"},
     ])
     assert stats["empty_cards"] == 1
+
+
+# ── Вердикт — производная, а не кэш ────────────────────────────────────
+def _grace_card(deal_id: int, created: str) -> dict[str, Any]:
+    return {
+        "ID": deal_id, "TITLE": "Покупка", "STAGE_ID": "C18:NEW",
+        "DATE_CREATE": created,
+        "contacts": [], "activities": [], "transcripts": [],
+        "evidence_incomplete": False,
+        "timeline": [{
+            "author_id": 1, "created": "2026-08-01T10:00:00+03:00",
+            "comment": "созвонился, перезвоню",
+        }],
+    }
+
+
+def test_a_quiet_card_stops_being_too_early_as_the_stage_ages(tmp_path, monkeypatch):
+    """Разобранная внутри отсрочки карточка не должна навсегда остаться «рано судить».
+
+    Это ровно тот случай, ради которого аудит и существует: после создания
+    в карточке больше ничего не происходит.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    import client_state as cs
+    import db
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "violations.db")
+    db.init_db()
+
+    now = datetime.now(timezone.utc)
+    fresh = _grace_card(901, (now - timedelta(hours=1)).isoformat())
+    monkeypatch.setattr(cs, "prepare_deal_record", lambda d, **k: dict(fresh))
+
+    def _fake(deal, prev, new_events, all_events, model, profile, usage_sink=None):
+        return cs._normalize_state({"client_goal": "2к", "confidence": 0.6}, profile)
+
+    monkeypatch.setattr(cs, "analyze_with_llm", _fake)
+    monkeypatch.setattr(cs, "make_llm", lambda s: object())
+    settings = cs.get_settings()
+    monkeypatch.setattr(settings, "dry_run", False, raising=False)
+
+    first = cs.analyze_deal(dict(fresh), profile=cs.BUYER_PROFILE, settings=settings)
+    assert first["state"]["verdict"] == "too_early"
+
+    # Проходит неделя, в карточке по-прежнему ничего нового.
+    stale = _grace_card(901, (now - timedelta(days=7)).isoformat())
+    monkeypatch.setattr(cs, "prepare_deal_record", lambda d, **k: dict(stale))
+    later = cs.analyze_deal(dict(stale), profile=cs.BUYER_PROFILE, settings=settings)
+
+    assert later["reason"] == "unchanged", "модель звать незачем — фактов не прибавилось"
+    assert later["state"]["verdict"] == "poor", "оценка обязана была измениться"
+
+
+def test_cached_verdict_follows_a_rule_change(tmp_path, monkeypatch):
+    """content_hash покрывает карточку, но не правила: кэш не должен их морозить."""
+    import client_state as cs
+    import db
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "violations.db")
+    db.init_db()
+
+    card = _grace_card(902, "2026-01-01T10:00:00+00:00")
+    monkeypatch.setattr(cs, "prepare_deal_record", lambda d, **k: dict(card))
+    monkeypatch.setattr(
+        cs, "analyze_with_llm",
+        lambda *a, **k: cs._normalize_state({"client_goal": "2к"}, cs.BUYER_PROFILE),
+    )
+    monkeypatch.setattr(cs, "make_llm", lambda s: object())
+    settings = cs.get_settings()
+    monkeypatch.setattr(settings, "dry_run", False, raising=False)
+
+    cs.analyze_deal(dict(card), profile=cs.BUYER_PROFILE, settings=settings)
+
+    # Правило поменялось: теперь всё «терпимо».
+    monkeypatch.setattr(
+        cs, "compute_completeness_verdict",
+        lambda *a, **k: ("tolerable", "новое правило"),
+    )
+    again = cs.analyze_deal(dict(card), profile=cs.BUYER_PROFILE, settings=settings)
+    assert again["reason"] == "unchanged"
+    assert again["state"]["verdict"] == "tolerable"
+    assert again["state"]["verdict_reason"] == "новое правило"
+
+
+def test_recomputed_verdict_is_persisted_not_just_reported(tmp_path, monkeypatch):
+    """Иначе следующий прогон снова прочитает из БД устаревшую оценку."""
+    import json as _json
+    from datetime import datetime, timedelta, timezone
+
+    import client_state as cs
+    import db
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "violations.db")
+    db.init_db()
+
+    now = datetime.now(timezone.utc)
+    fresh = _grace_card(903, (now - timedelta(hours=1)).isoformat())
+    monkeypatch.setattr(cs, "prepare_deal_record", lambda d, **k: dict(fresh))
+    monkeypatch.setattr(
+        cs, "analyze_with_llm",
+        lambda *a, **k: cs._normalize_state({"client_goal": "2к"}, cs.BUYER_PROFILE),
+    )
+    monkeypatch.setattr(cs, "make_llm", lambda s: object())
+    settings = cs.get_settings()
+    monkeypatch.setattr(settings, "dry_run", False, raising=False)
+
+    cs.analyze_deal(dict(fresh), profile=cs.BUYER_PROFILE, settings=settings)
+
+    stale = _grace_card(903, (now - timedelta(days=7)).isoformat())
+    monkeypatch.setattr(cs, "prepare_deal_record", lambda d, **k: dict(stale))
+    cs.analyze_deal(dict(stale), profile=cs.BUYER_PROFILE, settings=settings)
+
+    row = db.get_client_state(903)
+    assert _json.loads(row["state_json"])["verdict"] == "poor"
+
+
+def test_cache_hit_still_costs_nothing(tmp_path, monkeypatch):
+    """Пересчёт оценки — арифметика, модель звать не должен."""
+    import client_state as cs
+    import db
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "violations.db")
+    db.init_db()
+
+    card = _grace_card(904, "2026-01-01T10:00:00+00:00")
+    monkeypatch.setattr(cs, "prepare_deal_record", lambda d, **k: dict(card))
+    calls: list[int] = []
+
+    def _fake(*a, **k):
+        calls.append(1)
+        return cs._normalize_state({"client_goal": "2к"}, cs.BUYER_PROFILE)
+
+    monkeypatch.setattr(cs, "analyze_with_llm", _fake)
+    monkeypatch.setattr(cs, "make_llm", lambda s: object())
+    settings = cs.get_settings()
+    monkeypatch.setattr(settings, "dry_run", False, raising=False)
+
+    cs.analyze_deal(dict(card), profile=cs.BUYER_PROFILE, settings=settings)
+    cs.analyze_deal(dict(card), profile=cs.BUYER_PROFILE, settings=settings)
+    cs.analyze_deal(dict(card), profile=cs.BUYER_PROFILE, settings=settings)
+    assert calls == [1]
