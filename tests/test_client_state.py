@@ -530,6 +530,7 @@ def test_usage_read_from_langchain_metadata():
     }))
     assert usage == {
         "input_tokens": 1500, "output_tokens": 300, "cached_tokens": 1200,
+        "reasoning_tokens": 0,
     }
 
 
@@ -543,6 +544,7 @@ def test_usage_read_from_openai_style_token_usage():
     }}))
     assert usage == {
         "input_tokens": 900, "output_tokens": 120, "cached_tokens": 640,
+        "reasoning_tokens": 0,
     }
 
 
@@ -562,6 +564,7 @@ def test_usage_absent_does_not_raise():
 
     assert extract_usage(_Resp()) == {
         "input_tokens": 0, "output_tokens": 0, "cached_tokens": 0,
+        "reasoning_tokens": 0,
     }
 
 
@@ -595,6 +598,7 @@ def test_run_client_state_sums_token_usage(monkeypatch):
             "content_hash": "x",
             "usage": {
                 "input_tokens": 1000, "output_tokens": 200, "cached_tokens": 700,
+                "reasoning_tokens": 150,
             },
         }
 
@@ -605,6 +609,7 @@ def test_run_client_state_sums_token_usage(monkeypatch):
     assert stats["llm_calls"] == 2
     assert stats["usage"] == {
         "input_tokens": 2000, "output_tokens": 400, "cached_tokens": 1400,
+        "reasoning_tokens": 300,
     }
 
 
@@ -810,3 +815,45 @@ def test_second_run_sends_only_the_new_comment(tmp_path, monkeypatch):
     # Порядок задаёт сортировка по дате; проверяем состав, а не порядок.
     assert sorted(sent[0]) == ["второй", "первый"]
     assert sent[1] == ["третий"], "событие с нечитаемой датой не должно уезжать снова"
+
+
+def test_reasoning_tokens_are_counted_separately():
+    """Размышления — отдельная и самая дорогая строка тарифа RouterAI."""
+    from client_state import extract_usage
+
+    langchain_shape = extract_usage(_Resp(usage_metadata={
+        "input_tokens": 1000, "output_tokens": 900,
+        "output_token_details": {"reasoning": 800},
+    }))
+    assert langchain_shape["reasoning_tokens"] == 800
+
+    openai_shape = extract_usage(_Resp(response_metadata={"token_usage": {
+        "prompt_tokens": 1000, "completion_tokens": 900,
+        "completion_tokens_details": {"reasoning_tokens": 800},
+    }}))
+    assert openai_shape["reasoning_tokens"] == 800
+
+
+def test_llm_limits_are_passed_only_when_configured(monkeypatch):
+    import llm as llm_mod
+
+    captured: dict[str, object] = {}
+
+    class _Fake:
+        def __init__(self, **kwargs):
+            captured.clear()
+            captured.update(kwargs)
+
+    monkeypatch.setattr(llm_mod, "ChatOpenAI", _Fake)
+    from config import get_settings
+
+    settings = get_settings()
+    llm_mod.make_llm(settings)
+    assert captured["max_tokens"] == 16_000
+    assert "reasoning_effort" not in captured, "пусто = дефолт провайдера"
+
+    monkeypatch.setattr(settings, "llm_max_tokens", 0, raising=False)
+    monkeypatch.setattr(settings, "llm_reasoning_effort", "low", raising=False)
+    llm_mod.make_llm(settings)
+    assert "max_tokens" not in captured
+    assert captured["reasoning_effort"] == "low"

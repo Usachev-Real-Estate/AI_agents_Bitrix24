@@ -716,7 +716,9 @@ def build_llm_payload(
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
-USAGE_KEYS = ("input_tokens", "output_tokens", "cached_tokens")
+USAGE_KEYS = (
+    "input_tokens", "output_tokens", "cached_tokens", "reasoning_tokens",
+)
 
 
 def extract_usage(response: Any) -> dict[str, int]:
@@ -734,6 +736,9 @@ def extract_usage(response: Any) -> dict[str, int]:
         details = meta.get("input_token_details")
         if isinstance(details, dict):
             usage["cached_tokens"] = _coerce_int(details.get("cache_read"))
+        out_details = meta.get("output_token_details")
+        if isinstance(out_details, dict):
+            usage["reasoning_tokens"] = _coerce_int(out_details.get("reasoning"))
     raw = getattr(response, "response_metadata", None)
     if isinstance(raw, dict):
         token_usage = raw.get("token_usage")
@@ -755,6 +760,14 @@ def extract_usage(response: Any) -> dict[str, int]:
                 if not usage["cached_tokens"]:
                     usage["cached_tokens"] = _coerce_int(
                         token_usage.get("prompt_cache_hit_tokens"),
+                    )
+            if not usage["reasoning_tokens"]:
+                # Самая дорогая строка тарифа RouterAI — её нужно видеть
+                # отдельно, а не в общей сумме выходных токенов.
+                out_details = token_usage.get("completion_tokens_details")
+                if isinstance(out_details, dict):
+                    usage["reasoning_tokens"] = _coerce_int(
+                        out_details.get("reasoning_tokens"),
                     )
     return usage
 
@@ -1218,7 +1231,8 @@ def run_client_state(
             stats["unrecoverable"] += 1
     logger.info(
         "Client state [%s]: %d cards, %d LLM calls, "
-        "%d in / %d out tokens, %d from cache (%.0f%% of input)",
+        "%d in / %d out tokens, %d from cache (%.0f%% of input), "
+        "%d reasoning (%.0f%% of output)",
         profile.key,
         stats["total"],
         stats["llm_calls"],
@@ -1227,6 +1241,9 @@ def run_client_state(
         stats["usage"]["cached_tokens"],
         100.0 * stats["usage"]["cached_tokens"] / stats["usage"]["input_tokens"]
         if stats["usage"]["input_tokens"] else 0.0,
+        stats["usage"]["reasoning_tokens"],
+        100.0 * stats["usage"]["reasoning_tokens"] / stats["usage"]["output_tokens"]
+        if stats["usage"]["output_tokens"] else 0.0,
     )
     return stats
 
