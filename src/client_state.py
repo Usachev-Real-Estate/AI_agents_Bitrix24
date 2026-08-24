@@ -377,6 +377,27 @@ def check_qualification_fields(
     return len(missing) == 0, missing
 
 
+def stage_skips_analysis(stage_id: str, profile: FunnelProfile) -> str:
+    """Причина не звать модель по этому этапу, или "" если звать надо.
+
+    Этапы из stages_out_of_qc агентство сняло с контроля качества («у
+    руководства», «вне аудита»), и compute_completeness_verdict возвращает по
+    ним out_of_qc независимо от того, что скажет модель. Значит разбор такой
+    карточки — оплаченный запрос, результат которого заведомо не используется.
+    Этап известен из crm.deal.list, поэтому отсечь можно до сбора таймлайна.
+
+    Этапы БЕЗ требований сюда намеренно не попадают: вердикт у них тоже
+    out_of_qc, но это «правила ещё не написаны», а не «не наше дело», и
+    температура по таким карточкам РОПу всё ещё нужна.
+    """
+    if not stage_id:
+        # Пустой этап — не повод молча пропустить карточку.
+        return ""
+    if stage_id in profile.stages_out_of_qc:
+        return "stage_out_of_qc"
+    return ""
+
+
 def compute_completeness_verdict(
     stage_id: str,
     state: dict[str, Any],
@@ -753,6 +774,17 @@ def analyze_deal(
         envelope["reason"] = "invalid_deal_id"
         return envelope
 
+    # Этап приходит из crm.deal.list, до сбора таймлайна и до модели. Если по
+    # нему вердикт всё равно out_of_qc — не платим за разбор.
+    early_skip = stage_skips_analysis(
+        _clean_str(deal.get("STAGE_ID") or deal.get("stage_id")), profile,
+    )
+    if early_skip and not force:
+        envelope["skipped"] = True
+        envelope["reason"] = early_skip
+        envelope["verdict"] = "out_of_qc"
+        return envelope
+
     if prepared:
         record = deal
     else:
@@ -977,6 +1009,7 @@ def run_client_state(
         "analyzed": 0,
         "skipped_unchanged": 0,
         "skipped_incomplete": 0,
+        "skipped_out_of_qc": 0,
         "skipped_other": 0,
         "errors": 0,
         "unrecoverable": 0,
@@ -1017,6 +1050,9 @@ def run_client_state(
                 stats["skipped_unchanged"] += 1
             elif reason == "evidence_incomplete":
                 stats["skipped_incomplete"] += 1
+            elif reason == "stage_out_of_qc":
+                stats["skipped_out_of_qc"] += 1
+                stats["verdicts"]["out_of_qc"] += 1
             elif reason in {
                 "llm_error", "parse_error", "collect_error", "unexpected_error",
             }:

@@ -425,3 +425,85 @@ def test_single_oversized_event_is_truncated_not_dropped():
     assert dropped == 0
     assert len(kept[0]["text"]) == 1000
     assert kept[0]["truncated"] is True
+
+
+# ── Гейт по этапу: не платим модели за карточки вне контроля качества ──
+def test_out_of_qc_stage_is_skipped_before_the_llm(monkeypatch):
+    """Задаток/Сделка/Агент — вердикт всё равно out_of_qc, разбор не нужен."""
+    import client_state as cs
+
+    def _boom(*args, **kwargs):  # pragma: no cover — не должен вызваться
+        raise AssertionError("модель не должна вызываться на этапе вне QC")
+
+    monkeypatch.setattr(cs, "prepare_deal_record", _boom)
+    monkeypatch.setattr(cs, "make_llm", _boom)
+
+    for stage in ("C18:UC_RUCRAH", "C18:UC_8X12HI", "C18:WON", "C18:UC_2ZBA0G"):
+        result = cs.analyze_deal({"ID": 77, "STAGE_ID": stage}, profile=cs.BUYER_PROFILE)
+        assert result["skipped"] is True, stage
+        assert result["reason"] == "stage_out_of_qc", stage
+        assert result["verdict"] == "out_of_qc", stage
+
+
+def test_seller_out_of_qc_stages_are_skipped_before_the_llm(monkeypatch):
+    import client_state as cs
+
+    def _boom(*args, **kwargs):  # pragma: no cover
+        raise AssertionError("модель не должна вызываться на этапе вне QC")
+
+    monkeypatch.setattr(cs, "prepare_deal_record", _boom)
+    monkeypatch.setattr(cs, "make_llm", _boom)
+
+    for stage in ("UC_KEOOG8", "UC_FADPBF", "WON"):
+        result = cs.analyze_deal({"ID": 78, "STAGE_ID": stage}, profile=cs.SELLER_PROFILE)
+        assert result["reason"] == "stage_out_of_qc", stage
+
+
+def test_stage_without_requirements_still_goes_to_the_llm():
+    """Незнакомый этап — «правил ещё нет», а не «не наше дело»: температура нужна."""
+    from client_state import stage_skips_analysis
+    from funnel_profiles import BUYER_PROFILE
+
+    assert stage_skips_analysis("C18:PREPARATION", BUYER_PROFILE) == ""
+
+
+def test_empty_stage_does_not_silently_skip_a_card():
+    from client_state import stage_skips_analysis
+    from funnel_profiles import BUYER_PROFILE, SELLER_PROFILE
+
+    assert stage_skips_analysis("", BUYER_PROFILE) == ""
+    assert stage_skips_analysis("", SELLER_PROFILE) == ""
+
+
+def test_force_overrides_the_stage_gate(monkeypatch):
+    """force=True — ручной перезапуск; он должен доходить до разбора."""
+    import client_state as cs
+
+    called: list[str] = []
+
+    def _prepare(deal, **kwargs):
+        called.append("prepared")
+        return {"ID": 79, "STAGE_ID": "C18:WON", "evidence_incomplete": True}
+
+    monkeypatch.setattr(cs, "prepare_deal_record", _prepare)
+    result = cs.analyze_deal(
+        {"ID": 79, "STAGE_ID": "C18:WON"}, profile=cs.BUYER_PROFILE, force=True,
+    )
+    assert called == ["prepared"]
+    assert result["reason"] == "evidence_incomplete"
+
+
+def test_run_client_state_counts_stage_skips(monkeypatch):
+    import client_state as cs
+
+    monkeypatch.setattr(cs, "prepare_deal_record", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("не должно вызываться"),
+    ))
+    stats = cs.run_client_state(
+        cs.BUYER_PROFILE,
+        [{"ID": 1, "STAGE_ID": "C18:WON"}, {"ID": 2, "STAGE_ID": "C18:UC_RUCRAH"}],
+    )
+    assert stats["skipped_out_of_qc"] == 2
+    assert stats["verdicts"]["out_of_qc"] == 2
+    assert stats["analyzed"] == 0
+    assert stats["skipped_other"] == 0
