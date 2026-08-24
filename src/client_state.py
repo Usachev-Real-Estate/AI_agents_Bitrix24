@@ -664,16 +664,63 @@ def build_llm_payload(
         {"key": key, "name": name, "required": required}
         for key, name, required in all_facts_for_stage(profile.key, stage_id)
     ]
+    # Порядок ключей подобран под кэш префикса у провайдера: stage_id и
+    # facts_needed одинаковы для всех карточек одного этапа, поэтому идут
+    # первыми — так закэшированный префикс тянется дальше системного промпта.
+    # На смысл запроса порядок ключей в JSON не влияет.
     payload = {
+        "stage_id": stage_id,
+        "facts_needed": facts_needed,
         "deal_id": _coerce_int(deal.get("ID") or deal.get("id")),
         "title": _clean_str(deal.get("TITLE") or deal.get("title")),
-        "stage_id": stage_id,
         "previous_state": previous_state,
         "new_events": new_events,
         "event_count_total": len(all_events),
-        "facts_needed": facts_needed,
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+USAGE_KEYS = ("input_tokens", "output_tokens", "cached_tokens")
+
+
+def extract_usage(response: Any) -> dict[str, int]:
+    """Токены одного ответа: {input_tokens, output_tokens, cached_tokens}.
+
+    Провайдеры отдают счётчики по-разному, поэтому читаем и стандартное поле
+    LangChain (usage_metadata), и сырой token_usage из response_metadata.
+    Ничего не нашли — возвращаем нули: телеметрия не повод ронять разбор.
+    """
+    usage = {key: 0 for key in USAGE_KEYS}
+    meta = getattr(response, "usage_metadata", None)
+    if isinstance(meta, dict):
+        usage["input_tokens"] = _coerce_int(meta.get("input_tokens"))
+        usage["output_tokens"] = _coerce_int(meta.get("output_tokens"))
+        details = meta.get("input_token_details")
+        if isinstance(details, dict):
+            usage["cached_tokens"] = _coerce_int(details.get("cache_read"))
+    raw = getattr(response, "response_metadata", None)
+    if isinstance(raw, dict):
+        token_usage = raw.get("token_usage")
+        if isinstance(token_usage, dict):
+            if not usage["input_tokens"]:
+                usage["input_tokens"] = _coerce_int(token_usage.get("prompt_tokens"))
+            if not usage["output_tokens"]:
+                usage["output_tokens"] = _coerce_int(
+                    token_usage.get("completion_tokens"),
+                )
+            if not usage["cached_tokens"]:
+                # DeepSeek называет это prompt_cache_hit_tokens, OpenAI прячет
+                # в prompt_tokens_details.cached_tokens.
+                details = token_usage.get("prompt_tokens_details")
+                if isinstance(details, dict):
+                    usage["cached_tokens"] = _coerce_int(
+                        details.get("cached_tokens"),
+                    )
+                if not usage["cached_tokens"]:
+                    usage["cached_tokens"] = _coerce_int(
+                        token_usage.get("prompt_cache_hit_tokens"),
+                    )
+    return usage
 
 
 def analyze_with_llm(
@@ -683,6 +730,7 @@ def analyze_with_llm(
     all_events: list[dict[str, Any]],
     llm: LLMClient,
     profile: FunnelProfile = BUYER_PROFILE,
+    usage_sink: dict[str, int] | None = None,
 ) -> dict[str, Any] | None:
     """Call LLM and return normalized client state."""
     human = build_llm_payload(deal, previous_state, new_events, all_events, profile)
@@ -690,6 +738,9 @@ def analyze_with_llm(
         SystemMessage(content=profile.prompt),
         HumanMessage(content=human),
     ])
+    if usage_sink is not None:
+        for key, value in extract_usage(response).items():
+            usage_sink[key] = usage_sink.get(key, 0) + value
     content = _message_content_to_str(getattr(response, "content", response))
     parsed = _parse_state_json(content)
     if not parsed:
@@ -842,9 +893,12 @@ def analyze_deal(
         )
 
     model = llm or make_llm(settings)
+    usage: dict[str, int] = {key: 0 for key in USAGE_KEYS}
+    envelope["usage"] = usage
     try:
         state = analyze_with_llm(
             record, previous_state, new_events, events, model, profile,
+            usage_sink=usage,
         )
     except Exception as exc:  # noqa: BLE001 — one card must not abort the batch
         logger.warning("Client state LLM failed for deal %s: %s", deal_id, exc)
@@ -1018,6 +1072,8 @@ def run_client_state(
         "contradictions_minor": 0,
         "contradictions_material": 0,
         "contradictions_dropped": 0,
+        "usage": {key: 0 for key in USAGE_KEYS},
+        "llm_calls": 0,
         "temperature": {"hot": 0, "warm": 0, "cold": 0, "unknown": 0},
         "verdicts": {
             "good": 0, "tolerable": 0, "poor": 0,
@@ -1044,6 +1100,13 @@ def run_client_state(
                 "content_hash": "",
             }
         stats["results"].append(result)
+        # Токены считаем и по упавшим карточкам: запрос к модели уже оплачен,
+        # даже если ответ не разобрался.
+        call_usage = result.get("usage")
+        if isinstance(call_usage, dict):
+            stats["llm_calls"] += 1
+            for key in USAGE_KEYS:
+                stats["usage"][key] += int(call_usage.get(key) or 0)
         reason = result.get("reason") or ""
         if result.get("skipped"):
             if reason == "unchanged":
@@ -1084,6 +1147,18 @@ def run_client_state(
             stats["verdicts"][verdict] += 1
         if state.get("recoverable") is False:
             stats["unrecoverable"] += 1
+    logger.info(
+        "Client state [%s]: %d cards, %d LLM calls, "
+        "%d in / %d out tokens, %d from cache (%.0f%% of input)",
+        profile.key,
+        stats["total"],
+        stats["llm_calls"],
+        stats["usage"]["input_tokens"],
+        stats["usage"]["output_tokens"],
+        stats["usage"]["cached_tokens"],
+        100.0 * stats["usage"]["cached_tokens"] / stats["usage"]["input_tokens"]
+        if stats["usage"]["input_tokens"] else 0.0,
+    )
     return stats
 
 

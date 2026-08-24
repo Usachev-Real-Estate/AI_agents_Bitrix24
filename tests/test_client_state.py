@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import json
 import sys
 from pathlib import Path
@@ -507,3 +508,113 @@ def test_run_client_state_counts_stage_skips(monkeypatch):
     assert stats["verdicts"]["out_of_qc"] == 2
     assert stats["analyzed"] == 0
     assert stats["skipped_other"] == 0
+
+
+# ── Телеметрия токенов ─────────────────────────────────────────────────
+class _Resp:
+    def __init__(self, usage_metadata=None, response_metadata=None):
+        self.content = "{}"
+        if usage_metadata is not None:
+            self.usage_metadata = usage_metadata
+        if response_metadata is not None:
+            self.response_metadata = response_metadata
+
+
+def test_usage_read_from_langchain_metadata():
+    from client_state import extract_usage
+
+    usage = extract_usage(_Resp(usage_metadata={
+        "input_tokens": 1500,
+        "output_tokens": 300,
+        "input_token_details": {"cache_read": 1200},
+    }))
+    assert usage == {
+        "input_tokens": 1500, "output_tokens": 300, "cached_tokens": 1200,
+    }
+
+
+def test_usage_read_from_openai_style_token_usage():
+    from client_state import extract_usage
+
+    usage = extract_usage(_Resp(response_metadata={"token_usage": {
+        "prompt_tokens": 900,
+        "completion_tokens": 120,
+        "prompt_tokens_details": {"cached_tokens": 640},
+    }}))
+    assert usage == {
+        "input_tokens": 900, "output_tokens": 120, "cached_tokens": 640,
+    }
+
+
+def test_usage_read_from_deepseek_cache_hit_field():
+    from client_state import extract_usage
+
+    usage = extract_usage(_Resp(response_metadata={"token_usage": {
+        "prompt_tokens": 800,
+        "completion_tokens": 100,
+        "prompt_cache_hit_tokens": 512,
+    }}))
+    assert usage["cached_tokens"] == 512
+
+
+def test_usage_absent_does_not_raise():
+    from client_state import extract_usage
+
+    assert extract_usage(_Resp()) == {
+        "input_tokens": 0, "output_tokens": 0, "cached_tokens": 0,
+    }
+
+
+def test_invariant_payload_keys_come_first():
+    """Префикс запроса должен быть одинаков для всех карточек одного этапа."""
+    from client_state import build_llm_payload
+    from funnel_profiles import BUYER_PROFILE
+
+    def _payload(deal_id: int) -> str:
+        return build_llm_payload(
+            {"ID": deal_id, "TITLE": f"Сделка {deal_id}", "STAGE_ID": "C18:NEW"},
+            None, [], [], BUYER_PROFILE,
+        )
+
+    a, b = _payload(1), _payload(2)
+    prefix = os.path.commonprefix([a, b])
+    # Общий префикс должен дотягиваться до значения deal_id — то есть весь
+    # инвариантный блок (этап + требуемые факты) в него уже вошёл.
+    assert prefix.rstrip().endswith('"deal_id":')
+    assert '"facts_needed"' in prefix
+    assert "следующий шаг с датой" in prefix
+
+
+def test_run_client_state_sums_token_usage(monkeypatch):
+    import client_state as cs
+
+    def _fake(deal, **kwargs):
+        return {
+            "deal_id": int(deal["ID"]), "skipped": False, "reason": "",
+            "state": {"temperature": "warm", "verdict": "good"},
+            "content_hash": "x",
+            "usage": {
+                "input_tokens": 1000, "output_tokens": 200, "cached_tokens": 700,
+            },
+        }
+
+    monkeypatch.setattr(cs, "analyze_deal", _fake)
+    stats = cs.run_client_state(
+        cs.BUYER_PROFILE, [{"ID": 1, "STAGE_ID": "C18:NEW"}, {"ID": 2, "STAGE_ID": "C18:NEW"}],
+    )
+    assert stats["llm_calls"] == 2
+    assert stats["usage"] == {
+        "input_tokens": 2000, "output_tokens": 400, "cached_tokens": 1400,
+    }
+
+
+def test_skipped_cards_do_not_count_as_llm_calls(monkeypatch):
+    """Карточка, отсечённая гейтом или хэшем, запросов не делает."""
+    import client_state as cs
+
+    monkeypatch.setattr(cs, "prepare_deal_record", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("не должно вызываться"),
+    ))
+    stats = cs.run_client_state(cs.BUYER_PROFILE, [{"ID": 1, "STAGE_ID": "C18:WON"}])
+    assert stats["llm_calls"] == 0
+    assert stats["usage"]["input_tokens"] == 0
