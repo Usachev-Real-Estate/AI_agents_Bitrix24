@@ -205,3 +205,40 @@ def test_summary_omits_the_empty_note_when_there_are_none():
     })
     assert "Неинформативных карточек: 1" in summary
     assert "полностью пустых" not in summary
+
+
+# ── Состав выборки: перекос должен быть виден сразу ────────────────────
+def test_summary_shows_the_stage_mix_of_the_sample():
+    from client_state_report import format_stage_mix
+
+    line = format_stage_mix({"UC_KEOOG8": 7, "NEW": 2, "C18:NEW": 1})
+    assert line.startswith("Этапы выборки: ")
+    # Самый частый этап первым — перекос видно с первого взгляда.
+    assert line.index("Переговоры 7") < line.index("Назначение встречи 2")
+    assert "Подбор" in line or "C18:NEW 1" in line
+
+
+def test_unknown_stage_code_is_shown_as_is():
+    from client_state_report import format_stage_mix
+
+    assert "UC_NEWSTAGE 3" in format_stage_mix({"UC_NEWSTAGE": 3})
+
+
+def test_stage_mix_is_omitted_when_empty():
+    from client_state_report import format_stage_mix
+
+    assert format_stage_mix({}) == ""
+
+
+def test_stage_mix_reaches_the_summary():
+    summary = format_summary({
+        "funnel_label": "Продавцы",
+        "total": 10, "analyzed": 0,
+        "temperature": {"hot": 0, "warm": 0, "cold": 0, "unknown": 0},
+        "verdicts": {"good": 0, "tolerable": 0, "poor": 0, "too_early": 0,
+                     "out_of_qc": 10},
+        "stages": {"UC_KEOOG8": 6, "UC_FADPBF": 4},
+        "cost_rub": 0.0, "cost_rub_per_card": 0.0,
+    })
+    assert "Переговоры 6" in summary
+    assert "Поиск клиента 4" in summary

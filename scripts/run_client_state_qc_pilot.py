@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,16 +40,22 @@ def pick_deals(
     profile: FunnelProfile,
     category_id: int,
     limit: int,
-    order: str = "judgeable",
+    order: str = "random",
 ) -> list[dict]:
     """Открытые сделки воронки.
 
-    order="judgeable" (по умолчанию) — сначала те, что дольше стоят на этапе.
-    Выборка «самые новые» кажется естественной, но она системно набирает
-    карточки моложе отсрочки: контроль качества по ним по определению даёт
-    «рано судить», и прогон ничего не измеряет. Работу брокера видно на
-    карточках, которые уже вышли из льготного окна.
-    order="newest" оставлен для отладки свежих лидов.
+    Порядок задаёт, какую часть воронки увидит прогон, и каждый режим отвечает
+    на свой вопрос. Крайности лгут по-разному, поэтому режим выбирается осознанно:
+
+    * "random" (по умолчанию) — представительная выборка. Отвечает на вопрос
+      «как обстоят дела в воронке». Единственный режим, по которому можно
+      судить о распределении: остальные два по построению набирают крайности.
+    * "judgeable" — дольше всего на этапе СРЕДИ тех этапов, что QC судит.
+      Отвечает на «где хуже всего». Этапы вне контроля качества отсеиваются:
+      без этого выборка набивается «Переговорами» и «Поиском клиента», где
+      дела стоят месяцами, и прогон не разбирает ни одной карточки.
+    * "newest" — самые свежие. Почти все моложе отсрочки, поэтому годится
+      только для отладки свежих лидов, не для оценки качества.
 
     UF-поля квалификации запрашиваются наравне с остальными: без них прямая
     проверка бюджета и района не видит данных и объявляет поля незаполненными.
@@ -70,13 +77,25 @@ def pick_deals(
         deals.sort(key=lambda d: _coerce_int(d.get("ID")), reverse=True)
         return deals[:limit]
 
+    if order == "random":
+        # Сид от ID сделок: выборка воспроизводима, пока воронка не изменилась,
+        # поэтому повторный прогон можно сравнить с предыдущим.
+        pool = sorted(deals, key=lambda d: _coerce_int(d.get("ID")))
+        rng = random.Random(sum(_coerce_int(d.get("ID")) for d in pool))
+        rng.shuffle(pool)
+        return pool[:limit]
+
+    judgeable = [
+        d for d in deals
+        if _clean_str(d.get("STAGE_ID")) not in profile.stages_out_of_qc
+    ]
     now = datetime.now(timezone.utc)
     # Карточки без известного возраста ставим в конец: по ним отсрочка не
     # применяется, и они дали бы завышенную строгость на ровном месте.
-    deals.sort(
+    judgeable.sort(
         key=lambda d: (_stage_hours(d, now) is None, -(_stage_hours(d, now) or 0.0)),
     )
-    return deals[:limit]
+    return judgeable[:limit]
 
 
 def format_report(
@@ -113,9 +132,11 @@ def main() -> None:
         help="Перечитать карточки моделью, даже если новых событий нет",
     )
     parser.add_argument(
-        "--order", choices=("judgeable", "newest"), default="judgeable",
-        help="judgeable — дольше всего на этапе (по умолчанию); "
-             "newest — самые новые сделки (отладка свежих лидов)",
+        "--order", choices=("random", "judgeable", "newest"), default="random",
+        help="random — представительная выборка (по умолчанию, только по ней "
+             "можно судить о воронке); judgeable — дольше всего на этапах, "
+             "которые QC судит (где хуже всего); newest — самые свежие "
+             "(отладка, почти все моложе отсрочки)",
     )
     args = parser.parse_args()
 

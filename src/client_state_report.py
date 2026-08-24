@@ -11,6 +11,7 @@ from typing import Any
 
 from buyer_commission_reminder import deal_url
 from client_state import MATERIAL_SEVERITY
+from tools import BUYERS_STAGE_NAMES, SELLERS_STAGE_NAMES
 
 # Значение, которым модель отвечает «не знаю». В отчёте показываем словами.
 UNKNOWN = "unknown"
@@ -230,6 +231,10 @@ def format_summary(stats: dict[str, Any]) -> str:
     if skipped:
         parts.append("Не разбиралось моделью: " + ", ".join(skipped))
 
+    stage_line = format_stage_mix(stats.get("stages") or {})
+    if stage_line:
+        parts.append(stage_line)
+
     # Если возраст этапа неизвестен, отсрочка не применяется и вердикты
     # смещены в сторону «плохо». Молчать об этом нельзя: РОП примет завышенную
     # строгость за реальное качество работы брокеров.
@@ -245,3 +250,23 @@ def format_summary(stats: dict[str, Any]) -> str:
         f"({float(stats.get('cost_rub_per_card') or 0.0):.3f} ₽ за карточку)",
     )
     return "\n".join(parts)
+
+
+def stage_name(code: str) -> str:
+    """Человеческое имя этапа; неизвестный код показываем как есть."""
+    return BUYERS_STAGE_NAMES.get(code) or SELLERS_STAGE_NAMES.get(code) or code
+
+
+def format_stage_mix(stages: dict[str, int]) -> str:
+    """Состав выборки по этапам.
+
+    Без этой строки перекос выборки невидим: прогон по самым свежим карточкам
+    и прогон по самым залежавшимся дают одинаково бессодержательный итог
+    («всё рано судить» / «всё плохо»), и отличить их можно только по этапам.
+    """
+    if not stages:
+        return ""
+    ranked = sorted(stages.items(), key=lambda kv: (-kv[1], kv[0]))
+    return "Этапы выборки: " + ", ".join(
+        f"{stage_name(code)} {count}" for code, count in ranked
+    )

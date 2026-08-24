@@ -1232,6 +1232,10 @@ def run_client_state(
         "stage_age_unknown": 0,
         # Пустые карточки: разобраны без модели, потому что читать нечего.
         "empty_cards": 0,
+        # Состав выборки по этапам. Три прогона подряд дали неинформативный
+        # итог из-за перекоса выборки, и каждый раз это приходилось
+        # раскапывать. Пусть перекос будет виден сразу.
+        "stages": {},
         "temperature": {"hot": 0, "warm": 0, "cold": 0, "unknown": 0},
         "verdicts": {
             "good": 0, "tolerable": 0, "poor": 0,
@@ -1240,6 +1244,10 @@ def run_client_state(
         "results": [],
     }
     for deal in deals:
+        stage_code = _clean_str(deal.get("STAGE_ID") or deal.get("stage_id"))
+        stats["stages"][stage_code or "(без этапа)"] = (
+            stats["stages"].get(stage_code or "(без этапа)", 0) + 1
+        )
         try:
             result = analyze_deal(
                 deal, profile=profile, settings=settings, llm=llm, force=force,
