@@ -31,6 +31,15 @@ _COMMON_RULES = """\
    просто не обновил карточку.
 7. signals — только факты, каждый с цитатой. Не выводи их «по ощущению»:
    не нашёл подтверждения — ставь false / unknown.
+8. stage_facts — отдельная секция. Для КАЖДОГО ключа из payload.facts_needed
+   верни объект {present: bool, quote: string}. Если факт найден в карточке —
+   ставь present=true и обязательно приводи дословную цитату. Не нашёл —
+   present=false, quote="". Не додумывай.
+9. Уровни расхождения (severity в contradictions):
+   * low — мелкое: сдвиг дат, разница по цифрам до 30 %, уточнение
+     формулировок. Не влияет на итоговый вердикт.
+   * medium/high — существенное: искажена позиция клиента, готовность к
+     сделке, разница по цифрам БОЛЕЕ 30 %, контрагент назван неверно.
 """
 
 _COMMON_SCHEMA_HEAD = """\
@@ -50,6 +59,9 @@ _COMMON_SCHEMA_HEAD = """\
     {"what": "в чём расходится", "in_card": "цитата из карточки",
      "in_call": "цитата из разговора", "severity": "low|medium|high"}
   ],
+  "stage_facts": {
+    "<ключ из facts_needed>": {"present": true, "quote": "дословная цитата"}
+  },
 """
 
 BUYER_PROMPT = (
@@ -219,6 +231,164 @@ BUYER_TEXT_SIGNALS = ("budget_value",)
 SELLER_TEXT_SIGNALS = ("price_value",)
 
 
+# Обязательные факты по этапам. Накопительно, кроме APOLOGY (проиграна).
+BUYER_STAGE_REQUIREMENTS: dict[str, tuple[tuple[str, str], ...]] = {
+    # Подбор — квалификация клиента
+    "C18:NEW": (
+        ("property_type", "тип объекта"),
+        ("budget", "бюджет"),
+        ("district", "район"),
+        ("timeline", "сроки покупки"),
+        ("next_step", "следующий шаг с датой"),
+    ),
+    # Первый показ — накопительно + описание показа
+    "C18:UC_UFPFKK": (
+        ("property_type", "тип объекта"),
+        ("budget", "бюджет"),
+        ("district", "район"),
+        ("timeline", "сроки покупки"),
+        ("next_step", "следующий шаг с датой"),
+        ("shown_objects", "какие объекты показаны"),
+        ("show_reaction", "реакция клиента на показ"),
+    ),
+    # Повторный показ — те же поля показа (по согласованию с агентством)
+    "C18:UC_DVW1P9": (
+        ("property_type", "тип объекта"),
+        ("budget", "бюджет"),
+        ("district", "район"),
+        ("timeline", "сроки покупки"),
+        ("next_step", "следующий шаг с датой"),
+        ("shown_objects", "какой объект показан"),
+        ("show_reaction", "реакция клиента"),
+    ),
+    # Офер — плюс условия и реакция продавца
+    "C18:UC_8Z3SP6": (
+        ("property_type", "тип объекта"),
+        ("budget", "бюджет"),
+        ("district", "район"),
+        ("timeline", "сроки покупки"),
+        ("next_step", "следующий шаг с датой"),
+        ("offer_terms", "предложенные цена и условия"),
+        ("seller_reaction", "реакция продавца"),
+        ("deal_blockers", "что мешает выйти на задаток"),
+    ),
+    # Отложенный спрос — только специфика этапа
+    "C18:LOSE": (
+        ("postponed_reason", "причина откладывания"),
+        ("return_when", "когда вернуться к клиенту"),
+    ),
+    # Сделка проиграна — своя причина, накопительное не применяется
+    "C18:APOLOGY": (
+        ("lost_reason", "причина проигрыша"),
+    ),
+    # "Агент" — прямая проверка типа контакта (не LLM), см. qualification_fields
+}
+
+
+BUYER_QUAL_STAGE = "C18:NEW"
+# Обязательные поля Bitrix для проверки на "Подборе" — согласованы с агентством.
+BUYER_QUALIFICATION_FIELDS: tuple[tuple[str, str], ...] = (
+    ("UF_CRM_1774363333518", "бюджет"),
+    ("UF_CRM_1774364869184", "район/локация"),
+    ("UF_CRM_1747291787883", "тип недвижимости"),
+)
+
+# Другие известные коды полей — включать в проверку по согласованию, отдельно.
+# Оставлены здесь как справочник, чтобы не искать заново.
+BUYER_KNOWN_UF_FIELDS: dict[str, str] = {
+    "UF_CRM_1774521607469": "стоимость объекта",
+    "UF_CRM_1774364892961": "название ЖК",
+    "UF_CRM_1660497970783": "цель покупки",
+    "UF_CRM_1780911079": "ID объекта Афины",
+    "UF_CRM_1659375809326": "дата встречи",
+}
+
+
+BUYER_STAGES_OUT_OF_QC = frozenset({
+    "C18:UC_RUCRAH",  # Задаток — у руководства
+    "C18:UC_8X12HI",  # Сделка — у руководства
+    "C18:WON",        # Договор закрыт
+})
+
+
+BUYER_GRACE_HOURS: dict[str, int] = {
+    "C18:NEW": 72,   # Подбор: 3 дня — свежие лиды с Cian, бюджет ещё не мог возникнуть
+    "_default": 24,
+}
+
+
+SELLER_STAGE_REQUIREMENTS: dict[str, tuple[tuple[str, str], ...]] = {
+    # Назначение встречи (мотивация убрана по решению агентства)
+    "NEW": (
+        ("property_address", "адрес объекта"),
+        ("property_type", "тип объекта"),
+        ("selling_timeline", "срок продажи"),
+        ("next_step", "следующий шаг с датой"),
+    ),
+    # Подготовка в рекламу — цена обязательна;
+    # фотосессия / документы — условные (см. optional_facts).
+    "FINAL_INVOICE": (
+        ("property_address", "адрес объекта"),
+        ("property_type", "тип объекта"),
+        ("selling_timeline", "срок продажи"),
+        ("next_step", "следующий шаг с датой"),
+        ("listing_price", "цена выставления"),
+    ),
+    # Отложенная продажа
+    "LOSE": (
+        ("postponed_reason", "причина откладывания"),
+        ("return_when", "когда вернуться"),
+    ),
+    # Проиграна
+    "APOLOGY": (
+        ("lost_reason", "причина проигрыша"),
+    ),
+    # "Закрытая продажа (На сайт)" — ID Афины проверяет основной аудит
+    # "Переговоры" — вне QC (у руководства)
+    # "Поиск клиента" — вне аудита
+}
+
+
+SELLER_STAGES_OUT_OF_QC = frozenset({
+    "UC_KEOOG8",       # Переговоры — у руководства
+    "UC_FADPBF",       # Поиск клиента — вне аудита
+    "WON",             # Договор закрыт
+})
+
+
+SELLER_GRACE_HOURS: dict[str, int] = {"_default": 24}
+
+
+# Условные факты — LLM их извлекает, но за отсутствие не наказываем.
+BUYER_OPTIONAL_FACTS: dict[str, tuple[tuple[str, str], ...]] = {}
+SELLER_OPTIONAL_FACTS: dict[str, tuple[tuple[str, str], ...]] = {
+    "FINAL_INVOICE": (
+        ("photo_session", "фотосессия назначена/проведена"),
+        ("documents_ready", "готовность документов"),
+    ),
+}
+
+
+def all_facts_for_stage(profile_key: str, stage_id: str) -> list[tuple[str, str, bool]]:
+    """Все факты для этапа: (ключ, имя, обязательно?).
+
+    Используется, чтобы одним списком передать LLM в human message.
+    """
+    req_map = BUYER_STAGE_REQUIREMENTS if profile_key == "buyers" else SELLER_STAGE_REQUIREMENTS
+    opt_map = BUYER_OPTIONAL_FACTS if profile_key == "buyers" else SELLER_OPTIONAL_FACTS
+    facts: list[tuple[str, str, bool]] = []
+    seen: set[str] = set()
+    for key, name in req_map.get(stage_id, ()):
+        if key not in seen:
+            facts.append((key, name, True))
+            seen.add(key)
+    for key, name in opt_map.get(stage_id, ()):
+        if key not in seen:
+            facts.append((key, name, False))
+            seen.add(key)
+    return facts
+
+
 @dataclass(frozen=True)
 class FunnelProfile:
     """Everything that differs between funnels."""
@@ -229,6 +399,20 @@ class FunnelProfile:
     normalize_signals: Callable[[dict[str, Any], Callable[[Any], int]], dict[str, Any]]
     temperature: Callable[[dict[str, Any]], tuple[str, str]]
     text_signals: tuple[str, ...]
+    # Обязательные факты по этапам: {stage_id: (ключ факта, человеческое имя)}.
+    # На требования из старших этапов ложатся требования младших — это
+    # накопительно, кроме "Проиграна", где своя причина заменяет всё.
+    stage_requirements: dict[str, tuple[tuple[str, str], ...]]
+    # Часы отсрочки от входа на этап до применения требований. Ключ ``_default``
+    # применяется к этапам, отсутствующим в таблице. Ключ ``_skipped`` (список)
+    # — этапы вне контроля качества (ведёт руководство).
+    grace_hours: dict[str, int]
+    stages_out_of_qc: frozenset[str]
+    # Поля карточки, которые проверяются напрямую в CRM: это НЕ задача LLM.
+    # Значение — коды UF, которые надо подставить в crm.deal.get.
+    # Заполнить реальными кодами перед включением проверки.
+    qualification_fields: tuple[tuple[str, str], ...] = ()
+    qualification_stage: str = ""  # этап, на котором проверка обязательна
 
 
 BUYER_PROFILE = FunnelProfile(
@@ -238,6 +422,11 @@ BUYER_PROFILE = FunnelProfile(
     normalize_signals=_normalize_buyer_signals,
     temperature=buyer_temperature,
     text_signals=BUYER_TEXT_SIGNALS,
+    stage_requirements=BUYER_STAGE_REQUIREMENTS,
+    grace_hours=BUYER_GRACE_HOURS,
+    stages_out_of_qc=BUYER_STAGES_OUT_OF_QC,
+    qualification_fields=BUYER_QUALIFICATION_FIELDS,
+    qualification_stage=BUYER_QUAL_STAGE,
 )
 
 SELLER_PROFILE = FunnelProfile(
@@ -247,6 +436,9 @@ SELLER_PROFILE = FunnelProfile(
     normalize_signals=_normalize_seller_signals,
     temperature=seller_temperature,
     text_signals=SELLER_TEXT_SIGNALS,
+    stage_requirements=SELLER_STAGE_REQUIREMENTS,
+    grace_hours=SELLER_GRACE_HOURS,
+    stages_out_of_qc=SELLER_STAGES_OUT_OF_QC,
 )
 
 PROFILES = {p.key: p for p in (BUYER_PROFILE, SELLER_PROFILE)}

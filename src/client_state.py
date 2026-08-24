@@ -333,6 +333,125 @@ def verify_contradictions(
     return verified, rejected
 
 
+VALID_VERDICTS = frozenset({"good", "tolerable", "poor", "too_early", "out_of_qc"})
+
+
+def _stage_hours(deal: dict[str, Any], now: datetime) -> float | None:
+    """Часы с момента входа на текущий этап."""
+    from tools import _parse_datetime
+    entered = _parse_datetime(deal.get("stage_entered_at"))
+    if entered is None:
+        return None
+    if entered.tzinfo is None:
+        entered = entered.replace(tzinfo=timezone.utc)
+    return max(0.0, (now - entered).total_seconds() / 3600.0)
+
+
+def grace_period_for(profile: FunnelProfile, stage_id: str) -> int:
+    """Отсрочка (часы) от входа на этап до применения требований."""
+    if stage_id in profile.grace_hours:
+        return int(profile.grace_hours[stage_id])
+    return int(profile.grace_hours.get("_default", 24))
+
+
+def check_qualification_fields(
+    deal: dict[str, Any],
+    profile: FunnelProfile,
+) -> tuple[bool | None, list[str]]:
+    """Прямая проверка UF-полей карточки (без LLM).
+
+    Возвращает (все_заполнены?, список_пустых). None — проверка не настроена
+    (в профиле пустой qualification_fields), и вердикт её не применяет.
+
+    Значение считается заполненным, если поле не пустое, не False, не None
+    и не строка вида ""/"0". UF Битрикса бывают строкой, числом, списком —
+    все три случая покрываем как пустоту если "содержательного" ничего нет.
+    """
+    if not profile.qualification_fields:
+        return None, []
+    missing: list[str] = []
+    for code, name in profile.qualification_fields:
+        value = deal.get(code)
+        if value in (None, "", "0", 0, False, []):
+            missing.append(name)
+    return len(missing) == 0, missing
+
+
+def compute_completeness_verdict(
+    stage_id: str,
+    state: dict[str, Any],
+    profile: FunnelProfile,
+    *,
+    hours_on_stage: float | None,
+    qualification_ok: bool | None = None,
+) -> tuple[str, str]:
+    """Итог по карточке: хорошо / терпимо / плохо / рано судить / вне QC.
+
+    Правила согласованы с агентством (см. plans/qc-completeness-draft.md):
+    * good — обязательные факты есть, комментарий похож на разговор (нет
+      material расхождений), ключевые поля квалификации заполнены (если
+      проверка настроена);
+    * tolerable — есть только minor расхождения ИЛИ не хватает одного факта,
+      при этом основные поля квалификации заполнены;
+    * poor — recoverable=false, ИЛИ есть material расхождение, ИЛИ не хватает
+      двух и более обязательных фактов после отсрочки;
+    * too_early — этап моложе отсрочки.
+    """
+    if stage_id in profile.stages_out_of_qc:
+        return "out_of_qc", "этап не в контроле качества (у руководства)"
+
+    if not state.get("recoverable", True):
+        return "poor", "по карточке нельзя восстановить картину клиента"
+
+    contradictions = state.get("contradictions") or []
+    material = [
+        c for c in contradictions
+        if str(c.get("severity", "medium")).lower() in MATERIAL_SEVERITY
+    ]
+    minor = [
+        c for c in contradictions
+        if str(c.get("severity", "medium")).lower() in MINOR_SEVERITY
+    ]
+    if material:
+        return "poor", f"существенных расхождений: {len(material)}"
+
+    required_keys = [
+        key for key, _name in profile.stage_requirements.get(stage_id, ())
+    ]
+    if not required_keys:
+        # Этап не покрыт правилами — не судим.
+        return "out_of_qc", "для этапа не заданы требования"
+
+    grace = grace_period_for(profile, stage_id)
+    if hours_on_stage is not None and hours_on_stage < grace:
+        return "too_early", (
+            f"этап моложе отсрочки ({hours_on_stage:.0f} ч < {grace} ч)"
+        )
+
+    stage_facts = state.get("stage_facts") or {}
+    missing = [
+        key for key in required_keys
+        if not (stage_facts.get(key) or {}).get("present")
+    ]
+
+    qual_gap = qualification_ok is False
+    if len(missing) >= 2 or (missing and qual_gap):
+        return "poor", (
+            "не хватает обязательных фактов: " + ", ".join(missing)
+            + (" · ключевые поля карточки не заполнены" if qual_gap else "")
+        )
+    if missing or minor or qual_gap:
+        reasons = []
+        if missing:
+            reasons.append(f"нет факта: {missing[0]}")
+        if minor:
+            reasons.append(f"мелкие расхождения: {len(minor)}")
+        if qual_gap:
+            reasons.append("не все ключевые поля карточки заполнены")
+        return "tolerable", "; ".join(reasons)
+    return "good", "обязательные факты есть, расхождений с разговором нет"
+
+
 def compute_temperature(
     signals: dict[str, Any],
     *,
@@ -375,6 +494,24 @@ VALID_HORIZONS = frozenset({
     "до месяца", "1-3 месяца", "более 3 месяцев", "unknown",
 })
 VALID_SEVERITY = frozenset({"low", "medium", "high"})
+# LLM ставит severity низкий/средний/высокий. Порог по цифрам (30 %) прописан
+# в промпте; здесь только разделяем на мелкое (low) и существенное (medium/high).
+MINOR_SEVERITY = frozenset({"low"})
+MATERIAL_SEVERITY = frozenset({"medium", "high"})
+
+
+def _normalize_stage_facts(raw: Any) -> dict[str, dict[str, Any]]:
+    """Нормализация stage_facts: {key: {"present": bool, "quote": str}}."""
+    data = raw if isinstance(raw, dict) else {}
+    out: dict[str, dict[str, Any]] = {}
+    for key, value in data.items():
+        if not isinstance(value, dict):
+            continue
+        out[str(key)] = {
+            "present": bool(value.get("present")),
+            "quote": _clean_str(value.get("quote")),
+        }
+    return out
 
 
 def _normalize_signals(raw: Any, profile: FunnelProfile) -> dict[str, Any]:
@@ -443,6 +580,7 @@ def _normalize_state(
         "evidence": [_clean_str(x) for x in evidence if _clean_str(x)],
         "contradictions": _normalize_contradictions(raw.get("contradictions")),
         "signals": _normalize_signals(raw.get("signals"), profile),
+        "stage_facts": _normalize_stage_facts(raw.get("stage_facts")),
     }
 
 
@@ -480,6 +618,9 @@ def unmask_state(
         signals["objections"] = [
             unmask(str(v), mask_map) for v in signals.get("objections") or []
         ]
+    for entry in (out.get("stage_facts") or {}).values():
+        if isinstance(entry, dict):
+            entry["quote"] = unmask(str(entry.get("quote") or ""), mask_map)
     return out
 
 
@@ -488,15 +629,28 @@ def build_llm_payload(
     previous_state: dict[str, Any] | None,
     new_events: list[dict[str, Any]],
     all_events: list[dict[str, Any]],
+    profile: FunnelProfile = BUYER_PROFILE,
 ) -> str:
-    """Human message body for incremental state update."""
+    """Human message body for incremental state update.
+
+    Список фактов этапа приходит сюда, а не в системный промпт: правила
+    меняются в profile без переписывания промпта, а модель отвечает по тем
+    же ключам, что мы передали.
+    """
+    from funnel_profiles import all_facts_for_stage
+    stage_id = _clean_str(deal.get("STAGE_ID") or deal.get("stage_id"))
+    facts_needed = [
+        {"key": key, "name": name, "required": required}
+        for key, name, required in all_facts_for_stage(profile.key, stage_id)
+    ]
     payload = {
         "deal_id": _coerce_int(deal.get("ID") or deal.get("id")),
         "title": _clean_str(deal.get("TITLE") or deal.get("title")),
-        "stage_id": _clean_str(deal.get("STAGE_ID") or deal.get("stage_id")),
+        "stage_id": stage_id,
         "previous_state": previous_state,
         "new_events": new_events,
         "event_count_total": len(all_events),
+        "facts_needed": facts_needed,
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -510,7 +664,7 @@ def analyze_with_llm(
     profile: FunnelProfile = BUYER_PROFILE,
 ) -> dict[str, Any] | None:
     """Call LLM and return normalized client state."""
-    human = build_llm_payload(deal, previous_state, new_events, all_events)
+    human = build_llm_payload(deal, previous_state, new_events, all_events, profile)
     response = llm.invoke([
         SystemMessage(content=profile.prompt),
         HumanMessage(content=human),
@@ -712,6 +866,53 @@ def analyze_deal(
     state["temperature_reason"] = why
     envelope["temperature"] = level
 
+    # Проверить цитаты stage_facts: любая невалидная цитата → factum отсутствует.
+    # Если модель поставила present=True, но цитаты нет в карточке — это
+    # выдумка, обнуляем факт вместо того чтобы засчитать его.
+    corpus = _normalize_for_match(
+        " ".join(str(e.get("text") or "") for e in events),
+    )
+    stage_facts = state.get("stage_facts") or {}
+    unquoted = 0
+    for key, value in stage_facts.items():
+        if not isinstance(value, dict) or not value.get("present"):
+            continue
+        needle = _normalize_for_match(value.get("quote"))
+        if not needle or needle not in corpus:
+            unquoted += 1
+            value["present"] = False
+            value["quote"] = ""
+    if unquoted:
+        logger.warning(
+            "Deal %s: %d stage_facts without a valid quote — marked absent",
+            deal_id, unquoted,
+        )
+    envelope["stage_facts_dropped"] = unquoted
+
+    stage_id = _clean_str(record.get("STAGE_ID") or record.get("stage_id"))
+    hours_on_stage = _stage_hours(record, datetime.now(timezone.utc))
+
+    # Прямая проверка полей квалификации — только на этапе, для которого
+    # она настроена. Иначе qualification_ok=None, вердикт её не учитывает.
+    qualification_ok: bool | None = None
+    if stage_id == profile.qualification_stage:
+        qualification_ok, missing_fields = check_qualification_fields(record, profile)
+        envelope["qualification_missing"] = missing_fields
+        if missing_fields:
+            logger.info(
+                "Deal %s: unfilled qualification fields: %s",
+                deal_id, ", ".join(missing_fields),
+            )
+
+    verdict, verdict_reason = compute_completeness_verdict(
+        stage_id, state, profile,
+        hours_on_stage=hours_on_stage,
+        qualification_ok=qualification_ok,
+    )
+    state["verdict"] = verdict
+    state["verdict_reason"] = verdict_reason
+    envelope["verdict"] = verdict
+
     # В БД уходит замаскированная копия: на следующем прогоне она вернётся
     # в модель как previous_state. Разворачиваем только то, что читают люди.
     envelope["state"] = unmask_state(state, mask_map, profile)
@@ -760,7 +961,11 @@ def run_client_state(
                     "CATEGORY_ID": category_id,
                     "CLOSED": "N",
                 },
-                "select": ["ID", "TITLE", "STAGE_ID", "ASSIGNED_BY_ID", "CONTACT_ID"],
+                "select": [
+                    "ID", "TITLE", "STAGE_ID", "ASSIGNED_BY_ID", "CONTACT_ID",
+                    # UF-поля, которые нужны прямой проверке качества
+                    *[code for code, _name in profile.qualification_fields],
+                ],
             },
         )
         deals = [d for d in _as_list(raw) if isinstance(d, dict)]
@@ -777,8 +982,14 @@ def run_client_state(
         "unrecoverable": 0,
         "evidence_dropped": 0,
         "contradictions_found": 0,
+        "contradictions_minor": 0,
+        "contradictions_material": 0,
         "contradictions_dropped": 0,
         "temperature": {"hot": 0, "warm": 0, "cold": 0, "unknown": 0},
+        "verdicts": {
+            "good": 0, "tolerable": 0, "poor": 0,
+            "too_early": 0, "out_of_qc": 0,
+        },
         "results": [],
     }
     for deal in deals:
@@ -819,10 +1030,22 @@ def run_client_state(
             result.get("contradictions_dropped") or 0,
         )
         state = result.get("state") or {}
-        stats["contradictions_found"] += len(state.get("contradictions") or [])
+        contradictions = state.get("contradictions") or []
+        stats["contradictions_found"] += len(contradictions)
+        stats["contradictions_material"] += sum(
+            1 for c in contradictions
+            if str(c.get("severity", "medium")).lower() in MATERIAL_SEVERITY
+        )
+        stats["contradictions_minor"] += sum(
+            1 for c in contradictions
+            if str(c.get("severity", "medium")).lower() in MINOR_SEVERITY
+        )
         level = str(state.get("temperature") or "unknown")
         if level in stats["temperature"]:
             stats["temperature"][level] += 1
+        verdict = str(state.get("verdict") or "out_of_qc")
+        if verdict in stats["verdicts"]:
+            stats["verdicts"][verdict] += 1
         if state.get("recoverable") is False:
             stats["unrecoverable"] += 1
     return stats
