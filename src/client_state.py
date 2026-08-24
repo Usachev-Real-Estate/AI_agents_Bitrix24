@@ -15,7 +15,7 @@ from config import Settings, get_settings
 from db import get_client_state, init_db, save_client_state
 from lead_quality_audit import _message_content_to_str
 from funnel_profiles import BUYER_PROFILE, SELLER_PROFILE, FunnelProfile
-from llm import make_llm
+from llm import estimate_cost, make_llm
 from masking import MaskMap, apply_mask, build_mask_map, unmask
 from tools import (
     _as_list,
@@ -196,28 +196,64 @@ def build_evidence_events(
     return events
 
 
+FINGERPRINT_LEN = 16
+
+
+def _event_identity(event: dict[str, Any]) -> dict[str, Any]:
+    """Поля, по которым событие считается тем же самым."""
+    return {
+        "kind": event.get("kind"),
+        "id": event.get("id"),
+        "created": event.get("created"),
+        "text": event.get("text"),
+        "status": event.get("status"),
+        "note": event.get("note"),
+    }
+
+
+def event_fingerprint(event: dict[str, Any]) -> str:
+    """Отпечаток одного события.
+
+    Отредактированный комментарий и дозагруженная расшифровка меняют текст, а
+    значит и отпечаток — такое событие уедет в модель заново, и это правильно.
+    """
+    raw = json.dumps(_event_identity(event), ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:FINGERPRINT_LEN]
+
+
 def compute_content_hash(events: list[dict[str, Any]]) -> str:
     """Stable fingerprint of card evidence for skip-if-unchanged."""
-    payload = [
-        {
-            "kind": e.get("kind"),
-            "id": e.get("id"),
-            "created": e.get("created"),
-            "text": e.get("text"),
-            "status": e.get("status"),
-            "note": e.get("note"),
-        }
-        for e in events
-    ]
+    payload = [_event_identity(e) for e in events]
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def parse_analyzed_events(stored: str | None) -> set[str]:
+    """Отпечатки из БД; мусор в колонке читается как «ничего не разобрано»."""
+    if not stored:
+        return set()
+    try:
+        data = json.loads(stored)
+    except (json.JSONDecodeError, TypeError):
+        return set()
+    if not isinstance(data, list):
+        return set()
+    return {str(item) for item in data if isinstance(item, (str, int))}
 
 
 def filter_new_events(
     events: list[dict[str, Any]],
     analyzed_at: str | None,
+    seen: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Return events newer than the last successful analysis watermark."""
+    """События, которых модель ещё не видела.
+
+    Основной критерий — отпечаток: он не зависит от того, удалось ли разобрать
+    дату. По watermark отбираем только когда отпечатков ещё нет (карточка
+    разбиралась до появления колонки analyzed_events).
+    """
+    if seen:
+        return [e for e in events if event_fingerprint(e) not in seen]
     if not analyzed_at:
         return list(events)
     watermark = _parse_iso_datetime(analyzed_at)
@@ -375,6 +411,27 @@ def check_qualification_fields(
         if value in (None, "", "0", 0, False, []):
             missing.append(name)
     return len(missing) == 0, missing
+
+
+def stage_skips_analysis(stage_id: str, profile: FunnelProfile) -> str:
+    """Причина не звать модель по этому этапу, или "" если звать надо.
+
+    Этапы из stages_out_of_qc агентство сняло с контроля качества («у
+    руководства», «вне аудита»), и compute_completeness_verdict возвращает по
+    ним out_of_qc независимо от того, что скажет модель. Значит разбор такой
+    карточки — оплаченный запрос, результат которого заведомо не используется.
+    Этап известен из crm.deal.list, поэтому отсечь можно до сбора таймлайна.
+
+    Этапы БЕЗ требований сюда намеренно не попадают: вердикт у них тоже
+    out_of_qc, но это «правила ещё не написаны», а не «не наше дело», и
+    температура по таким карточкам РОПу всё ещё нужна.
+    """
+    if not stage_id:
+        # Пустой этап — не повод молча пропустить карточку.
+        return ""
+    if stage_id in profile.stages_out_of_qc:
+        return "stage_out_of_qc"
+    return ""
 
 
 def compute_completeness_verdict(
@@ -643,16 +700,76 @@ def build_llm_payload(
         {"key": key, "name": name, "required": required}
         for key, name, required in all_facts_for_stage(profile.key, stage_id)
     ]
+    # Порядок ключей подобран под кэш префикса у провайдера: stage_id и
+    # facts_needed одинаковы для всех карточек одного этапа, поэтому идут
+    # первыми — так закэшированный префикс тянется дальше системного промпта.
+    # На смысл запроса порядок ключей в JSON не влияет.
     payload = {
+        "stage_id": stage_id,
+        "facts_needed": facts_needed,
         "deal_id": _coerce_int(deal.get("ID") or deal.get("id")),
         "title": _clean_str(deal.get("TITLE") or deal.get("title")),
-        "stage_id": stage_id,
         "previous_state": previous_state,
         "new_events": new_events,
         "event_count_total": len(all_events),
-        "facts_needed": facts_needed,
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+USAGE_KEYS = (
+    "input_tokens", "output_tokens", "cached_tokens", "reasoning_tokens",
+)
+
+
+def extract_usage(response: Any) -> dict[str, int]:
+    """Токены одного ответа: {input_tokens, output_tokens, cached_tokens}.
+
+    Провайдеры отдают счётчики по-разному, поэтому читаем и стандартное поле
+    LangChain (usage_metadata), и сырой token_usage из response_metadata.
+    Ничего не нашли — возвращаем нули: телеметрия не повод ронять разбор.
+    """
+    usage = {key: 0 for key in USAGE_KEYS}
+    meta = getattr(response, "usage_metadata", None)
+    if isinstance(meta, dict):
+        usage["input_tokens"] = _coerce_int(meta.get("input_tokens"))
+        usage["output_tokens"] = _coerce_int(meta.get("output_tokens"))
+        details = meta.get("input_token_details")
+        if isinstance(details, dict):
+            usage["cached_tokens"] = _coerce_int(details.get("cache_read"))
+        out_details = meta.get("output_token_details")
+        if isinstance(out_details, dict):
+            usage["reasoning_tokens"] = _coerce_int(out_details.get("reasoning"))
+    raw = getattr(response, "response_metadata", None)
+    if isinstance(raw, dict):
+        token_usage = raw.get("token_usage")
+        if isinstance(token_usage, dict):
+            if not usage["input_tokens"]:
+                usage["input_tokens"] = _coerce_int(token_usage.get("prompt_tokens"))
+            if not usage["output_tokens"]:
+                usage["output_tokens"] = _coerce_int(
+                    token_usage.get("completion_tokens"),
+                )
+            if not usage["cached_tokens"]:
+                # DeepSeek называет это prompt_cache_hit_tokens, OpenAI прячет
+                # в prompt_tokens_details.cached_tokens.
+                details = token_usage.get("prompt_tokens_details")
+                if isinstance(details, dict):
+                    usage["cached_tokens"] = _coerce_int(
+                        details.get("cached_tokens"),
+                    )
+                if not usage["cached_tokens"]:
+                    usage["cached_tokens"] = _coerce_int(
+                        token_usage.get("prompt_cache_hit_tokens"),
+                    )
+            if not usage["reasoning_tokens"]:
+                # Самая дорогая строка тарифа RouterAI — её нужно видеть
+                # отдельно, а не в общей сумме выходных токенов.
+                out_details = token_usage.get("completion_tokens_details")
+                if isinstance(out_details, dict):
+                    usage["reasoning_tokens"] = _coerce_int(
+                        out_details.get("reasoning_tokens"),
+                    )
+    return usage
 
 
 def analyze_with_llm(
@@ -662,6 +779,7 @@ def analyze_with_llm(
     all_events: list[dict[str, Any]],
     llm: LLMClient,
     profile: FunnelProfile = BUYER_PROFILE,
+    usage_sink: dict[str, int] | None = None,
 ) -> dict[str, Any] | None:
     """Call LLM and return normalized client state."""
     human = build_llm_payload(deal, previous_state, new_events, all_events, profile)
@@ -669,6 +787,9 @@ def analyze_with_llm(
         SystemMessage(content=profile.prompt),
         HumanMessage(content=human),
     ])
+    if usage_sink is not None:
+        for key, value in extract_usage(response).items():
+            usage_sink[key] = usage_sink.get(key, 0) + value
     content = _message_content_to_str(getattr(response, "content", response))
     parsed = _parse_state_json(content)
     if not parsed:
@@ -753,6 +874,17 @@ def analyze_deal(
         envelope["reason"] = "invalid_deal_id"
         return envelope
 
+    # Этап приходит из crm.deal.list, до сбора таймлайна и до модели. Если по
+    # нему вердикт всё равно out_of_qc — не платим за разбор.
+    early_skip = stage_skips_analysis(
+        _clean_str(deal.get("STAGE_ID") or deal.get("stage_id")), profile,
+    )
+    if early_skip and not force:
+        envelope["skipped"] = True
+        envelope["reason"] = early_skip
+        envelope["verdict"] = "out_of_qc"
+        return envelope
+
     if prepared:
         record = deal
     else:
@@ -789,16 +921,40 @@ def analyze_deal(
 
     previous_state = None
     analyzed_at = None
+    seen_fingerprints: set[str] = set()
     if stored:
         try:
             previous_state = json.loads(stored.get("state_json") or "{}")
         except json.JSONDecodeError:
             previous_state = None
         analyzed_at = str(stored.get("analyzed_at") or "")
+        seen_fingerprints = parse_analyzed_events(stored.get("analyzed_events"))
 
-    new_events = filter_new_events(events, analyzed_at)
+    new_events = filter_new_events(events, analyzed_at, seen_fingerprints)
     if previous_state is None:
         new_events = events
+    elif not new_events:
+        # Хэш карточки поменялся, а новых событий нет — значит событие удалили
+        # из таймлайна. Спрашивать модель не о чем: прошлое состояние остаётся
+        # верным. Перезаписываем хэш, чтобы следующий прогон не пришёл сюда же.
+        envelope["skipped"] = True
+        envelope["reason"] = "no_new_events"
+        envelope["state"] = unmask_state(previous_state, mask_map, profile)
+        if not settings.dry_run:
+            init_db()
+            save_client_state(
+                deal_id=deal_id,
+                state_json=json.dumps(previous_state, ensure_ascii=False),
+                confidence=float(previous_state.get("confidence") or 0.0),
+                content_hash=content_hash,
+                analyzed_at=str(stored.get("analyzed_at") or "") if stored else "",
+                model=str(stored.get("model") or "") if stored else "",
+                analyzed_events=json.dumps(
+                    sorted({event_fingerprint(e) for e in events}),
+                    ensure_ascii=False,
+                ),
+            )
+        return envelope
     new_events, dropped = trim_events_to_budget(
         new_events, int(settings.client_state_max_event_chars),
     )
@@ -810,9 +966,12 @@ def analyze_deal(
         )
 
     model = llm or make_llm(settings)
+    usage: dict[str, int] = {key: 0 for key in USAGE_KEYS}
+    envelope["usage"] = usage
     try:
         state = analyze_with_llm(
             record, previous_state, new_events, events, model, profile,
+            usage_sink=usage,
         )
     except Exception as exc:  # noqa: BLE001 — one card must not abort the batch
         logger.warning("Client state LLM failed for deal %s: %s", deal_id, exc)
@@ -927,6 +1086,13 @@ def analyze_deal(
             content_hash=content_hash,
             analyzed_at=now_iso,
             model=settings.llm_model,
+            # Отпечатки всех событий карточки, а не только отправленных: то,
+            # что не влезло в бюджет, уже не попадёт в модель — но и повторно
+            # платить за него на каждом прогоне незачем.
+            analyzed_events=json.dumps(
+                sorted({event_fingerprint(e) for e in events}),
+                ensure_ascii=False,
+            ),
         )
     else:
         logger.info(
@@ -977,6 +1143,7 @@ def run_client_state(
         "analyzed": 0,
         "skipped_unchanged": 0,
         "skipped_incomplete": 0,
+        "skipped_out_of_qc": 0,
         "skipped_other": 0,
         "errors": 0,
         "unrecoverable": 0,
@@ -985,6 +1152,10 @@ def run_client_state(
         "contradictions_minor": 0,
         "contradictions_material": 0,
         "contradictions_dropped": 0,
+        "usage": {key: 0 for key in USAGE_KEYS},
+        "llm_calls": 0,
+        "cost_rub": 0.0,
+        "cost_rub_per_card": 0.0,
         "temperature": {"hot": 0, "warm": 0, "cold": 0, "unknown": 0},
         "verdicts": {
             "good": 0, "tolerable": 0, "poor": 0,
@@ -1011,12 +1182,24 @@ def run_client_state(
                 "content_hash": "",
             }
         stats["results"].append(result)
+        # Токены считаем и по упавшим карточкам: запрос к модели уже оплачен,
+        # даже если ответ не разобрался.
+        call_usage = result.get("usage")
+        if isinstance(call_usage, dict):
+            stats["llm_calls"] += 1
+            for key in USAGE_KEYS:
+                stats["usage"][key] += int(call_usage.get(key) or 0)
         reason = result.get("reason") or ""
         if result.get("skipped"):
             if reason == "unchanged":
                 stats["skipped_unchanged"] += 1
             elif reason == "evidence_incomplete":
                 stats["skipped_incomplete"] += 1
+            elif reason == "no_new_events":
+                stats["skipped_unchanged"] += 1
+            elif reason == "stage_out_of_qc":
+                stats["skipped_out_of_qc"] += 1
+                stats["verdicts"]["out_of_qc"] += 1
             elif reason in {
                 "llm_error", "parse_error", "collect_error", "unexpected_error",
             }:
@@ -1048,6 +1231,31 @@ def run_client_state(
             stats["verdicts"][verdict] += 1
         if state.get("recoverable") is False:
             stats["unrecoverable"] += 1
+    usage = stats["usage"]
+    # Делим неокруглённую сумму: цена за карточку — это копейки, и округление
+    # до рублей перед делением её заметно искажает.
+    cost = estimate_cost(usage, settings)
+    stats["cost_rub"] = round(cost, 2)
+    stats["cost_rub_per_card"] = (
+        round(cost / stats["llm_calls"], 4) if stats["llm_calls"] else 0.0
+    )
+    logger.info(
+        "Client state [%s]: %d cards, %d LLM calls, %.2f ₽ (%.3f ₽/card) · "
+        "in %d (%d from cache, %.0f%%) · out %d (%d reasoning, %.0f%%)",
+        profile.key,
+        stats["total"],
+        stats["llm_calls"],
+        stats["cost_rub"],
+        stats["cost_rub_per_card"],
+        usage["input_tokens"],
+        usage["cached_tokens"],
+        100.0 * usage["cached_tokens"] / usage["input_tokens"]
+        if usage["input_tokens"] else 0.0,
+        usage["output_tokens"],
+        usage["reasoning_tokens"],
+        100.0 * usage["reasoning_tokens"] / usage["output_tokens"]
+        if usage["output_tokens"] else 0.0,
+    )
     return stats
 
 

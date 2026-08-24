@@ -40,6 +40,33 @@ class Settings(BaseSettings):
         default="google/gemini-3.7-flash",
         validation_alias=AliasChoices("LLM_MODEL", "DEEPSEEK_MODEL"),
     )
+    # Потолок ответа. Наш ответ — JSON фиксированной схемы, ему хватает пары
+    # тысяч токенов; лимит стоит не ради экономии на норме, а чтобы сорвавшаяся
+    # генерация не выставила счёт на сотню тысяч токенов. 0 — не ограничивать.
+    llm_max_tokens: int = Field(
+        default=16_000,
+        validation_alias="LLM_MAX_TOKENS",
+    )
+    # Бюджет «размышлений» у моделей, которые их поддерживают. У RouterAI это
+    # отдельная и самая дорогая строка тарифа, а наша задача — извлечение
+    # фактов по схеме, а не рассуждение. Пусто — оставить дефолт провайдера.
+    llm_reasoning_effort: str = Field(
+        default="",
+        validation_alias="LLM_REASONING_EFFORT",
+    )
+    # Тариф RouterAI (₽ за 1М токенов) на 2026-08. Нужен, чтобы прогон писал
+    # в лог не абстрактные токены, а рубли. Меняется у провайдера — правится
+    # здесь, без правки кода.
+    llm_price_input: float = Field(default=40.0, validation_alias="LLM_PRICE_INPUT")
+    llm_price_output: float = Field(
+        default=202.0, validation_alias="LLM_PRICE_OUTPUT",
+    )
+    # Размышления тарифицируются по цене выхода и уже входят в output_tokens,
+    # поэтому отдельной строкой в расчёт не идут — но считаются отдельно,
+    # чтобы было видно, какая доля выхода уходит в них.
+    llm_price_cache_read: float = Field(
+        default=4.04, validation_alias="LLM_PRICE_CACHE_READ",
+    )
     llm_v3_model: str = Field(
         default="google/gemini-3.7-flash",
         validation_alias=AliasChoices("LLM_V3_MODEL", "DEEPSEEK_V3_MODEL"),
