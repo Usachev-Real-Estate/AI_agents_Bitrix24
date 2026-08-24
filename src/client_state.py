@@ -353,6 +353,29 @@ def grace_period_for(profile: FunnelProfile, stage_id: str) -> int:
     return int(profile.grace_hours.get("_default", 24))
 
 
+def check_qualification_fields(
+    deal: dict[str, Any],
+    profile: FunnelProfile,
+) -> tuple[bool | None, list[str]]:
+    """Прямая проверка UF-полей карточки (без LLM).
+
+    Возвращает (все_заполнены?, список_пустых). None — проверка не настроена
+    (в профиле пустой qualification_fields), и вердикт её не применяет.
+
+    Значение считается заполненным, если поле не пустое, не False, не None
+    и не строка вида ""/"0". UF Битрикса бывают строкой, числом, списком —
+    все три случая покрываем как пустоту если "содержательного" ничего нет.
+    """
+    if not profile.qualification_fields:
+        return None, []
+    missing: list[str] = []
+    for code, name in profile.qualification_fields:
+        value = deal.get(code)
+        if value in (None, "", "0", 0, False, []):
+            missing.append(name)
+    return len(missing) == 0, missing
+
+
 def compute_completeness_verdict(
     stage_id: str,
     state: dict[str, Any],
@@ -867,8 +890,23 @@ def analyze_deal(
 
     stage_id = _clean_str(record.get("STAGE_ID") or record.get("stage_id"))
     hours_on_stage = _stage_hours(record, datetime.now(timezone.utc))
+
+    # Прямая проверка полей квалификации — только на этапе, для которого
+    # она настроена. Иначе qualification_ok=None, вердикт её не учитывает.
+    qualification_ok: bool | None = None
+    if stage_id == profile.qualification_stage:
+        qualification_ok, missing_fields = check_qualification_fields(record, profile)
+        envelope["qualification_missing"] = missing_fields
+        if missing_fields:
+            logger.info(
+                "Deal %s: unfilled qualification fields: %s",
+                deal_id, ", ".join(missing_fields),
+            )
+
     verdict, verdict_reason = compute_completeness_verdict(
-        stage_id, state, profile, hours_on_stage=hours_on_stage,
+        stage_id, state, profile,
+        hours_on_stage=hours_on_stage,
+        qualification_ok=qualification_ok,
     )
     state["verdict"] = verdict
     state["verdict_reason"] = verdict_reason
@@ -922,7 +960,11 @@ def run_client_state(
                     "CATEGORY_ID": category_id,
                     "CLOSED": "N",
                 },
-                "select": ["ID", "TITLE", "STAGE_ID", "ASSIGNED_BY_ID", "CONTACT_ID"],
+                "select": [
+                    "ID", "TITLE", "STAGE_ID", "ASSIGNED_BY_ID", "CONTACT_ID",
+                    # UF-поля, которые нужны прямой проверке качества
+                    *[code for code, _name in profile.qualification_fields],
+                ],
             },
         )
         deals = [d for d in _as_list(raw) if isinstance(d, dict)]

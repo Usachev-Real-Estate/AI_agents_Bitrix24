@@ -212,3 +212,81 @@ def test_stage_facts_are_normalized_from_llm_output():
 def test_stage_facts_empty_by_default():
     state = _normalize_state({}, BUYER_PROFILE)
     assert state["stage_facts"] == {}
+
+
+# ── Прямая проверка UF-полей карточки ──────────────────────────────────
+def _facts_all_present():
+    """Все обязательные для Подбора факты присутствуют."""
+    return _facts("property_type", "budget", "district", "timeline", "next_step")
+
+
+def test_qualification_fields_all_filled_returns_ok():
+    from client_state import check_qualification_fields
+    deal = {
+        "UF_CRM_1774363333518": "до 25 млн",
+        "UF_CRM_1774364869184": "Хамовники",
+        "UF_CRM_1747291787883": "квартира",
+    }
+    ok, missing = check_qualification_fields(deal, BUYER_PROFILE)
+    assert ok is True and missing == []
+
+
+def test_qualification_fields_missing_ones_listed_in_russian():
+    from client_state import check_qualification_fields
+    deal = {"UF_CRM_1774363333518": "до 25 млн"}  # район и тип пустые
+    ok, missing = check_qualification_fields(deal, BUYER_PROFILE)
+    assert ok is False
+    assert "район/локация" in missing and "тип недвижимости" in missing
+
+
+def test_qualification_treats_empty_string_and_zero_as_unfilled():
+    from client_state import check_qualification_fields
+    deal = {
+        "UF_CRM_1774363333518": "",
+        "UF_CRM_1774364869184": "0",
+        "UF_CRM_1747291787883": None,
+    }
+    ok, missing = check_qualification_fields(deal, BUYER_PROFILE)
+    assert ok is False and len(missing) == 3
+
+
+def test_qualification_returns_none_when_not_configured():
+    """У продавцов проверка полей не настроена — вердикт её не учитывает."""
+    from client_state import check_qualification_fields
+    ok, missing = check_qualification_fields({}, SELLER_PROFILE)
+    assert ok is None and missing == []
+
+
+def test_verdict_uses_qualification_gap_to_downgrade_to_poor():
+    """Один недостающий факт + пустые поля карточки → poor, а не tolerable."""
+    state = _state(stage_facts=_facts(
+        "property_type", "budget", "district", "timeline",  # next_step отсутствует
+    ))
+    level, why = compute_completeness_verdict(
+        "C18:NEW", state, BUYER_PROFILE,
+        hours_on_stage=100,
+        qualification_ok=False,
+    )
+    assert level == "poor"
+    assert "поля карточки" in why
+
+
+def test_verdict_tolerable_when_facts_ok_but_qualification_missing():
+    """Все LLM-факты есть, но поля Битрикса не заполнены → терпимо."""
+    state = _state(stage_facts=_facts_all_present())
+    level, _ = compute_completeness_verdict(
+        "C18:NEW", state, BUYER_PROFILE,
+        hours_on_stage=100,
+        qualification_ok=False,
+    )
+    assert level == "tolerable"
+
+
+def test_verdict_good_when_facts_and_qualification_ok():
+    state = _state(stage_facts=_facts_all_present())
+    level, _ = compute_completeness_verdict(
+        "C18:NEW", state, BUYER_PROFILE,
+        hours_on_stage=100,
+        qualification_ok=True,
+    )
+    assert level == "good"
