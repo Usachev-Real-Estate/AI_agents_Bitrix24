@@ -68,7 +68,7 @@ def test_default_order_takes_the_cards_that_can_be_judged(pilot, monkeypatch):
         {"ID": "20", "DATE_CREATE": "2026-07-01T10:00:00+00:00"},   # давно
         {"ID": "25", "DATE_CREATE": "2026-08-01T10:00:00+00:00"},   # три недели
     ])
-    picked = pilot.pick_deals(SELLER_PROFILE, 0, 2)
+    picked = pilot.pick_deals(SELLER_PROFILE, 0, 2, "judgeable")
     assert [d["ID"] for d in picked] == ["20", "25"]
 
 
@@ -80,7 +80,7 @@ def test_cards_of_unknown_age_go_last(pilot, monkeypatch):
         {"ID": "30"},
         {"ID": "20", "DATE_CREATE": "2026-07-01T10:00:00+00:00"},
     ])
-    picked = pilot.pick_deals(SELLER_PROFILE, 0, 2)
+    picked = pilot.pick_deals(SELLER_PROFILE, 0, 2, "judgeable")
     assert [d["ID"] for d in picked] == ["20", "30"]
 
 
@@ -143,3 +143,48 @@ def test_report_shows_a_cached_card_instead_of_a_skip_line(pilot):
     )
     assert "Цель: Покупка" in report
     assert "без изменений с прошлого разбора" in report
+
+
+def test_judgeable_order_excludes_stages_qc_will_not_judge(pilot, monkeypatch):
+    """Дольше всего стоят «Переговоры» и «Поиск клиента» — оба вне QC.
+
+    Без фильтра выборка набивается ими целиком и прогон не разбирает
+    ни одной карточки.
+    """
+    from funnel_profiles import SELLER_PROFILE
+
+    monkeypatch.setattr(pilot, "_bx_get_all_sync", lambda m, p: [
+        # Стоят дольше всех, но сняты с контроля качества.
+        {"ID": "1", "STAGE_ID": "UC_KEOOG8", "DATE_CREATE": "2026-01-01T10:00:00+00:00"},
+        {"ID": "2", "STAGE_ID": "UC_FADPBF", "DATE_CREATE": "2026-01-02T10:00:00+00:00"},
+        # А эта — та, ради которой прогон и запускают.
+        {"ID": "3", "STAGE_ID": "NEW", "DATE_CREATE": "2026-05-01T10:00:00+00:00"},
+    ])
+    picked = pilot.pick_deals(SELLER_PROFILE, 0, 10, "judgeable")
+    assert [d["ID"] for d in picked] == ["3"]
+
+
+def test_random_order_is_the_default_and_reproducible(pilot, monkeypatch):
+    """Крайние выборки лгут по-разному; о воронке судят по представительной."""
+    from funnel_profiles import BUYER_PROFILE
+
+    pool = [{"ID": str(i), "STAGE_ID": "C18:NEW"} for i in range(1, 21)]
+    monkeypatch.setattr(pilot, "_bx_get_all_sync", lambda m, p: list(pool))
+
+    first = [d["ID"] for d in pilot.pick_deals(BUYER_PROFILE, 18, 5)]
+    second = [d["ID"] for d in pilot.pick_deals(BUYER_PROFILE, 18, 5, "random")]
+    assert first == second, "тот же состав воронки — та же выборка"
+    assert len(first) == 5
+    assert set(first) <= {d["ID"] for d in pool}
+    # Не просто первые пять по порядку — иначе это не случайная выборка.
+    assert first != ["1", "2", "3", "4", "5"]
+
+
+def test_random_order_keeps_stages_that_judgeable_would_drop(pilot, monkeypatch):
+    """Представительная выборка показывает воронку целиком, включая вне-QC."""
+    from funnel_profiles import SELLER_PROFILE
+
+    pool = [{"ID": str(i), "STAGE_ID": "UC_KEOOG8"} for i in range(1, 6)]
+    monkeypatch.setattr(pilot, "_bx_get_all_sync", lambda m, p: list(pool))
+    assert len(pilot.pick_deals(SELLER_PROFILE, 0, 5, "random")) == 5
+    assert pilot.pick_deals(SELLER_PROFILE, 0, 5, "judgeable") == []
