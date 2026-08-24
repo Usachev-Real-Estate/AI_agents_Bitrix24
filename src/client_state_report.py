@@ -228,6 +228,16 @@ def format_summary(stats: dict[str, Any]) -> str:
     if skipped:
         parts.append("Не разбиралось моделью: " + ", ".join(skipped))
 
+    # Если возраст этапа неизвестен, отсрочка не применяется и вердикты
+    # смещены в сторону «плохо». Молчать об этом нельзя: РОП примет завышенную
+    # строгость за реальное качество работы брокеров.
+    unknown_age = int(stats.get("stage_age_unknown") or 0)
+    if unknown_age:
+        parts.append(
+            f"❗ У {unknown_age} карточек неизвестен возраст этапа — "
+            "отсрочка не применялась, оценка строже реальной",
+        )
+
     parts.append(
         f"💰 Стоимость: {float(stats.get('cost_rub') or 0.0):.2f} ₽ "
         f"({float(stats.get('cost_rub_per_card') or 0.0):.3f} ₽ за карточку)",

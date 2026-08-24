@@ -1061,3 +1061,57 @@ def test_force_actually_re_reads_a_card_with_no_new_events(tmp_path, monkeypatch
     assert forced["skipped"] is False
     assert forced["reason"] == ""
     assert sent == [1, 1], "модель должна получить все события карточки заново"
+
+
+# ── Возраст этапа: без него отсрочка недостижима ───────────────────────
+def test_stage_age_read_from_the_fields_bitrix_actually_returns():
+    """stage_entered_at ставит основной аудит; QC-агент его не получает."""
+    from datetime import datetime, timezone
+
+    from client_state import _stage_hours
+
+    now = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
+    assert _stage_hours({"DATE_CREATE": "2026-08-24T10:00:00+00:00"}, now) == 2.0
+    assert _stage_hours({"MOVED_TIME": "2026-08-24T09:00:00+00:00"}, now) == 3.0
+    # Точность важнее: история стадий бьёт MOVED_TIME, тот бьёт дату создания.
+    mixed = {
+        "stage_entered_at": "2026-08-24T11:00:00+00:00",
+        "MOVED_TIME": "2026-08-24T09:00:00+00:00",
+        "DATE_CREATE": "2026-08-01T09:00:00+00:00",
+    }
+    assert _stage_hours(mixed, now) == 1.0
+    assert _stage_hours({"ID": 1}, now) is None
+
+
+def test_deal_selection_asks_for_the_stage_age_fields(monkeypatch):
+    """Без них too_early недостижим — карточки судятся как застоявшиеся."""
+    import client_state as cs
+
+    captured: dict[str, Any] = {}
+
+    def _fake(method, params):
+        captured.update(params)
+        return []
+
+    monkeypatch.setattr(cs, "_bx_get_all_sync", _fake)
+    cs.run_client_state(cs.BUYER_PROFILE)
+    for field in cs.STAGE_ENTRY_SELECT:
+        assert field in captured["select"], f"{field} не запрошен"
+
+
+def test_run_counts_cards_judged_without_a_known_stage_age(monkeypatch):
+    import client_state as cs
+
+    def _fake(deal, **kwargs):
+        return {
+            "deal_id": int(deal["ID"]), "skipped": False, "reason": "",
+            "state": {"temperature": "warm", "verdict": "poor"},
+            "content_hash": "x",
+            "stage_age_known": int(deal["ID"]) == 1,
+        }
+
+    monkeypatch.setattr(cs, "analyze_deal", _fake)
+    stats = cs.run_client_state(cs.BUYER_PROFILE, [
+        {"ID": 1, "STAGE_ID": "C18:NEW"}, {"ID": 2, "STAGE_ID": "C18:NEW"},
+    ])
+    assert stats["stage_age_unknown"] == 1

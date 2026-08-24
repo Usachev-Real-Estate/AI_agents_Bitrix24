@@ -372,15 +372,32 @@ def verify_contradictions(
 VALID_VERDICTS = frozenset({"good", "tolerable", "poor", "too_early", "out_of_qc"})
 
 
+# Откуда берём момент входа на этап, в порядке точности. stage_entered_at
+# ставит основной аудит из crm.stagehistory.list; MOVED_TIME отдаёт сам
+# crm.deal.list; DATE_CREATE — последний рубеж, он верен для карточки, которая
+# с создания никуда не двигалась (а это как раз свежий лид с Циан).
+STAGE_ENTRY_FIELDS = ("stage_entered_at", "MOVED_TIME", "DATE_CREATE")
+# Те же поля, что можно запросить у crm.deal.list (stage_entered_at ставит
+# основной аудит из истории стадий, у Битрикса такого поля нет).
+STAGE_ENTRY_SELECT = ("MOVED_TIME", "DATE_CREATE")
+
+
 def _stage_hours(deal: dict[str, Any], now: datetime) -> float | None:
-    """Часы с момента входа на текущий этап."""
+    """Часы с момента входа на текущий этап, или None если момент неизвестен.
+
+    None означает «отсрочку применить не к чему», и вердикт тогда судит
+    карточку так, будто она уже старая. Поэтому важно, чтобы хотя бы одно из
+    полей доезжало из Битрикса: без них too_early недостижим в принципе.
+    """
     from tools import _parse_datetime
-    entered = _parse_datetime(deal.get("stage_entered_at"))
-    if entered is None:
-        return None
-    if entered.tzinfo is None:
-        entered = entered.replace(tzinfo=timezone.utc)
-    return max(0.0, (now - entered).total_seconds() / 3600.0)
+    for field in STAGE_ENTRY_FIELDS:
+        entered = _parse_datetime(deal.get(field))
+        if entered is None:
+            continue
+        if entered.tzinfo is None:
+            entered = entered.replace(tzinfo=timezone.utc)
+        return max(0.0, (now - entered).total_seconds() / 3600.0)
+    return None
 
 
 def grace_period_for(profile: FunnelProfile, stage_id: str) -> int:
@@ -450,15 +467,13 @@ def compute_completeness_verdict(
       проверка настроена);
     * tolerable — есть только minor расхождения ИЛИ не хватает одного факта,
       при этом основные поля квалификации заполнены;
-    * poor — recoverable=false, ИЛИ есть material расхождение, ИЛИ не хватает
-      двух и более обязательных фактов после отсрочки;
-    * too_early — этап моложе отсрочки.
+    * poor — есть material расхождение, ИЛИ (после отсрочки) recoverable=false
+      либо не хватает двух и более обязательных фактов;
+    * too_early — этап моложе отсрочки. Проверяется раньше, чем пустота
+      карточки: свежий лид пуст не по вине брокера.
     """
     if stage_id in profile.stages_out_of_qc:
         return "out_of_qc", "этап не в контроле качества (у руководства)"
-
-    if not state.get("recoverable", True):
-        return "poor", "по карточке нельзя восстановить картину клиента"
 
     contradictions = state.get("contradictions") or []
     material = [
@@ -481,11 +496,19 @@ def compute_completeness_verdict(
         # Этап не покрыт правилами — не судим.
         return "out_of_qc", "для этапа не заданы требования"
 
+    # Отсрочка проверяется РАНЬШЕ, чем «карточка неинформативна». Лид, который
+    # пришёл час назад, пуст по определению — брокер ещё не звонил. Пометить
+    # такую карточку «плохо» значит обвинить брокера в том, чего он не успел.
+    # Расхождение с разговором остаётся выше отсрочки: это про достоверность
+    # написанного, а не про то, сколько времени прошло.
     grace = grace_period_for(profile, stage_id)
     if hours_on_stage is not None and hours_on_stage < grace:
         return "too_early", (
             f"этап моложе отсрочки ({hours_on_stage:.0f} ч < {grace} ч)"
         )
+
+    if not state.get("recoverable", True):
+        return "poor", "по карточке нельзя восстановить картину клиента"
 
     stage_facts = state.get("stage_facts") or {}
     missing = [
@@ -1059,6 +1082,12 @@ def analyze_deal(
 
     stage_id = _clean_str(record.get("STAGE_ID") or record.get("stage_id"))
     hours_on_stage = _stage_hours(record, datetime.now(timezone.utc))
+    envelope["stage_age_known"] = hours_on_stage is not None
+    if hours_on_stage is None:
+        logger.info(
+            "Deal %s: момент входа на этап неизвестен — отсрочка не применяется",
+            deal_id,
+        )
 
     # Прямая проверка полей квалификации — только на этапе, для которого
     # она настроена. Иначе qualification_ok=None, вердикт её не учитывает.
@@ -1138,6 +1167,9 @@ def run_client_state(
                 },
                 "select": [
                     "ID", "TITLE", "STAGE_ID", "ASSIGNED_BY_ID", "CONTACT_ID",
+                    # Без них _stage_hours возвращает None, отсрочка не
+                    # применяется, и свежая карточка судится как застоявшаяся.
+                    *STAGE_ENTRY_SELECT,
                     # UF-поля, которые нужны прямой проверке качества
                     *[code for code, _name in profile.qualification_fields],
                 ],
@@ -1165,6 +1197,9 @@ def run_client_state(
         "llm_calls": 0,
         "cost_rub": 0.0,
         "cost_rub_per_card": 0.0,
+        # Сколько карточек судилось без известного возраста этапа. Больше
+        # нуля — отсрочка не работает и вердикты завышены в сторону «плохо».
+        "stage_age_unknown": 0,
         "temperature": {"hot": 0, "warm": 0, "cold": 0, "unknown": 0},
         "verdicts": {
             "good": 0, "tolerable": 0, "poor": 0,
@@ -1230,6 +1265,8 @@ def run_client_state(
                     stats["unrecoverable"] += 1
             continue
         stats["analyzed"] += 1
+        if result.get("stage_age_known") is False:
+            stats["stage_age_unknown"] += 1
         stats["evidence_dropped"] += int(result.get("evidence_dropped") or 0)
         stats["contradictions_dropped"] += int(
             result.get("contradictions_dropped") or 0,

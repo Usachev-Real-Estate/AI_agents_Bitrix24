@@ -19,7 +19,7 @@ _SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from client_state import run_client_state  # noqa: E402
+from client_state import STAGE_ENTRY_SELECT, run_client_state  # noqa: E402
 from client_state_report import format_card, format_summary  # noqa: E402
 from config import get_settings, setup_logging  # noqa: E402
 from db import init_db  # noqa: E402
@@ -36,6 +36,7 @@ def pick_deals(profile: FunnelProfile, category_id: int, limit: int) -> list[dic
 
     UF-поля квалификации запрашиваются наравне с остальными: без них прямая
     проверка бюджета и района не видит данных и объявляет поля незаполненными.
+    Поля даты нужны отсрочке: без них свежий лид судится как застоявшийся.
     """
     raw = _bx_get_all_sync(
         "crm.deal.list",
@@ -43,6 +44,7 @@ def pick_deals(profile: FunnelProfile, category_id: int, limit: int) -> list[dic
             "filter": {"CATEGORY_ID": category_id, "CLOSED": "N"},
             "select": [
                 "ID", "TITLE", "STAGE_ID", "ASSIGNED_BY_ID", "CONTACT_ID",
+                *STAGE_ENTRY_SELECT,
                 *[code for code, _name in profile.qualification_fields],
             ],
         },

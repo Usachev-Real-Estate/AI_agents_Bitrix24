@@ -309,3 +309,40 @@ def test_verdict_reason_never_leaks_service_keys():
             for key, name in requirements:
                 assert key not in why, f"{stage}: ключ {key!r} попал в отчёт"
             assert any(name in why for _key, name in requirements), stage
+
+
+# ── Отсрочка: свежая карточка пуста не по вине брокера ─────────────────
+def test_fresh_empty_card_is_too_early_not_poor():
+    """Лид пришёл час назад — он пуст по определению, брокер ещё не звонил."""
+    level, why = compute_completeness_verdict(
+        "C18:NEW", _state(recoverable=False), BUYER_PROFILE, hours_on_stage=1,
+    )
+    assert level == "too_early", why
+
+
+def test_stale_empty_card_is_still_poor():
+    """После отсрочки пустая карточка — это уже претензия."""
+    level, _ = compute_completeness_verdict(
+        "C18:NEW", _state(recoverable=False), BUYER_PROFILE, hours_on_stage=100,
+    )
+    assert level == "poor"
+
+
+def test_contradiction_outranks_the_grace_period():
+    """Расхождение с разговором — про достоверность, а не про срок."""
+    state = _state(contradictions=[{
+        "what": "бюджет", "in_card": "до 30 млн", "in_call": "максимум 20 млн",
+        "severity": "high",
+    }])
+    level, _ = compute_completeness_verdict(
+        "C18:NEW", state, BUYER_PROFILE, hours_on_stage=1,
+    )
+    assert level == "poor"
+
+
+def test_unknown_stage_age_does_not_grant_an_endless_grace():
+    """Неизвестен возраст — судим как старую: иначе отсрочка станет лазейкой."""
+    level, _ = compute_completeness_verdict(
+        "C18:NEW", _state(recoverable=False), BUYER_PROFILE, hours_on_stage=None,
+    )
+    assert level == "poor"
