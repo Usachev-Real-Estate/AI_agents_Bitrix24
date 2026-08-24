@@ -24,3 +24,24 @@ def make_llm(settings: Settings) -> ChatOpenAI:
     if settings.llm_reasoning_effort:
         kwargs["reasoning_effort"] = settings.llm_reasoning_effort
     return ChatOpenAI(**kwargs)
+
+
+def estimate_cost(usage: dict[str, int], settings: Settings) -> float:
+    """Стоимость прогона в рублях по тарифу из настроек.
+
+    Закэшированный вход считается по своей — вдесятеро меньшей — цене.
+    Токены размышлений уже входят в output_tokens и тарифицируются по цене
+    выхода, поэтому отдельного слагаемого для них нет.
+    """
+    per_million = 1_000_000.0
+    cached = max(0, int(usage.get("cached_tokens") or 0))
+    total_input = max(0, int(usage.get("input_tokens") or 0))
+    # cached_tokens приходит от провайдера и в теории может превысить вход;
+    # без max() отрицательный остаток занизил бы счёт.
+    fresh_input = max(0, total_input - cached)
+    output = max(0, int(usage.get("output_tokens") or 0))
+    return (
+        fresh_input * settings.llm_price_input
+        + cached * settings.llm_price_cache_read
+        + output * settings.llm_price_output
+    ) / per_million

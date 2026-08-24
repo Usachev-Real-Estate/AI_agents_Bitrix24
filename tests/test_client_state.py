@@ -857,3 +857,83 @@ def test_llm_limits_are_passed_only_when_configured(monkeypatch):
     llm_mod.make_llm(settings)
     assert "max_tokens" not in captured
     assert captured["reasoning_effort"] == "low"
+
+
+# ── Стоимость прогона в рублях ─────────────────────────────────────────
+def test_cost_uses_the_cheap_rate_for_cached_input():
+    from config import get_settings
+    from llm import estimate_cost
+
+    settings = get_settings()
+    without_cache = estimate_cost(
+        {"input_tokens": 1_000_000, "output_tokens": 0, "cached_tokens": 0},
+        settings,
+    )
+    fully_cached = estimate_cost(
+        {"input_tokens": 1_000_000, "output_tokens": 0, "cached_tokens": 1_000_000},
+        settings,
+    )
+    assert without_cache == pytest.approx(40.0)
+    assert fully_cached == pytest.approx(4.04)
+
+
+def test_output_is_five_times_the_input_rate():
+    from config import get_settings
+    from llm import estimate_cost
+
+    settings = get_settings()
+    one_million_in = estimate_cost(
+        {"input_tokens": 1_000_000, "output_tokens": 0, "cached_tokens": 0}, settings,
+    )
+    one_million_out = estimate_cost(
+        {"input_tokens": 0, "output_tokens": 1_000_000, "cached_tokens": 0}, settings,
+    )
+    assert one_million_out == pytest.approx(one_million_in * 5.05)
+
+
+def test_cost_survives_a_provider_reporting_more_cache_than_input():
+    from config import get_settings
+    from llm import estimate_cost
+
+    cost = estimate_cost(
+        {"input_tokens": 100, "output_tokens": 0, "cached_tokens": 500},
+        get_settings(),
+    )
+    assert cost > 0, "отрицательный остаток не должен занижать счёт"
+
+
+def test_cost_of_an_empty_run_is_zero():
+    from config import get_settings
+    from llm import estimate_cost
+
+    assert estimate_cost({}, get_settings()) == 0.0
+
+
+def test_run_reports_cost_in_roubles(monkeypatch):
+    import client_state as cs
+
+    def _fake(deal, **kwargs):
+        return {
+            "deal_id": int(deal["ID"]), "skipped": False, "reason": "",
+            "state": {"temperature": "warm", "verdict": "good"},
+            "content_hash": "x",
+            "usage": {
+                "input_tokens": 10_000, "output_tokens": 1_000,
+                "cached_tokens": 1_500, "reasoning_tokens": 400,
+            },
+        }
+
+    monkeypatch.setattr(cs, "analyze_deal", _fake)
+    stats = cs.run_client_state(cs.BUYER_PROFILE, [{"ID": 1, "STAGE_ID": "C18:NEW"}])
+    # 8500 свежих × 40 + 1500 кэша × 4.04 + 1000 выхода × 202, всё на 1М.
+    expected = (8_500 * 40 + 1_500 * 4.04 + 1_000 * 202) / 1_000_000
+    assert stats["cost_rub"] == pytest.approx(round(expected, 2))
+    assert stats["cost_rub_per_card"] == pytest.approx(round(expected, 4))
+
+
+def test_prompts_bound_the_quote_length():
+    """Выход стоит впятеро дороже входа — цитата не должна быть абзацем."""
+    from funnel_profiles import BUYER_PROMPT, SELLER_PROMPT
+
+    for prompt in (BUYER_PROMPT, SELLER_PROMPT):
+        assert "до 300 символов" in prompt

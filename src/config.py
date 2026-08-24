@@ -54,6 +54,19 @@ class Settings(BaseSettings):
         default="",
         validation_alias="LLM_REASONING_EFFORT",
     )
+    # Тариф RouterAI (₽ за 1М токенов) на 2026-08. Нужен, чтобы прогон писал
+    # в лог не абстрактные токены, а рубли. Меняется у провайдера — правится
+    # здесь, без правки кода.
+    llm_price_input: float = Field(default=40.0, validation_alias="LLM_PRICE_INPUT")
+    llm_price_output: float = Field(
+        default=202.0, validation_alias="LLM_PRICE_OUTPUT",
+    )
+    # Размышления тарифицируются по цене выхода и уже входят в output_tokens,
+    # поэтому отдельной строкой в расчёт не идут — но считаются отдельно,
+    # чтобы было видно, какая доля выхода уходит в них.
+    llm_price_cache_read: float = Field(
+        default=4.04, validation_alias="LLM_PRICE_CACHE_READ",
+    )
     llm_v3_model: str = Field(
         default="google/gemini-3.7-flash",
         validation_alias=AliasChoices("LLM_V3_MODEL", "DEEPSEEK_V3_MODEL"),

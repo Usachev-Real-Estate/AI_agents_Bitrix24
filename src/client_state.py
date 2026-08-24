@@ -15,7 +15,7 @@ from config import Settings, get_settings
 from db import get_client_state, init_db, save_client_state
 from lead_quality_audit import _message_content_to_str
 from funnel_profiles import BUYER_PROFILE, SELLER_PROFILE, FunnelProfile
-from llm import make_llm
+from llm import estimate_cost, make_llm
 from masking import MaskMap, apply_mask, build_mask_map, unmask
 from tools import (
     _as_list,
@@ -1154,6 +1154,8 @@ def run_client_state(
         "contradictions_dropped": 0,
         "usage": {key: 0 for key in USAGE_KEYS},
         "llm_calls": 0,
+        "cost_rub": 0.0,
+        "cost_rub_per_card": 0.0,
         "temperature": {"hot": 0, "warm": 0, "cold": 0, "unknown": 0},
         "verdicts": {
             "good": 0, "tolerable": 0, "poor": 0,
@@ -1229,21 +1231,30 @@ def run_client_state(
             stats["verdicts"][verdict] += 1
         if state.get("recoverable") is False:
             stats["unrecoverable"] += 1
+    usage = stats["usage"]
+    # Делим неокруглённую сумму: цена за карточку — это копейки, и округление
+    # до рублей перед делением её заметно искажает.
+    cost = estimate_cost(usage, settings)
+    stats["cost_rub"] = round(cost, 2)
+    stats["cost_rub_per_card"] = (
+        round(cost / stats["llm_calls"], 4) if stats["llm_calls"] else 0.0
+    )
     logger.info(
-        "Client state [%s]: %d cards, %d LLM calls, "
-        "%d in / %d out tokens, %d from cache (%.0f%% of input), "
-        "%d reasoning (%.0f%% of output)",
+        "Client state [%s]: %d cards, %d LLM calls, %.2f ₽ (%.3f ₽/card) · "
+        "in %d (%d from cache, %.0f%%) · out %d (%d reasoning, %.0f%%)",
         profile.key,
         stats["total"],
         stats["llm_calls"],
-        stats["usage"]["input_tokens"],
-        stats["usage"]["output_tokens"],
-        stats["usage"]["cached_tokens"],
-        100.0 * stats["usage"]["cached_tokens"] / stats["usage"]["input_tokens"]
-        if stats["usage"]["input_tokens"] else 0.0,
-        stats["usage"]["reasoning_tokens"],
-        100.0 * stats["usage"]["reasoning_tokens"] / stats["usage"]["output_tokens"]
-        if stats["usage"]["output_tokens"] else 0.0,
+        stats["cost_rub"],
+        stats["cost_rub_per_card"],
+        usage["input_tokens"],
+        usage["cached_tokens"],
+        100.0 * usage["cached_tokens"] / usage["input_tokens"]
+        if usage["input_tokens"] else 0.0,
+        usage["output_tokens"],
+        usage["reasoning_tokens"],
+        100.0 * usage["reasoning_tokens"] / usage["output_tokens"]
+        if usage["output_tokens"] else 0.0,
     )
     return stats
 
