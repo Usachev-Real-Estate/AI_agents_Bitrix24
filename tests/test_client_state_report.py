@@ -177,3 +177,31 @@ def test_summary_is_fully_russian():
     assert "1.90 ₽" in summary
     for code in ("warm", "poor", "good", "hot"):
         assert code not in summary
+
+
+def test_summary_separates_empty_cards_from_uninformative_ones():
+    """«Пусто» и «написано, но бессодержательно» — разные претензии к брокеру."""
+    summary = format_summary({
+        "funnel_label": "Продавцы",
+        "total": 10, "analyzed": 10,
+        "temperature": {"hot": 0, "warm": 2, "cold": 0, "unknown": 8},
+        "verdicts": {"good": 0, "tolerable": 0, "poor": 2, "too_early": 6,
+                     "out_of_qc": 2},
+        "unrecoverable": 8, "empty_cards": 5,
+        "cost_rub": 3.08, "cost_rub_per_card": 0.308,
+    })
+    assert "Неинформативных карточек: 8 (из них полностью пустых: 5)" in summary
+
+
+def test_summary_omits_the_empty_note_when_there_are_none():
+    summary = format_summary({
+        "funnel_label": "Покупатели",
+        "total": 1, "analyzed": 1,
+        "temperature": {"hot": 0, "warm": 1, "cold": 0, "unknown": 0},
+        "verdicts": {"good": 1, "tolerable": 0, "poor": 0, "too_early": 0,
+                     "out_of_qc": 0},
+        "unrecoverable": 1, "empty_cards": 0,
+        "cost_rub": 0.5, "cost_rub_per_card": 0.5,
+    })
+    assert "Неинформативных карточек: 1" in summary
+    assert "полностью пустых" not in summary

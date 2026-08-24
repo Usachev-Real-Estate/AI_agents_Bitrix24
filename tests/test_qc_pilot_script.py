@@ -49,14 +49,39 @@ def test_selection_requests_the_qualification_fields(pilot, monkeypatch):
     assert "STAGE_ID" in select, "этап нужен гейту, который экономит на модели"
 
 
-def test_selection_takes_the_newest_deals_first(pilot, monkeypatch):
+def test_newest_order_is_still_available_for_debugging(pilot, monkeypatch):
     from funnel_profiles import SELLER_PROFILE
 
     monkeypatch.setattr(pilot, "_bx_get_all_sync", lambda m, p: [
         {"ID": "10"}, {"ID": "30"}, {"ID": "20"},
     ])
-    picked = pilot.pick_deals(SELLER_PROFILE, 0, 2)
+    picked = pilot.pick_deals(SELLER_PROFILE, 0, 2, "newest")
     assert [d["ID"] for d in picked] == ["30", "20"]
+
+
+def test_default_order_takes_the_cards_that_can_be_judged(pilot, monkeypatch):
+    """«Самые новые» системно набирают карточки моложе отсрочки."""
+    from funnel_profiles import SELLER_PROFILE
+
+    monkeypatch.setattr(pilot, "_bx_get_all_sync", lambda m, p: [
+        {"ID": "30", "DATE_CREATE": "2026-08-24T11:00:00+00:00"},   # час назад
+        {"ID": "20", "DATE_CREATE": "2026-07-01T10:00:00+00:00"},   # давно
+        {"ID": "25", "DATE_CREATE": "2026-08-01T10:00:00+00:00"},   # три недели
+    ])
+    picked = pilot.pick_deals(SELLER_PROFILE, 0, 2)
+    assert [d["ID"] for d in picked] == ["20", "25"]
+
+
+def test_cards_of_unknown_age_go_last(pilot, monkeypatch):
+    """По ним отсрочка не применяется — они дали бы строгость на ровном месте."""
+    from funnel_profiles import SELLER_PROFILE
+
+    monkeypatch.setattr(pilot, "_bx_get_all_sync", lambda m, p: [
+        {"ID": "30"},
+        {"ID": "20", "DATE_CREATE": "2026-07-01T10:00:00+00:00"},
+    ])
+    picked = pilot.pick_deals(SELLER_PROFILE, 0, 2)
+    assert [d["ID"] for d in picked] == ["20", "30"]
 
 
 def _stats(label: str, **over: Any) -> dict[str, Any]:

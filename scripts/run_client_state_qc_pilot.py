@@ -19,7 +19,11 @@ _SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from client_state import STAGE_ENTRY_SELECT, run_client_state  # noqa: E402
+from client_state import (  # noqa: E402
+    STAGE_ENTRY_SELECT,
+    _stage_hours,
+    run_client_state,
+)
 from client_state_report import format_card, format_summary  # noqa: E402
 from config import get_settings, setup_logging  # noqa: E402
 from db import init_db  # noqa: E402
@@ -31,8 +35,20 @@ MSK = ZoneInfo("Europe/Moscow")
 OUT_PATH = Path("data/client_state_qc_pilot.json")
 
 
-def pick_deals(profile: FunnelProfile, category_id: int, limit: int) -> list[dict]:
-    """Свежайшие открытые сделки воронки.
+def pick_deals(
+    profile: FunnelProfile,
+    category_id: int,
+    limit: int,
+    order: str = "judgeable",
+) -> list[dict]:
+    """Открытые сделки воронки.
+
+    order="judgeable" (по умолчанию) — сначала те, что дольше стоят на этапе.
+    Выборка «самые новые» кажется естественной, но она системно набирает
+    карточки моложе отсрочки: контроль качества по ним по определению даёт
+    «рано судить», и прогон ничего не измеряет. Работу брокера видно на
+    карточках, которые уже вышли из льготного окна.
+    order="newest" оставлен для отладки свежих лидов.
 
     UF-поля квалификации запрашиваются наравне с остальными: без них прямая
     проверка бюджета и района не видит данных и объявляет поля незаполненными.
@@ -50,7 +66,16 @@ def pick_deals(profile: FunnelProfile, category_id: int, limit: int) -> list[dic
         },
     )
     deals = [d for d in _as_list(raw) if isinstance(d, dict)]
-    deals.sort(key=lambda d: _coerce_int(d.get("ID")), reverse=True)
+    if order == "newest":
+        deals.sort(key=lambda d: _coerce_int(d.get("ID")), reverse=True)
+        return deals[:limit]
+
+    now = datetime.now(timezone.utc)
+    # Карточки без известного возраста ставим в конец: по ним отсрочка не
+    # применяется, и они дали бы завышенную строгость на ровном месте.
+    deals.sort(
+        key=lambda d: (_stage_hours(d, now) is None, -(_stage_hours(d, now) or 0.0)),
+    )
     return deals[:limit]
 
 
@@ -87,6 +112,11 @@ def main() -> None:
         "--force", action="store_true",
         help="Перечитать карточки моделью, даже если новых событий нет",
     )
+    parser.add_argument(
+        "--order", choices=("judgeable", "newest"), default="judgeable",
+        help="judgeable — дольше всего на этапе (по умолчанию); "
+             "newest — самые новые сделки (отладка свежих лидов)",
+    )
     args = parser.parse_args()
 
     settings = get_settings()
@@ -99,7 +129,7 @@ def main() -> None:
         (BUYER_PROFILE, settings.buyers_category_id),
         (SELLER_PROFILE, settings.sellers_category_id),
     ):
-        deals = pick_deals(profile, category_id, args.limit)
+        deals = pick_deals(profile, category_id, args.limit, args.order)
         titles = {
             _coerce_int(d.get("ID")): _clean_str(d.get("TITLE")) for d in deals
         }

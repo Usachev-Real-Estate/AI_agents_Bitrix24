@@ -666,6 +666,29 @@ def _normalize_state(
     }
 
 
+EMPTY_CARD_NOTE = "в карточке нет ни комментариев, ни дел, ни расшифровок"
+
+
+def empty_card_state(profile: FunnelProfile = BUYER_PROFILE) -> dict[str, Any]:
+    """Состояние карточки, в которой модели нечего читать.
+
+    Ответ здесь предрешён: без единого комментария, дела и расшифровки
+    восстановить картину клиента нельзя, и модель вернёт ровно это же — за
+    деньги. Пустота карточки видна из самих данных, поэтому вывод делаем в
+    коде. Вердикт и температура считаются дальше обычными правилами: пустая
+    карточка на свежем этапе — «рано судить», на застоявшемся — «плохо».
+    """
+    return _normalize_state(
+        {
+            "recoverable": False,
+            "confidence": 0.0,
+            "risk": "medium",
+            "missing": [EMPTY_CARD_NOTE],
+        },
+        profile,
+    )
+
+
 def unmask_state(
     state: dict[str, Any],
     mask_map: MaskMap,
@@ -997,25 +1020,31 @@ def analyze_deal(
             dropped,
         )
 
-    model = llm or make_llm(settings)
-    usage: dict[str, int] = {key: 0 for key in USAGE_KEYS}
-    envelope["usage"] = usage
-    try:
-        state = analyze_with_llm(
-            record, previous_state, new_events, events, model, profile,
-            usage_sink=usage,
-        )
-    except Exception as exc:  # noqa: BLE001 — one card must not abort the batch
-        logger.warning("Client state LLM failed for deal %s: %s", deal_id, exc)
-        envelope["skipped"] = True
-        envelope["reason"] = "llm_error"
-        return envelope
+    if not events:
+        # Читать нечего — ответ модели предрешён, а стоит столько же.
+        logger.info("Deal %s: карточка пуста, разбор не требуется", deal_id)
+        state = empty_card_state(profile)
+        envelope["empty_card"] = True
+    else:
+        model = llm or make_llm(settings)
+        usage: dict[str, int] = {key: 0 for key in USAGE_KEYS}
+        envelope["usage"] = usage
+        try:
+            state = analyze_with_llm(
+                record, previous_state, new_events, events, model, profile,
+                usage_sink=usage,
+            )
+        except Exception as exc:  # noqa: BLE001 — одна карточка не роняет батч
+            logger.warning("Client state LLM failed for deal %s: %s", deal_id, exc)
+            envelope["skipped"] = True
+            envelope["reason"] = "llm_error"
+            return envelope
 
-    if state is None:
-        logger.warning("Client state parse failed for deal %s", deal_id)
-        envelope["skipped"] = True
-        envelope["reason"] = "parse_error"
-        return envelope
+        if state is None:
+            logger.warning("Client state parse failed for deal %s", deal_id)
+            envelope["skipped"] = True
+            envelope["reason"] = "parse_error"
+            return envelope
 
     verified, invented = verify_evidence(state.get("evidence", []), events)
     state["evidence"] = verified
@@ -1025,9 +1054,10 @@ def analyze_deal(
             deal_id,
             len(invented),
         )
-    if not verified:
+    if not verified and events:
         # Ни одной подтверждённой цитаты — доверять такому выводу нельзя,
-        # каким бы уверенным он ни выглядел.
+        # каким бы уверенным он ни выглядел. У пустой карточки цитат нет и
+        # быть не может, и мы уже сказали об этом понятнее.
         state["confidence"] = min(float(state.get("confidence") or 0.0), 0.3)
         if "подтверждённые цитаты" not in state["missing"]:
             state["missing"].append("подтверждённые цитаты")
@@ -1200,6 +1230,8 @@ def run_client_state(
         # Сколько карточек судилось без известного возраста этапа. Больше
         # нуля — отсрочка не работает и вердикты завышены в сторону «плохо».
         "stage_age_unknown": 0,
+        # Пустые карточки: разобраны без модели, потому что читать нечего.
+        "empty_cards": 0,
         "temperature": {"hot": 0, "warm": 0, "cold": 0, "unknown": 0},
         "verdicts": {
             "good": 0, "tolerable": 0, "poor": 0,
@@ -1265,6 +1297,8 @@ def run_client_state(
                     stats["unrecoverable"] += 1
             continue
         stats["analyzed"] += 1
+        if result.get("empty_card"):
+            stats["empty_cards"] += 1
         if result.get("stage_age_known") is False:
             stats["stage_age_unknown"] += 1
         stats["evidence_dropped"] += int(result.get("evidence_dropped") or 0)
