@@ -937,3 +937,181 @@ def test_prompts_bound_the_quote_length():
 
     for prompt in (BUYER_PROMPT, SELLER_PROMPT):
         assert "до 300 символов" in prompt
+
+
+def test_cached_cards_are_counted_in_the_summary(monkeypatch):
+    """Шапка отчёта не должна противоречить телу: кэш тоже имеет температуру."""
+    import client_state as cs
+
+    def _fake(deal, **kwargs):
+        did = int(deal["ID"])
+        if did == 1:
+            return {
+                "deal_id": did, "skipped": False, "reason": "",
+                "state": {"temperature": "warm", "verdict": "poor"},
+                "content_hash": "x",
+            }
+        return {
+            "deal_id": did, "skipped": True, "reason": "no_new_events",
+            "state": {
+                "temperature": "cold", "verdict": "good", "recoverable": False,
+            },
+            "content_hash": "x",
+        }
+
+    monkeypatch.setattr(cs, "analyze_deal", _fake)
+    stats = cs.run_client_state(cs.BUYER_PROFILE, [
+        {"ID": 1, "STAGE_ID": "C18:NEW"},
+        {"ID": 2, "STAGE_ID": "C18:NEW"},
+        {"ID": 3, "STAGE_ID": "C18:NEW"},
+    ])
+    assert stats["analyzed"] == 1, "разобрана моделью только одна"
+    assert stats["skipped_unchanged"] == 2
+    assert stats["temperature"] == {"hot": 0, "warm": 1, "cold": 2, "unknown": 0}
+    assert stats["verdicts"]["poor"] == 1
+    assert stats["verdicts"]["good"] == 2
+    assert stats["unrecoverable"] == 2
+
+
+def test_cached_state_is_unmasked_before_it_reaches_the_report(tmp_path, monkeypatch):
+    """Из БД состояние приходит замаскированным — в отчёт КЛИЕНТ_1 попасть не должен."""
+    import client_state as cs
+    import db
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "violations.db")
+    db.init_db()
+
+    card = {
+        "ID": 601, "TITLE": "Покупка", "STAGE_ID": "C18:NEW",
+        "contacts": [{
+            "ID": 5, "NAME": "Ирина", "LAST_NAME": "Логутина",
+            "PHONE": [{"VALUE": "+7 916 123-45-67"}], "EMAIL": [],
+        }],
+        "activities": [], "transcripts": [], "evidence_incomplete": False,
+        "timeline": [{
+            "author_id": 1, "created": "2026-08-01T10:00:00+03:00",
+            "comment": "Созвонился с Ириной Логутиной, ищет 2к",
+        }],
+    }
+    monkeypatch.setattr(cs, "prepare_deal_record", lambda d, **k: dict(card))
+
+    def _fake_llm(deal, prev, new_events, all_events, model, profile, usage_sink=None):
+        return cs._normalize_state({
+            "client_goal": "2к",
+            "situation": "Созвонился с КЛИЕНТ_1, ищет 2к",
+            "confidence": 0.8,
+        }, profile)
+
+    monkeypatch.setattr(cs, "analyze_with_llm", _fake_llm)
+    monkeypatch.setattr(cs, "make_llm", lambda s: object())
+    settings = cs.get_settings()
+    monkeypatch.setattr(settings, "dry_run", False, raising=False)
+
+    first = cs.analyze_deal(dict(card), profile=cs.BUYER_PROFILE, settings=settings)
+    assert "Ирина" in first["state"]["situation"]
+
+    second = cs.analyze_deal(dict(card), profile=cs.BUYER_PROFILE, settings=settings)
+    assert second["reason"] == "unchanged"
+    assert "КЛИЕНТ_1" not in second["state"]["situation"]
+    assert "Ирина" in second["state"]["situation"]
+
+
+def test_force_actually_re_reads_a_card_with_no_new_events(tmp_path, monkeypatch):
+    """--force должен звать модель, даже когда с прошлого раза ничего не добавилось."""
+    import client_state as cs
+    import db
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "violations.db")
+    db.init_db()
+
+    card = {
+        "ID": 701, "TITLE": "Покупка", "STAGE_ID": "C18:NEW",
+        "contacts": [], "activities": [], "transcripts": [],
+        "evidence_incomplete": False,
+        "timeline": [{
+            "author_id": 1, "created": "2026-08-01T10:00:00+03:00",
+            "comment": "созвонился",
+        }],
+    }
+    monkeypatch.setattr(cs, "prepare_deal_record", lambda d, **k: dict(card))
+
+    sent: list[int] = []
+
+    def _fake_llm(deal, prev, new_events, all_events, model, profile, usage_sink=None):
+        sent.append(len(new_events))
+        return cs._normalize_state({"client_goal": "2к", "confidence": 0.7}, profile)
+
+    monkeypatch.setattr(cs, "analyze_with_llm", _fake_llm)
+    monkeypatch.setattr(cs, "make_llm", lambda s: object())
+    settings = cs.get_settings()
+    monkeypatch.setattr(settings, "dry_run", False, raising=False)
+
+    cs.analyze_deal(dict(card), profile=cs.BUYER_PROFILE, settings=settings)
+    assert sent == [1]
+
+    # Без force карточка уходит в кэш.
+    cached = cs.analyze_deal(dict(card), profile=cs.BUYER_PROFILE, settings=settings)
+    assert cached["reason"] == "unchanged"
+    assert sent == [1]
+
+    # С force — перечитывается целиком, не через no_new_events.
+    forced = cs.analyze_deal(
+        dict(card), profile=cs.BUYER_PROFILE, settings=settings, force=True,
+    )
+    assert forced["skipped"] is False
+    assert forced["reason"] == ""
+    assert sent == [1, 1], "модель должна получить все события карточки заново"
+
+
+# ── Возраст этапа: без него отсрочка недостижима ───────────────────────
+def test_stage_age_read_from_the_fields_bitrix_actually_returns():
+    """stage_entered_at ставит основной аудит; QC-агент его не получает."""
+    from datetime import datetime, timezone
+
+    from client_state import _stage_hours
+
+    now = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
+    assert _stage_hours({"DATE_CREATE": "2026-08-24T10:00:00+00:00"}, now) == 2.0
+    assert _stage_hours({"MOVED_TIME": "2026-08-24T09:00:00+00:00"}, now) == 3.0
+    # Точность важнее: история стадий бьёт MOVED_TIME, тот бьёт дату создания.
+    mixed = {
+        "stage_entered_at": "2026-08-24T11:00:00+00:00",
+        "MOVED_TIME": "2026-08-24T09:00:00+00:00",
+        "DATE_CREATE": "2026-08-01T09:00:00+00:00",
+    }
+    assert _stage_hours(mixed, now) == 1.0
+    assert _stage_hours({"ID": 1}, now) is None
+
+
+def test_deal_selection_asks_for_the_stage_age_fields(monkeypatch):
+    """Без них too_early недостижим — карточки судятся как застоявшиеся."""
+    import client_state as cs
+
+    captured: dict[str, Any] = {}
+
+    def _fake(method, params):
+        captured.update(params)
+        return []
+
+    monkeypatch.setattr(cs, "_bx_get_all_sync", _fake)
+    cs.run_client_state(cs.BUYER_PROFILE)
+    for field in cs.STAGE_ENTRY_SELECT:
+        assert field in captured["select"], f"{field} не запрошен"
+
+
+def test_run_counts_cards_judged_without_a_known_stage_age(monkeypatch):
+    import client_state as cs
+
+    def _fake(deal, **kwargs):
+        return {
+            "deal_id": int(deal["ID"]), "skipped": False, "reason": "",
+            "state": {"temperature": "warm", "verdict": "poor"},
+            "content_hash": "x",
+            "stage_age_known": int(deal["ID"]) == 1,
+        }
+
+    monkeypatch.setattr(cs, "analyze_deal", _fake)
+    stats = cs.run_client_state(cs.BUYER_PROFILE, [
+        {"ID": 1, "STAGE_ID": "C18:NEW"}, {"ID": 2, "STAGE_ID": "C18:NEW"},
+    ])
+    assert stats["stage_age_unknown"] == 1
