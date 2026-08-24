@@ -937,7 +937,10 @@ def analyze_deal(
         seen_fingerprints = parse_analyzed_events(stored.get("analyzed_events"))
 
     new_events = filter_new_events(events, analyzed_at, seen_fingerprints)
-    if previous_state is None:
+    if previous_state is None or force:
+        # force — это «перечитай карточку целиком», а не «пропусти проверку
+        # хэша»: иначе ручной перезапуск упирался в отпечатки событий и
+        # выходил через no_new_events, ничего не перечитав.
         new_events = events
     elif not new_events:
         # Хэш карточки поменялся, а новых событий нет — значит событие удалили

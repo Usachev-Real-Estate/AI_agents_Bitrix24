@@ -59,7 +59,7 @@ def test_no_service_codes_leak_into_the_report():
 
 def test_translations_are_used():
     card = format_card(_result(), "ЖК «Will Towers»", WEBHOOK)
-    assert "Температура: тёплый" in card
+    assert "Температура: [B]тёплый[/B]" in card
     assert "Риск: средний" in card
     assert "Оценка карточки: плохо" in card
     assert "брокер" in card
@@ -99,7 +99,7 @@ def test_cached_card_shows_the_previous_analysis():
         _result(skipped=True, reason="no_new_events"), "Михаил Лужники", WEBHOOK,
     )
     assert "Пропуск" not in card
-    assert "Температура: тёплый" in card
+    assert "Температура: [B]тёплый[/B]" in card
     assert "Цель: Покупка квартиры" in card
     assert "↻ без изменений с прошлого разбора" in card
 
@@ -163,12 +163,17 @@ def test_summary_is_fully_russian():
         "temperature": {"hot": 0, "warm": 9, "cold": 1, "unknown": 0},
         "verdicts": {"good": 2, "tolerable": 3, "poor": 4, "too_early": 1,
                      "out_of_qc": 0},
-        "cost_rub": 1.9,
+        "contradictions_material": 2, "contradictions_minor": 5,
+        "skipped_out_of_qc": 3,
+        "cost_rub": 1.9, "cost_rub_per_card": 0.475,
     })
-    assert "Покупатели: разобрано 4 из 10" in summary
+    assert "ПОКУПАТЕЛИ" in summary
+    assert "Карточек: 10 · разобрано моделью: 4" in summary
     assert "тёплый 9" in summary
     assert "плохо 4" in summary
-    assert "Из кэша без изменений: 6" in summary
+    assert "без изменений 6" in summary
+    assert "существенных 2, мелких 5" in summary
+    assert "этап вне контроля 3" in summary
     assert "1.90 ₽" in summary
     for code in ("warm", "poor", "good", "hot"):
         assert code not in summary

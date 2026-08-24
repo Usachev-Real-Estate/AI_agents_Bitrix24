@@ -1014,3 +1014,50 @@ def test_cached_state_is_unmasked_before_it_reaches_the_report(tmp_path, monkeyp
     assert second["reason"] == "unchanged"
     assert "КЛИЕНТ_1" not in second["state"]["situation"]
     assert "Ирина" in second["state"]["situation"]
+
+
+def test_force_actually_re_reads_a_card_with_no_new_events(tmp_path, monkeypatch):
+    """--force должен звать модель, даже когда с прошлого раза ничего не добавилось."""
+    import client_state as cs
+    import db
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "violations.db")
+    db.init_db()
+
+    card = {
+        "ID": 701, "TITLE": "Покупка", "STAGE_ID": "C18:NEW",
+        "contacts": [], "activities": [], "transcripts": [],
+        "evidence_incomplete": False,
+        "timeline": [{
+            "author_id": 1, "created": "2026-08-01T10:00:00+03:00",
+            "comment": "созвонился",
+        }],
+    }
+    monkeypatch.setattr(cs, "prepare_deal_record", lambda d, **k: dict(card))
+
+    sent: list[int] = []
+
+    def _fake_llm(deal, prev, new_events, all_events, model, profile, usage_sink=None):
+        sent.append(len(new_events))
+        return cs._normalize_state({"client_goal": "2к", "confidence": 0.7}, profile)
+
+    monkeypatch.setattr(cs, "analyze_with_llm", _fake_llm)
+    monkeypatch.setattr(cs, "make_llm", lambda s: object())
+    settings = cs.get_settings()
+    monkeypatch.setattr(settings, "dry_run", False, raising=False)
+
+    cs.analyze_deal(dict(card), profile=cs.BUYER_PROFILE, settings=settings)
+    assert sent == [1]
+
+    # Без force карточка уходит в кэш.
+    cached = cs.analyze_deal(dict(card), profile=cs.BUYER_PROFILE, settings=settings)
+    assert cached["reason"] == "unchanged"
+    assert sent == [1]
+
+    # С force — перечитывается целиком, не через no_new_events.
+    forced = cs.analyze_deal(
+        dict(card), profile=cs.BUYER_PROFILE, settings=settings, force=True,
+    )
+    assert forced["skipped"] is False
+    assert forced["reason"] == ""
+    assert sent == [1, 1], "модель должна получить все события карточки заново"

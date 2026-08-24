@@ -115,7 +115,10 @@ def format_card(
     reason = str(result.get("reason") or "")
     state = result.get("state") or {}
 
-    lines = [f"#{deal_id} {title}", deal_url(webhook_url, deal_id)]
+    lines = [
+        f"[B]#{deal_id}[/B] {title}".rstrip(),
+        f"[URL]{deal_url(webhook_url, deal_id)}[/URL]",
+    ]
 
     if not state:
         lines.append(f"⏭ Не разбиралась: {REASON_RU.get(reason, reason)}")
@@ -124,7 +127,7 @@ def format_card(
     level = str(state.get("temperature") or "unknown")
     icon = TEMPERATURE_ICON.get(level, TEMPERATURE_ICON["unknown"])
     reason_text = str(state.get("temperature_reason") or "").strip()
-    temperature = f"{icon} Температура: {ru(level, TEMPERATURE_RU)}"
+    temperature = f"{icon} Температура: [B]{ru(level, TEMPERATURE_RU)}[/B]"
     if reason_text:
         temperature += f" — {reason_text}"
     lines.append(temperature)
@@ -179,21 +182,54 @@ def count_material_contradictions(results: list[dict[str, Any]]) -> int:
 
 
 def format_summary(stats: dict[str, Any]) -> str:
-    """Шапка отчёта по одной воронке."""
+    """Шапка отчёта по одной воронке.
+
+    Показывает всё, что прогон посчитал: температуру, вердикты, расхождения,
+    сколько карточек не пошло в модель и почему, и во что обошёлся прогон.
+    Цифры, оставшиеся только в логе, РОП не увидит.
+    """
     temperature = stats.get("temperature") or {}
     verdicts = stats.get("verdicts") or {}
+    label = stats.get("funnel_label") or stats.get("funnel") or "Воронка"
     parts = [
-        f"{stats.get('funnel_label') or stats.get('funnel') or 'Воронка'}: "
-        f"разобрано {int(stats.get('analyzed') or 0)} из {int(stats.get('total') or 0)}",
+        f"━━━ [B]{label.upper()}[/B] ━━━",
+        f"Карточек: {int(stats.get('total') or 0)} · "
+        f"разобрано моделью: {int(stats.get('analyzed') or 0)}",
         " | ".join(
-            f"{TEMPERATURE_ICON[key]} {TEMPERATURE_RU[key]} {int(temperature.get(key) or 0)}"
+            f"{TEMPERATURE_ICON[key]} {TEMPERATURE_RU[key]} "
+            f"{int(temperature.get(key) or 0)}"
             for key in ("hot", "warm", "cold", "unknown")
         ),
-        " | ".join(
+        "Оценка карточек: " + " | ".join(
             f"{VERDICT_RU[key]} {int(verdicts.get(key) or 0)}"
             for key in ("good", "tolerable", "poor", "too_early", "out_of_qc")
         ),
-        f"Из кэша без изменений: {int(stats.get('skipped_unchanged') or 0)}",
-        f"Стоимость: {float(stats.get('cost_rub') or 0.0):.2f} ₽",
     ]
+
+    material = int(stats.get("contradictions_material") or 0)
+    minor = int(stats.get("contradictions_minor") or 0)
+    parts.append(
+        f"⚡ Расхождений с разговором: существенных {material}, мелких {minor}",
+    )
+
+    unrecoverable = int(stats.get("unrecoverable") or 0)
+    if unrecoverable:
+        parts.append(f"⚠️ Неинформативных карточек: {unrecoverable}")
+
+    skipped = []
+    if stats.get("skipped_unchanged"):
+        skipped.append(f"без изменений {int(stats['skipped_unchanged'])}")
+    if stats.get("skipped_out_of_qc"):
+        skipped.append(f"этап вне контроля {int(stats['skipped_out_of_qc'])}")
+    if stats.get("skipped_incomplete"):
+        skipped.append(f"карточка не прочитана {int(stats['skipped_incomplete'])}")
+    if stats.get("errors"):
+        skipped.append(f"ошибок {int(stats['errors'])}")
+    if skipped:
+        parts.append("Не разбиралось моделью: " + ", ".join(skipped))
+
+    parts.append(
+        f"💰 Стоимость: {float(stats.get('cost_rub') or 0.0):.2f} ₽ "
+        f"({float(stats.get('cost_rub_per_card') or 0.0):.3f} ₽ за карточку)",
+    )
     return "\n".join(parts)
