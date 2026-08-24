@@ -214,7 +214,9 @@ def format_summary(stats: dict[str, Any]) -> str:
 
     unrecoverable = int(stats.get("unrecoverable") or 0)
     if unrecoverable:
-        parts.append(f"⚠️ Неинформативных карточек: {unrecoverable}")
+        empty = int(stats.get("empty_cards") or 0)
+        tail = f" (из них полностью пустых: {empty})" if empty else ""
+        parts.append(f"⚠️ Неинформативных карточек: {unrecoverable}{tail}")
 
     skipped = []
     if stats.get("skipped_unchanged"):

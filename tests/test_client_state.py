@@ -1115,3 +1115,120 @@ def test_run_counts_cards_judged_without_a_known_stage_age(monkeypatch):
         {"ID": 1, "STAGE_ID": "C18:NEW"}, {"ID": 2, "STAGE_ID": "C18:NEW"},
     ])
     assert stats["stage_age_unknown"] == 1
+
+
+# ── Пустая карточка: платить за предрешённый ответ незачем ─────────────
+def test_empty_card_is_judged_without_the_model(tmp_path, monkeypatch):
+    import client_state as cs
+    import db
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "violations.db")
+    db.init_db()
+
+    empty = {
+        "ID": 801, "TITLE": "Сделка #801", "STAGE_ID": "C18:NEW",
+        "DATE_CREATE": "2026-07-01T10:00:00+00:00",
+        "contacts": [], "timeline": [], "activities": [], "transcripts": [],
+        "evidence_incomplete": False,
+    }
+    monkeypatch.setattr(cs, "prepare_deal_record", lambda d, **k: dict(empty))
+
+    def _boom(*args, **kwargs):  # pragma: no cover
+        raise AssertionError("модель не должна вызываться на пустой карточке")
+
+    monkeypatch.setattr(cs, "analyze_with_llm", _boom)
+    monkeypatch.setattr(cs, "make_llm", _boom)
+    settings = cs.get_settings()
+    monkeypatch.setattr(settings, "dry_run", False, raising=False)
+
+    result = cs.analyze_deal(dict(empty), profile=cs.BUYER_PROFILE, settings=settings)
+    assert result["skipped"] is False
+    assert result["empty_card"] is True
+    state = result["state"]
+    assert state["recoverable"] is False
+    assert state["confidence"] == 0.0
+    assert cs.EMPTY_CARD_NOTE in state["missing"]
+    # Цитат у пустой карточки нет и быть не может — лишней строки в missing тоже.
+    assert "подтверждённые цитаты" not in state["missing"]
+    # Возраст этапа известен и вне отсрочки, значит вердикт содержательный.
+    assert state["verdict"] == "poor"
+    assert state["temperature"] == "unknown"
+
+
+def test_fresh_empty_card_is_too_early_not_poor(tmp_path, monkeypatch):
+    """Пустая карточка часовой давности — не вина брокера."""
+    from datetime import datetime, timedelta, timezone
+
+    import client_state as cs
+    import db
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "violations.db")
+    db.init_db()
+
+    recent = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    empty = {
+        "ID": 802, "TITLE": "Свежий лид", "STAGE_ID": "C18:NEW",
+        "DATE_CREATE": recent,
+        "contacts": [], "timeline": [], "activities": [], "transcripts": [],
+        "evidence_incomplete": False,
+    }
+    monkeypatch.setattr(cs, "prepare_deal_record", lambda d, **k: dict(empty))
+    monkeypatch.setattr(cs, "make_llm", lambda s: (_ for _ in ()).throw(
+        AssertionError("модель не должна вызываться"),
+    ))
+    settings = cs.get_settings()
+    monkeypatch.setattr(settings, "dry_run", False, raising=False)
+
+    result = cs.analyze_deal(dict(empty), profile=cs.BUYER_PROFILE, settings=settings)
+    assert result["state"]["verdict"] == "too_early"
+
+
+def test_a_card_with_one_comment_still_goes_to_the_model(tmp_path, monkeypatch):
+    """Гейт срабатывает только на полной пустоте, не «почти пустоте»."""
+    import client_state as cs
+    import db
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "violations.db")
+    db.init_db()
+
+    card = {
+        "ID": 803, "TITLE": "Покупка", "STAGE_ID": "C18:NEW",
+        "contacts": [], "activities": [], "transcripts": [],
+        "evidence_incomplete": False,
+        "timeline": [{
+            "author_id": 1, "created": "2026-08-01T10:00:00+03:00",
+            "comment": "созвонился",
+        }],
+    }
+    monkeypatch.setattr(cs, "prepare_deal_record", lambda d, **k: dict(card))
+    called: list[int] = []
+
+    def _fake(deal, prev, new_events, all_events, model, profile, usage_sink=None):
+        called.append(1)
+        return cs._normalize_state({"client_goal": "2к", "confidence": 0.6}, profile)
+
+    monkeypatch.setattr(cs, "analyze_with_llm", _fake)
+    monkeypatch.setattr(cs, "make_llm", lambda s: object())
+    settings = cs.get_settings()
+    monkeypatch.setattr(settings, "dry_run", False, raising=False)
+
+    result = cs.analyze_deal(dict(card), profile=cs.BUYER_PROFILE, settings=settings)
+    assert called == [1]
+    assert result.get("empty_card") is not True
+
+
+def test_run_counts_empty_cards(monkeypatch):
+    import client_state as cs
+
+    def _fake(deal, **kwargs):
+        return {
+            "deal_id": int(deal["ID"]), "skipped": False, "reason": "",
+            "state": {"temperature": "unknown", "verdict": "poor"},
+            "content_hash": "x", "empty_card": int(deal["ID"]) == 1,
+        }
+
+    monkeypatch.setattr(cs, "analyze_deal", _fake)
+    stats = cs.run_client_state(cs.BUYER_PROFILE, [
+        {"ID": 1, "STAGE_ID": "C18:NEW"}, {"ID": 2, "STAGE_ID": "C18:NEW"},
+    ])
+    assert stats["empty_cards"] == 1
