@@ -180,11 +180,25 @@ def test_random_order_is_the_default_and_reproducible(pilot, monkeypatch):
     assert first != ["1", "2", "3", "4", "5"]
 
 
-def test_random_order_keeps_stages_that_judgeable_would_drop(pilot, monkeypatch):
-    """Представительная выборка показывает воронку целиком, включая вне-QC."""
+@pytest.mark.parametrize("order", ["random", "judgeable", "newest"])
+def test_out_of_qc_stages_never_take_a_slot_in_the_sample(pilot, monkeypatch, order):
+    """По ним вердикта не будет в любом режиме, а место в выборке они занимают."""
     from funnel_profiles import SELLER_PROFILE
 
-    pool = [{"ID": str(i), "STAGE_ID": "UC_KEOOG8"} for i in range(1, 6)]
-    monkeypatch.setattr(pilot, "_bx_get_all_sync", lambda m, p: list(pool))
-    assert len(pilot.pick_deals(SELLER_PROFILE, 0, 5, "random")) == 5
-    assert pilot.pick_deals(SELLER_PROFILE, 0, 5, "judgeable") == []
+    monkeypatch.setattr(pilot, "_bx_get_all_sync", lambda m, p: [
+        {"ID": "1", "STAGE_ID": "UC_KEOOG8"},   # Переговоры — вне QC
+        {"ID": "2", "STAGE_ID": "UC_FADPBF"},   # Поиск клиента — вне QC
+        {"ID": "3", "STAGE_ID": "NEW"},
+        {"ID": "4", "STAGE_ID": "FINAL_INVOICE"},
+    ])
+    picked = pilot.pick_deals(SELLER_PROFILE, 0, 10, order)
+    assert sorted(d["ID"] for d in picked) == ["3", "4"]
+
+
+def test_a_funnel_entirely_out_of_qc_yields_an_empty_sample(pilot, monkeypatch):
+    from funnel_profiles import SELLER_PROFILE
+
+    monkeypatch.setattr(pilot, "_bx_get_all_sync", lambda m, p: [
+        {"ID": str(i), "STAGE_ID": "UC_KEOOG8"} for i in range(1, 6)
+    ])
+    assert pilot.pick_deals(SELLER_PROFILE, 0, 5) == []

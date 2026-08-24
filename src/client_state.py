@@ -517,15 +517,20 @@ def compute_completeness_verdict(
     ]
 
     qual_gap = qualification_ok is False
+    # Сколько фактов всё-таки есть. Без этой цифры «плохо» у карточки с шестью
+    # фактами из восьми и у пустой карточки выглядит одинаково, и РОП не может
+    # понять, с какой начинать. Порог вердикта при этом не меняется.
+    present = len(required_keys) - len(missing)
+    score = f" (есть {present} из {len(required_keys)})"
     if len(missing) >= 2 or (missing and qual_gap):
         return "poor", (
-            "не хватает обязательных фактов: " + ", ".join(missing)
+            "не хватает обязательных фактов: " + ", ".join(missing) + score
             + (" · ключевые поля карточки не заполнены" if qual_gap else "")
         )
     if missing or minor or qual_gap:
         reasons = []
         if missing:
-            reasons.append(f"нет факта: {missing[0]}")
+            reasons.append(f"нет факта: {missing[0]}{score}")
         if minor:
             reasons.append(f"мелкие расхождения: {len(minor)}")
         if qual_gap:
