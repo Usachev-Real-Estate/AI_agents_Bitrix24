@@ -196,28 +196,64 @@ def build_evidence_events(
     return events
 
 
+FINGERPRINT_LEN = 16
+
+
+def _event_identity(event: dict[str, Any]) -> dict[str, Any]:
+    """Поля, по которым событие считается тем же самым."""
+    return {
+        "kind": event.get("kind"),
+        "id": event.get("id"),
+        "created": event.get("created"),
+        "text": event.get("text"),
+        "status": event.get("status"),
+        "note": event.get("note"),
+    }
+
+
+def event_fingerprint(event: dict[str, Any]) -> str:
+    """Отпечаток одного события.
+
+    Отредактированный комментарий и дозагруженная расшифровка меняют текст, а
+    значит и отпечаток — такое событие уедет в модель заново, и это правильно.
+    """
+    raw = json.dumps(_event_identity(event), ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:FINGERPRINT_LEN]
+
+
 def compute_content_hash(events: list[dict[str, Any]]) -> str:
     """Stable fingerprint of card evidence for skip-if-unchanged."""
-    payload = [
-        {
-            "kind": e.get("kind"),
-            "id": e.get("id"),
-            "created": e.get("created"),
-            "text": e.get("text"),
-            "status": e.get("status"),
-            "note": e.get("note"),
-        }
-        for e in events
-    ]
+    payload = [_event_identity(e) for e in events]
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def parse_analyzed_events(stored: str | None) -> set[str]:
+    """Отпечатки из БД; мусор в колонке читается как «ничего не разобрано»."""
+    if not stored:
+        return set()
+    try:
+        data = json.loads(stored)
+    except (json.JSONDecodeError, TypeError):
+        return set()
+    if not isinstance(data, list):
+        return set()
+    return {str(item) for item in data if isinstance(item, (str, int))}
 
 
 def filter_new_events(
     events: list[dict[str, Any]],
     analyzed_at: str | None,
+    seen: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Return events newer than the last successful analysis watermark."""
+    """События, которых модель ещё не видела.
+
+    Основной критерий — отпечаток: он не зависит от того, удалось ли разобрать
+    дату. По watermark отбираем только когда отпечатков ещё нет (карточка
+    разбиралась до появления колонки analyzed_events).
+    """
+    if seen:
+        return [e for e in events if event_fingerprint(e) not in seen]
     if not analyzed_at:
         return list(events)
     watermark = _parse_iso_datetime(analyzed_at)
@@ -872,16 +908,40 @@ def analyze_deal(
 
     previous_state = None
     analyzed_at = None
+    seen_fingerprints: set[str] = set()
     if stored:
         try:
             previous_state = json.loads(stored.get("state_json") or "{}")
         except json.JSONDecodeError:
             previous_state = None
         analyzed_at = str(stored.get("analyzed_at") or "")
+        seen_fingerprints = parse_analyzed_events(stored.get("analyzed_events"))
 
-    new_events = filter_new_events(events, analyzed_at)
+    new_events = filter_new_events(events, analyzed_at, seen_fingerprints)
     if previous_state is None:
         new_events = events
+    elif not new_events:
+        # Хэш карточки поменялся, а новых событий нет — значит событие удалили
+        # из таймлайна. Спрашивать модель не о чем: прошлое состояние остаётся
+        # верным. Перезаписываем хэш, чтобы следующий прогон не пришёл сюда же.
+        envelope["skipped"] = True
+        envelope["reason"] = "no_new_events"
+        envelope["state"] = unmask_state(previous_state, mask_map, profile)
+        if not settings.dry_run:
+            init_db()
+            save_client_state(
+                deal_id=deal_id,
+                state_json=json.dumps(previous_state, ensure_ascii=False),
+                confidence=float(previous_state.get("confidence") or 0.0),
+                content_hash=content_hash,
+                analyzed_at=str(stored.get("analyzed_at") or "") if stored else "",
+                model=str(stored.get("model") or "") if stored else "",
+                analyzed_events=json.dumps(
+                    sorted({event_fingerprint(e) for e in events}),
+                    ensure_ascii=False,
+                ),
+            )
+        return envelope
     new_events, dropped = trim_events_to_budget(
         new_events, int(settings.client_state_max_event_chars),
     )
@@ -1013,6 +1073,13 @@ def analyze_deal(
             content_hash=content_hash,
             analyzed_at=now_iso,
             model=settings.llm_model,
+            # Отпечатки всех событий карточки, а не только отправленных: то,
+            # что не влезло в бюджет, уже не попадёт в модель — но и повторно
+            # платить за него на каждом прогоне незачем.
+            analyzed_events=json.dumps(
+                sorted({event_fingerprint(e) for e in events}),
+                ensure_ascii=False,
+            ),
         )
     else:
         logger.info(
@@ -1113,6 +1180,8 @@ def run_client_state(
                 stats["skipped_unchanged"] += 1
             elif reason == "evidence_incomplete":
                 stats["skipped_incomplete"] += 1
+            elif reason == "no_new_events":
+                stats["skipped_unchanged"] += 1
             elif reason == "stage_out_of_qc":
                 stats["skipped_out_of_qc"] += 1
                 stats["verdicts"]["out_of_qc"] += 1

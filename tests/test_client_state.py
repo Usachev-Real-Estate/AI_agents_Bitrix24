@@ -618,3 +618,195 @@ def test_skipped_cards_do_not_count_as_llm_calls(monkeypatch):
     stats = cs.run_client_state(cs.BUYER_PROFILE, [{"ID": 1, "STAGE_ID": "C18:WON"}])
     assert stats["llm_calls"] == 0
     assert stats["usage"]["input_tokens"] == 0
+
+
+# ── Отпечатки событий вместо watermark по дате ─────────────────────────
+def _ev(**over: Any) -> dict[str, Any]:
+    base = {
+        "kind": "comment", "id": 1, "created": "2026-08-01T10:00:00+03:00",
+        "text": "созвонился", "status": "", "note": "",
+    }
+    base.update(over)
+    return base
+
+
+def test_event_with_unparseable_date_is_not_resent_forever():
+    """Раньше такое событие уходило в модель на каждом прогоне."""
+    from client_state import event_fingerprint, filter_new_events
+
+    broken = _ev(id=7, created="не дата")
+    seen = {event_fingerprint(broken)}
+    assert filter_new_events([broken], "2026-08-20T00:00:00+00:00", seen) == []
+
+
+def test_unseen_event_still_goes_to_the_llm():
+    from client_state import event_fingerprint, filter_new_events
+
+    old, fresh = _ev(id=1), _ev(id=2, text="показ состоялся")
+    seen = {event_fingerprint(old)}
+    assert filter_new_events([old, fresh], None, seen) == [fresh]
+
+
+def test_edited_comment_is_treated_as_new():
+    """Текст изменился — отпечаток другой, событие надо перечитать."""
+    from client_state import event_fingerprint, filter_new_events
+
+    before = _ev(id=3, text="созвонился")
+    after = _ev(id=3, text="созвонился, договорились на показ 25.08")
+    seen = {event_fingerprint(before)}
+    assert filter_new_events([after], None, seen) == [after]
+
+
+def test_backdated_event_is_not_missed():
+    """Событие старше watermark, но невиданное — по дате его бы потеряли."""
+    from client_state import filter_new_events
+
+    backdated = _ev(id=9, created="2026-07-01T10:00:00+03:00")
+    assert filter_new_events([backdated], "2026-08-20T00:00:00+00:00", set()) == []
+    assert filter_new_events(
+        [backdated], "2026-08-20T00:00:00+00:00", {"other"},
+    ) == [backdated]
+
+
+def test_watermark_still_used_when_no_fingerprints_stored():
+    """Карточки, разобранные до появления колонки, работают по-старому."""
+    from client_state import filter_new_events
+
+    old = _ev(id=1, created="2026-07-01T10:00:00+03:00")
+    new = _ev(id=2, created="2026-08-21T10:00:00+03:00")
+    got = filter_new_events([old, new], "2026-08-20T00:00:00+00:00", set())
+    assert got == [new]
+
+
+def test_broken_fingerprint_column_falls_back_to_full_reread():
+    from client_state import parse_analyzed_events
+
+    assert parse_analyzed_events(None) == set()
+    assert parse_analyzed_events("") == set()
+    assert parse_analyzed_events("{не json") == set()
+    assert parse_analyzed_events('{"a": 1}') == set()
+    assert parse_analyzed_events('["a", "b"]') == {"a", "b"}
+
+
+def test_content_hash_unchanged_by_the_fingerprint_refactor():
+    """Хэш карточки — ключ кэша в БД; менять его формат нельзя."""
+    from client_state import compute_content_hash
+
+    events = [_ev(id=1), _ev(id=2, text="показ")]
+    # Значение снято с реализации ДО выделения _event_identity. Если оно
+    # разъедется, кэш в БД инвалидируется целиком и весь портфель уйдёт в
+    # модель заново — поэтому пин, а не «лишь бы стабильно».
+    assert compute_content_hash(events) == (
+        "3df524ace164b0dc6f9ac5e4ebeb5e3b76c19b97ff06039656da5ae8e715eb56"
+    )
+    assert compute_content_hash(events) != compute_content_hash(events[:1])
+
+
+def test_analyzed_events_round_trip_through_the_db(tmp_path, monkeypatch):
+    import db
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "violations.db")
+    db.init_db()
+    db.save_client_state(
+        deal_id=42, state_json="{}", confidence=0.5, content_hash="h",
+        analyzed_at="2026-08-24T10:00:00+00:00", model="m",
+        analyzed_events='["aa", "bb"]',
+    )
+    row = db.get_client_state(42)
+    assert row is not None
+    assert row["analyzed_events"] == '["aa", "bb"]'
+
+
+def test_deleted_event_does_not_trigger_a_paid_call(tmp_path, monkeypatch):
+    """Удалили комментарий: хэш другой, новых событий нет — модель не зовём."""
+    import client_state as cs
+    import db
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "violations.db")
+    db.init_db()
+
+    card = {
+        "ID": 501,
+        "TITLE": "Покупка",
+        "STAGE_ID": "C18:NEW",
+        "contacts": [],
+        "activities": [],
+        "transcripts": [],
+        "evidence_incomplete": False,
+    }
+    two = [
+        {"author_id": 1, "created": "2026-08-01T10:00:00+03:00", "comment": "первый"},
+        {"author_id": 1, "created": "2026-08-02T10:00:00+03:00", "comment": "второй"},
+    ]
+    monkeypatch.setattr(cs, "prepare_deal_record", lambda d, **k: {**card, "timeline": two})
+    monkeypatch.setattr(cs.get_settings(), "dry_run", False, raising=False)
+
+    calls: list[int] = []
+
+    def _fake_llm(deal, prev, new_events, all_events, model, profile, usage_sink=None):
+        calls.append(len(new_events))
+        return cs._normalize_state({"client_goal": "2к", "confidence": 0.7}, profile)
+
+    monkeypatch.setattr(cs, "analyze_with_llm", _fake_llm)
+    monkeypatch.setattr(cs, "make_llm", lambda s: object())
+
+    settings = cs.get_settings()
+    monkeypatch.setattr(settings, "dry_run", False, raising=False)
+
+    first = cs.analyze_deal(dict(card), profile=cs.BUYER_PROFILE, settings=settings)
+    assert first["skipped"] is False
+    assert calls == [2]
+
+    # Второй комментарий удалили.
+    monkeypatch.setattr(cs, "prepare_deal_record", lambda d, **k: {**card, "timeline": two[:1]})
+    second = cs.analyze_deal(dict(card), profile=cs.BUYER_PROFILE, settings=settings)
+    assert second["reason"] == "no_new_events"
+    assert calls == [2], "модель не должна вызываться повторно"
+
+    # Хэш перезаписан — третий прогон уходит в обычный кэш «unchanged».
+    third = cs.analyze_deal(dict(card), profile=cs.BUYER_PROFILE, settings=settings)
+    assert third["reason"] == "unchanged"
+    assert calls == [2]
+
+
+def test_second_run_sends_only_the_new_comment(tmp_path, monkeypatch):
+    """Главный смысл отпечатков: повторный прогон не перечитывает историю."""
+    import client_state as cs
+    import db
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "violations.db")
+    db.init_db()
+
+    card = {
+        "ID": 502, "TITLE": "Покупка", "STAGE_ID": "C18:NEW",
+        "contacts": [], "activities": [], "transcripts": [],
+        "evidence_incomplete": False,
+    }
+    timeline = [
+        # Дата, которую не разобрать — раньше такое событие уходило каждый раз.
+        {"author_id": 1, "created": "не дата", "comment": "первый"},
+        {"author_id": 1, "created": "2026-08-02T10:00:00+03:00", "comment": "второй"},
+    ]
+    sent: list[list[str]] = []
+
+    def _fake_llm(deal, prev, new_events, all_events, model, profile, usage_sink=None):
+        sent.append([str(e.get("text")) for e in new_events])
+        return cs._normalize_state({"client_goal": "2к", "confidence": 0.7}, profile)
+
+    monkeypatch.setattr(cs, "analyze_with_llm", _fake_llm)
+    monkeypatch.setattr(cs, "make_llm", lambda s: object())
+    settings = cs.get_settings()
+    monkeypatch.setattr(settings, "dry_run", False, raising=False)
+
+    monkeypatch.setattr(cs, "prepare_deal_record", lambda d, **k: {**card, "timeline": timeline})
+    cs.analyze_deal(dict(card), profile=cs.BUYER_PROFILE, settings=settings)
+
+    grown = timeline + [
+        {"author_id": 1, "created": "2026-08-03T10:00:00+03:00", "comment": "третий"},
+    ]
+    monkeypatch.setattr(cs, "prepare_deal_record", lambda d, **k: {**card, "timeline": grown})
+    cs.analyze_deal(dict(card), profile=cs.BUYER_PROFILE, settings=settings)
+
+    # Порядок задаёт сортировка по дате; проверяем состав, а не порядок.
+    assert sorted(sent[0]) == ["второй", "первый"]
+    assert sent[1] == ["третий"], "событие с нечитаемой датой не должно уезжать снова"

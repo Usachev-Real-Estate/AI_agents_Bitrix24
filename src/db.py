@@ -118,6 +118,7 @@ def init_db() -> None:
 
         _migrate_audit_runs(conn)
         _migrate_call_transcripts(conn)
+        _migrate_client_states(conn)
 
         conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_violations_responsible
@@ -334,7 +335,8 @@ def init_db() -> None:
             confidence REAL NOT NULL DEFAULT 0,
             content_hash TEXT NOT NULL DEFAULT '',
             analyzed_at TEXT NOT NULL,
-            model TEXT NOT NULL DEFAULT ''
+            model TEXT NOT NULL DEFAULT '',
+            analyzed_events TEXT NOT NULL DEFAULT ''
         );
         """)
 
@@ -376,6 +378,17 @@ def _migrate_exclusive_expiry_notifications(conn: sqlite3.Connection) -> None:
         "ALTER TABLE exclusive_expiry_notifications_new "
         "RENAME TO exclusive_expiry_notifications"
     )
+
+
+def _migrate_client_states(conn: sqlite3.Connection) -> None:
+    """Add analyzed_events to caches created before the column existed."""
+    try:
+        conn.execute(
+            "ALTER TABLE client_states "
+            "ADD COLUMN analyzed_events TEXT NOT NULL DEFAULT ''",
+        )
+    except sqlite3.OperationalError:
+        pass
 
 
 def _migrate_call_transcripts(conn: sqlite3.Connection) -> None:
@@ -1710,7 +1723,8 @@ def get_client_state(deal_id: int) -> dict[str, Any] | None:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             """
-            SELECT deal_id, state_json, confidence, content_hash, analyzed_at, model
+            SELECT deal_id, state_json, confidence, content_hash, analyzed_at,
+                   model, analyzed_events
             FROM client_states
             WHERE deal_id = ?
             """,
@@ -1726,21 +1740,32 @@ def save_client_state(
     content_hash: str,
     analyzed_at: str,
     model: str,
+    analyzed_events: str = "",
 ) -> None:
-    """Upsert incremental client-state snapshot for a deal."""
+    """Upsert incremental client-state snapshot for a deal.
+
+    analyzed_events — JSON-массив отпечатков событий, которые уже уходили в
+    модель. По нему следующий прогон отбирает действительно новые события,
+    не полагаясь на дату: у части событий Bitrix её нельзя разобрать.
+    """
     init_db()
     with db_session() as conn:
         conn.execute(
             """
             INSERT INTO client_states (
-                deal_id, state_json, confidence, content_hash, analyzed_at, model
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                deal_id, state_json, confidence, content_hash, analyzed_at,
+                model, analyzed_events
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(deal_id) DO UPDATE SET
                 state_json = excluded.state_json,
                 confidence = excluded.confidence,
                 content_hash = excluded.content_hash,
                 analyzed_at = excluded.analyzed_at,
-                model = excluded.model
+                model = excluded.model,
+                analyzed_events = excluded.analyzed_events
             """,
-            (deal_id, state_json, confidence, content_hash, analyzed_at, model),
+            (
+                deal_id, state_json, confidence, content_hash, analyzed_at,
+                model, analyzed_events,
+            ),
         )
