@@ -64,6 +64,7 @@ async def api_funnel(request: Request) -> JSONResponse:
             "funnel": metrics.deal_funnel(conn, category_id, period["since"], period["until"]),
             "movement": metrics.stage_movement(
                 conn, category_id, period["since"], period["until"],
+                filters["department_id"],
             ),
         })
 

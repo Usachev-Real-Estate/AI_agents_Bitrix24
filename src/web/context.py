@@ -11,6 +11,11 @@ import metrics
 from links import crm_link
 from schema import analytics_session
 
+# Страницы, умеющие фильтровать по отделу. Остальным параметр не передаётся:
+# иначе он молча остаётся в адресе, страница его игнорирует, и человек видит
+# «Отдел Волковой» в ссылке при данных по всей компании.
+DEPARTMENT_AWARE_PAGES = frozenset({"movement"})
+
 NAV = [
     ("", "Обзор"),
     ("leads", "Лиды"),
@@ -34,19 +39,26 @@ def read_analytics() -> Iterator[Any]:
 
 
 def resolve_filters(request: Request) -> dict[str, Any]:
-    """Разобрать общие параметры строки запроса: период и воронка."""
+    """Разобрать общие параметры строки запроса: период, воронка, отдел."""
     params = request.query_params
     period = metrics.resolve_period(
         params.get("period"), params.get("start"), params.get("end"),
     )
-    category = params.get("category")
-    category_id: int | None = None
-    if category not in (None, "", "all"):
-        try:
-            category_id = int(category)
-        except ValueError:
-            category_id = None
-    return {"period": period, "category_id": category_id}
+    return {
+        "period": period,
+        "category_id": _optional_int(params.get("category")),
+        "department_id": _optional_int(params.get("department")),
+    }
+
+
+def _optional_int(value: str | None) -> int | None:
+    """None для «все» и для мусора в строке запроса."""
+    if value in (None, "", "all"):
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
 def base_context(request: Request, active: str = "") -> dict[str, Any]:
@@ -57,6 +69,7 @@ def base_context(request: Request, active: str = "") -> dict[str, Any]:
 
     with read_analytics() as conn:
         pipelines = metrics.pipelines(conn)
+        departments = metrics.departments_options(conn)
         status = metrics.etl_status(conn)
 
     return {
@@ -64,11 +77,14 @@ def base_context(request: Request, active: str = "") -> dict[str, Any]:
         "user": getattr(request.state, "user", None),
         "base_path": config.base_path,
         "nav": NAV,
+        "department_aware_pages": DEPARTMENT_AWARE_PAGES,
         "active": active,
         "period": filters["period"],
         "period_presets": metrics.PERIOD_PRESETS,
         "category_id": filters["category_id"],
+        "department_id": filters["department_id"],
         "pipelines": pipelines,
+        "departments": departments,
         "etl_lag_minutes": status["lag_minutes"],
         "etl_window_since": status["window_since"],
         "crm_link": lambda entity, entity_id: crm_link(

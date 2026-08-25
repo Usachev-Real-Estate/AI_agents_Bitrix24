@@ -339,3 +339,150 @@ def test_future_stage_entry_shows_as_zero_and_is_flagged(analytics_db, seeded):
         row["days_in_stage"] is None or row["days_in_stage"] >= 0 for row in table["rows"]
     )
     assert quality["future_stage_events"] >= 1
+
+
+# --------------------------------------------------------------------------
+# учёт потока и фильтр по отделам
+# --------------------------------------------------------------------------
+
+def _flow_identity_holds(conn, category_id, since, until):
+    """осталось = было + вошло − вышло для каждой стадии."""
+    broken = []
+    for row in metrics.stage_movement(conn, category_id, since, until):
+        expected = row["opening"] + row["entered"] - row["left_count"]
+        if expected != row["remaining"]:
+            broken.append((row["stage_id"], expected, row["remaining"]))
+    return broken
+
+
+def test_flow_identity_holds_for_every_stage(seeded):
+    """Главная проверка страницы «Движение».
+
+    Если тождество не сходится, «чистый поток» перестаёт быть потоком:
+    по нему нельзя судить, наполняется стадия или разгружается, а
+    руководитель будет искать затор там, где его нет.
+    """
+    with analytics_session(readonly=True) as conn:
+        assert _flow_identity_holds(conn, 18, AUG["since"], AUG["until"]) == []
+
+
+@pytest.mark.parametrize("since,until", [
+    ("2026-08-01T00:00:00+00:00", "2026-08-05T00:00:00+00:00"),   # начало
+    ("2026-08-03T00:00:00+00:00", "2026-08-09T00:00:00+00:00"),   # середина
+    ("2026-08-09T00:00:00+00:00", "2026-09-01T00:00:00+00:00"),   # хвост
+    ("2025-01-01T00:00:00+00:00", "2026-08-02T00:00:00+00:00"),   # период шире данных
+    ("2026-08-04T00:00:00+00:00", "2026-08-04T12:00:00+00:00"),   # полдня
+])
+def test_flow_identity_holds_on_arbitrary_windows(seeded, since, until):
+    """Тождество не должно зависеть от того, куда попали границы периода."""
+    with analytics_session(readonly=True) as conn:
+        assert _flow_identity_holds(conn, 18, since, until) == []
+
+
+def test_deal_entering_and_leaving_inside_period_is_counted_both_ways(seeded):
+    """Именно ради этого случая поток считается по событиям, а не разностью срезов.
+
+    Сделка, зашедшая на стадию и ушедшая с неё внутри периода, в разности
+    срезов не видна вовсе — хотя работа по ней шла.
+    """
+    with analytics_session(readonly=True) as conn:
+        rows = {r["stage_id"]: r for r in metrics.stage_movement(conn, 18, **AUG)}
+    show = rows["C18:SHOW"]
+    assert show["entered"] == 2 and show["left_count"] == 2
+    assert show["opening"] == 0 and show["remaining"] == 0
+    # Разность срезов показала бы ноль движения — а движение было.
+    assert show["entered"] > 0
+
+
+def test_reentry_counts_as_two_entries(analytics_db, seeded):
+    """Сделка, вернувшаяся на стадию, входила дважды.
+
+    Считать «разные сделки» вместо переходов значило бы сломать тождество:
+    остаток изменился бы, а «вошло» — нет.
+    """
+    with analytics_session() as conn:
+        conn.execute(
+            "INSERT INTO fact_stage_event(entity_type, entity_id, category_id, stage_id, "
+            "entered_at, left_at, duration_sec, seq) VALUES "
+            "('deal', 2, 18, 'C18:SHOW', '2026-08-05T00:00:00+00:00', "
+            "'2026-08-06T00:00:00+00:00', 86400, 1)"
+        )
+        conn.execute(
+            "INSERT INTO fact_stage_event(entity_type, entity_id, category_id, stage_id, "
+            "entered_at, left_at, duration_sec, seq) VALUES "
+            "('deal', 2, 18, 'C18:SHOW', '2026-08-07T00:00:00+00:00', NULL, NULL, 2)"
+        )
+    with analytics_session(readonly=True) as conn:
+        rows = {r["stage_id"]: r for r in metrics.stage_movement(conn, 18, **AUG)}
+        assert _flow_identity_holds(conn, 18, **AUG) == []
+    assert rows["C18:SHOW"]["entered"] == 4      # 2 прежних + 2 захода сделки 2
+    assert rows["C18:SHOW"]["remaining"] == 1
+
+
+def test_department_filter_narrows_movement(analytics_db, seeded):
+    """Фильтр по отделу считает только сделки этого отдела."""
+    with analytics_session() as conn:
+        conn.execute(
+            "INSERT INTO dim_user(user_id, name, department_id, department_name, "
+            "is_active, synced_at) VALUES (99, 'Пётр Сидоров', 50, 'Отдел Волковой', 1, 'x')"
+        )
+        _deal(conn, 4, "C18:NEW", amount=100)
+        conn.execute("UPDATE fact_deal SET assigned_by_id = 99 WHERE deal_id = 4")
+        _events(conn, 4, [("C18:NEW", "2026-08-01T00:00:00+00:00", None)])
+
+    with analytics_session(readonly=True) as conn:
+        everyone = {r["stage_id"]: r for r in metrics.stage_movement(conn, 18, **AUG)}
+        trofimova = {
+            r["stage_id"]: r
+            for r in metrics.stage_movement(conn, 18, AUG["since"], AUG["until"], 44)
+        }
+        volkova = {
+            r["stage_id"]: r
+            for r in metrics.stage_movement(conn, 18, AUG["since"], AUG["until"], 50)
+        }
+
+    assert everyone["C18:NEW"]["entered"] == 4
+    assert trofimova["C18:NEW"]["entered"] == 3
+    assert volkova["C18:NEW"]["entered"] == 1
+
+    # Отделы в сумме дают целое по каждой колонке и каждой стадии: ни одна
+    # сделка не потеряна и не задвоена. Иначе РОПы, сложив свои цифры, не
+    # получат общую — и перестанут верить обеим.
+    for stage_id, whole in everyone.items():
+        for column in ("opening", "entered", "left_count", "remaining"):
+            parts = trofimova[stage_id][column] + volkova[stage_id][column]
+            assert parts == whole[column], f"{stage_id}.{column}: {parts} ≠ {whole[column]}"
+
+
+def test_flow_identity_holds_under_department_filter(analytics_db, seeded):
+    """Фильтр не должен ломать сходимость потока внутри отдела."""
+    with analytics_session(readonly=True) as conn:
+        for department_id in (44, 50, None):
+            broken = []
+            rows = metrics.stage_movement(
+                conn, 18, AUG["since"], AUG["until"], department_id,
+            )
+            for row in rows:
+                expected = row["opening"] + row["entered"] - row["left_count"]
+                if expected != row["remaining"]:
+                    broken.append((department_id, row["stage_id"]))
+            assert broken == []
+
+
+def test_department_filter_narrows_transitions_and_stuck(analytics_db, seeded):
+    with analytics_session(readonly=True) as conn:
+        everyone = metrics.stage_transitions(conn, 18, **AUG)
+        other = metrics.stage_transitions(
+            conn, 18, AUG["since"], AUG["until"], 999,
+        )
+        stuck_other = metrics.stuck_deals(conn, 18, department_id=999)
+    assert everyone["transitions"]
+    assert other["transitions"] == []
+    assert stuck_other == []
+
+
+def test_departments_options_lists_only_departments_with_deals(seeded):
+    with analytics_session(readonly=True) as conn:
+        options = metrics.departments_options(conn)
+    assert [row["name"] for row in options] == ["Отдел Трофимовой"]
+    assert options[0]["department_id"] == 44

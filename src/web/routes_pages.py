@@ -110,16 +110,17 @@ async def movement(request: Request) -> HTMLResponse:
                 "charts": {}, "matrix": None,
             })
             return _render(request, "movement.html", context)
+        department_id = context["department_id"]
         movement_rows = metrics.stage_movement(
-            conn, category_id, period["since"], period["until"],
+            conn, category_id, period["since"], period["until"], department_id,
         )
         transitions = metrics.stage_transitions(
-            conn, category_id, period["since"], period["until"],
+            conn, category_id, period["since"], period["until"], department_id,
         )
         context.update({
             "movement": movement_rows,
             "transitions": transitions,
-            "stuck": metrics.stuck_deals(conn, category_id),
+            "stuck": metrics.stuck_deals(conn, category_id, department_id=department_id),
             "charts": {"netflow": chartdata.net_flow_chart(movement_rows)},
             "matrix": chartdata.transitions_matrix(
                 transitions, metrics.stages(conn, category_id),

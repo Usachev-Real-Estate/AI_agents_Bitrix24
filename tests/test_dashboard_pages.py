@@ -200,3 +200,48 @@ def test_empty_warehouse_explains_itself_instead_of_crashing(analytics_db, monke
         response = session.get(f"{BASE}{path}")
         assert response.status_code == 200, f"{path}: {response.text[:400]}"
     assert "ETL ещё ни разу не отработал" in session.get(f"{BASE}/").text
+
+
+def test_movement_page_offers_a_department_filter(client):
+    body = client.get(f"{BASE}/movement{PERIOD}").text
+    assert 'name="department"' in body
+    assert "Все отделы" in body
+    assert "Отдел Трофимовой" in body
+
+
+def test_movement_page_applies_the_department_filter(client):
+    """Чужой отдел не должен приносить в выборку чужие переходы."""
+    theirs = client.get(f"{BASE}/movement{PERIOD}&department=44").text
+    nobody = client.get(f"{BASE}/movement{PERIOD}&department=999").text
+    assert "Отдел Трофимовой" in theirs
+    assert "Квартира по сделке" not in nobody or "Зависших сделок нет" in nobody
+
+
+def test_movement_page_warns_that_department_is_the_current_assignee(client):
+    """Иначе РОП увидит в своём отделе переходы, случившиеся до передачи сделки."""
+    body = client.get(f"{BASE}/movement{PERIOD}&department=44").text
+    assert "текущему" in body and "истории" in body
+
+
+def test_movement_table_shows_the_opening_balance(client):
+    """Без «было» остаток не с чем сверить — тождество потока не проверяется глазами."""
+    body = client.get(f"{BASE}/movement{PERIOD}").text
+    assert ">Было<" in body
+    assert "осталось = было + вошло − вышло" in body
+
+
+def test_bad_department_parameter_does_not_break_the_page(client):
+    for value in ("abc", "", "all", "-1", "1e9"):
+        response = client.get(f"{BASE}/movement{PERIOD}&department={value}")
+        assert response.status_code == 200, f"department={value!r}"
+
+
+def test_department_filter_does_not_leak_into_pages_that_ignore_it(client):
+    """Иначе в адресе висит «отдел», страница его не применяет, и цифры спорят с URL."""
+    body = client.get(f"{BASE}/movement{PERIOD}&department=44").text
+    assert "/movement?" in body
+    # Ссылка на «Движение» фильтр сохраняет, ссылки на прочие страницы — нет.
+    movement_link = body[body.index('/dashboard/movement?'):][:200]
+    people_link = body[body.index('/dashboard/people?'):][:200]
+    assert "department=44" in movement_link
+    assert "department=44" not in people_link

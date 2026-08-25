@@ -2,11 +2,46 @@
 {% import "macros.html" as ui %}
 {% block title %}Движение{% endblock %}
 
+{% block extra_filters %}
+  <label class="field">Воронка
+    <select name="category">
+      <option value="all" {{ 'selected' if category_id is none else '' }}>Все</option>
+      {% for pipeline in pipelines %}
+        <option value="{{ pipeline.category_id }}"
+          {{ 'selected' if category_id == pipeline.category_id else '' }}>
+          {{ pipeline.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field">Отдел
+    <select name="department">
+      <option value="all" {{ 'selected' if department_id is none else '' }}>Все отделы</option>
+      {% for department in departments %}
+        <option value="{{ department.department_id }}"
+          {{ 'selected' if department_id == department.department_id else '' }}>
+          {{ department.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+{% endblock %}
+
 {% block content %}
 {% if not movement %}
   <div class="card"><div class="empty">Нет данных о движении за период</div></div>
 {% else %}
-<h1 class="section-title">Движение по стадиям · {{ period.label }}</h1>
+{% set dept_name = (departments | selectattr('department_id', 'equalto', department_id)
+                    | map(attribute='name') | first) if department_id is not none else None %}
+<h1 class="section-title">Движение по стадиям · {{ period.label }}{% if dept_name %} ·
+  {{ dept_name }}{% endif %}</h1>
+
+{% if dept_name %}
+<div class="notice">
+  <span>ℹ</span>
+  <span>Отдел определяется по <strong>текущему</strong> ответственному за сделку: истории
+    назначений Bitrix не отдаёт. Сделка, переданная в «{{ dept_name }}» из другого отдела,
+    приносит сюда и все свои прошлые переходы.</span>
+</div>
+{% endif %}
 
 <div class="grid grid-2">
   <div class="card">
@@ -33,20 +68,24 @@
     <div class="card-head">
       <div>
         <h2>Поток: числа</h2>
-        <p class="card-sub">Вошло / вышло / осталось на конец периода</p>
+        <p class="card-sub">Было → вошло → вышло → осталось</p>
       </div>
     </div>
     <div class="table-wrap">
       <table>
         <thead>
-          <tr><th>Стадия</th><th class="num">Вошло</th><th class="num">Вышло</th>
-            <th class="num">Чистый</th><th class="num">Осталось</th><th></th></tr>
+          <tr><th>Стадия</th>
+            <th class="num" title="Стояло на стадии на начало периода">Было</th>
+            <th class="num">Вошло</th><th class="num">Вышло</th>
+            <th class="num">Чистый</th>
+            <th class="num" title="Было + вошло − вышло">Осталось</th><th></th></tr>
         </thead>
         <tbody>
           {% for row in movement %}
           {% set net = row.entered - row.left_count %}
           <tr>
             <td>{{ row.name }}</td>
+            <td class="num muted">{{ row.opening | int_ru }}</td>
             <td class="num">{{ row.entered | int_ru }}</td>
             <td class="num">{{ row.left_count | int_ru }}</td>
             <td class="num {{ 'delta-up' if net > 0 else ('delta-down' if net < 0 else 'muted') }}">
@@ -60,6 +99,10 @@
         </tbody>
       </table>
     </div>
+    {{ ui.definition('Четыре числа связаны тождеством, которое можно проверить глазами:
+      осталось = было + вошло − вышло. «Вошло» и «вышло» считают переходы, а не разные
+      сделки: сделка, вернувшаяся на стадию дважды, входила дважды — иначе тождество
+      не сошлось бы.') }}
   </div>
 </div>
 

@@ -190,6 +190,38 @@ def users(conn) -> list[dict[str, Any]]:
     )
 
 
+# Отдел берётся у ТЕКУЩЕГО ответственного за сделку: истории назначений
+# Bitrix через crm.stagehistory.list не отдаёт, и хранить её нам негде.
+# Значит сделка, переданная в другой отдел, приносит туда всю свою историю
+# движения. Для месячных срезов это редкость, но на дашборде об этом сказано
+# прямо — иначе РОП увидит в своём отделе чужие переходы и не поймёт откуда.
+def _department_filter(event_alias: str = "e") -> str:
+    """Условие «сделка закреплена за отделом» для запросов по событиям стадий."""
+    return f"""
+          AND (:dept IS NULL OR EXISTS (
+                SELECT 1 FROM fact_deal fd
+                JOIN dim_user du ON du.user_id = fd.assigned_by_id
+                WHERE fd.deal_id = {event_alias}.entity_id AND fd.is_deleted = 0
+                  AND du.department_id = :dept))
+    """
+
+
+def departments_options(conn) -> list[dict[str, Any]]:
+    """Отделы для выпадающего списка — только те, за кем есть сделки."""
+    return _rows(
+        conn,
+        """
+        SELECT u.department_id, u.department_name AS name, COUNT(d.deal_id) AS deals
+        FROM dim_user u
+        JOIN fact_deal d ON d.assigned_by_id = u.user_id AND d.is_deleted = 0
+        WHERE u.department_id IS NOT NULL AND u.department_name <> ''
+        GROUP BY u.department_id
+        HAVING deals > 0
+        ORDER BY u.department_name
+        """,
+    )
+
+
 def sources(conn) -> list[dict[str, Any]]:
     return _rows(conn, "SELECT source_id, name FROM dim_source ORDER BY name")
 
@@ -323,40 +355,75 @@ def deal_cycle_days(conn, category_id: int | None, since: str, until: str) -> di
 # движение
 # --------------------------------------------------------------------------
 
-def stage_movement(conn, category_id: int, since: str, until: str) -> list[dict[str, Any]]:
-    """Движение за период: вошло / вышло / осталось на конец.
+def stage_movement(
+    conn,
+    category_id: int,
+    since: str,
+    until: str,
+    department_id: int | None = None,
+) -> list[dict[str, Any]]:
+    """Движение за период: было / вошло / вышло / осталось.
 
     Полноценный учёт потока, а не разность срезов: сделка, зашедшая и вышедшая
     внутри периода, в разности срезов не видна вовсе, хотя работа по ней шла.
+
+    Четыре числа связаны тождеством, которое можно проверить глазами прямо в
+    таблице::
+
+        осталось = было + вошло − вышло
+
+    ``opening`` («было») считается тем же запросом, что и ``remaining``, только
+    на момент начала периода. Без него «осталось» не с чем сверить, и читателю
+    остаётся верить на слово — на странице, весь смысл которой в сходимости
+    потока.
+
+    ``entered`` и ``left_count`` считают ПЕРЕХОДЫ, а не разные сделки: сделка,
+    вернувшаяся на стадию дважды, входила дважды. Иначе тождество выше не
+    сошлось бы.
     """
     return _rows(
         conn,
-        """
+        f"""
         SELECT s.stage_id, s.name, s.sort, s.semantic,
           (SELECT COUNT(*) FROM fact_stage_event e
             WHERE e.entity_type = 'deal' AND e.stage_id = s.stage_id
               AND e.category_id = s.category_id
-              AND e.entered_at >= :since AND e.entered_at < :until) AS entered,
+              AND e.entered_at < :since
+              AND (e.left_at IS NULL OR e.left_at >= :since)
+              {_department_filter()}) AS opening,
+          (SELECT COUNT(*) FROM fact_stage_event e
+            WHERE e.entity_type = 'deal' AND e.stage_id = s.stage_id
+              AND e.category_id = s.category_id
+              AND e.entered_at >= :since AND e.entered_at < :until
+              {_department_filter()}) AS entered,
           (SELECT COUNT(*) FROM fact_stage_event e
             WHERE e.entity_type = 'deal' AND e.stage_id = s.stage_id
               AND e.category_id = s.category_id
               AND e.left_at IS NOT NULL
-              AND e.left_at >= :since AND e.left_at < :until) AS left_count,
+              AND e.left_at >= :since AND e.left_at < :until
+              {_department_filter()}) AS left_count,
           (SELECT COUNT(*) FROM fact_stage_event e
             WHERE e.entity_type = 'deal' AND e.stage_id = s.stage_id
               AND e.category_id = s.category_id
               AND e.entered_at < :until
-              AND (e.left_at IS NULL OR e.left_at >= :until)) AS remaining
+              AND (e.left_at IS NULL OR e.left_at >= :until)
+              {_department_filter()}) AS remaining
         FROM dim_stage s
         WHERE s.category_id = :cat
         ORDER BY s.sort, s.name
         """,
-        {"cat": category_id, "since": since, "until": until},
+        {"cat": category_id, "since": since, "until": until, "dept": department_id},
     )
 
 
-def stage_transitions(conn, category_id: int, since: str, until: str) -> dict[str, Any]:
-    """Переходы между стадиями за период — данные для диаграммы потоков.
+def stage_transitions(
+    conn,
+    category_id: int,
+    since: str,
+    until: str,
+    department_id: int | None = None,
+) -> dict[str, Any]:
+    """Переходы между стадиями за период — данные для тепловой карты.
 
     ``backwards`` — переходы назад по порядку стадий. Это не мелочь: возврат
     сделки на предыдущий шаг обычно означает, что квалификация на входе была
@@ -364,7 +431,7 @@ def stage_transitions(conn, category_id: int, since: str, until: str) -> dict[st
     """
     rows = _rows(
         conn,
-        """
+        f"""
         SELECT e1.stage_id AS from_stage, e2.stage_id AS to_stage,
                COUNT(*) AS moves,
                COALESCE(sf.name, e1.stage_id) AS from_name,
@@ -379,10 +446,11 @@ def stage_transitions(conn, category_id: int, since: str, until: str) -> dict[st
         LEFT JOIN dim_stage st ON st.stage_id = e2.stage_id AND st.category_id = :cat
         WHERE e1.entity_type = 'deal' AND e1.category_id = :cat
           AND e2.entered_at >= :since AND e2.entered_at < :until
+          {_department_filter('e1')}
         GROUP BY e1.stage_id, e2.stage_id
         ORDER BY moves DESC
         """,
-        {"cat": category_id, "since": since, "until": until},
+        {"cat": category_id, "since": since, "until": until, "dept": department_id},
     )
     backwards = [r for r in rows if r["to_sort"] < r["from_sort"]]
     return {
@@ -442,12 +510,21 @@ def stage_durations(conn, category_id: int, since: str, until: str) -> list[dict
     return out
 
 
-def stuck_deals(conn, category_id: int, limit: int = 50) -> list[dict[str, Any]]:
+def stuck_deals(
+    conn,
+    category_id: int,
+    limit: int = 50,
+    department_id: int | None = None,
+) -> list[dict[str, Any]]:
     """Сделки, стоящие на стадии дольше, чем p75 этой же стадии.
 
     Порог берётся из собственных данных воронки, а не из выдуманного числа
     дней: у «Подбора» и «Офера» нормальный срок разный, и единый порог либо
     завалит список шумом, либо пропустит реальные простои.
+
+    При фильтре по отделу порог намеренно остаётся общим по воронке. Считать
+    его внутри отдела значило бы сравнивать медленный отдел сам с собой — он
+    никогда бы не выглядел медленным, и смысл списка пропал бы.
     """
     thresholds = {
         row["stage_id"]: row["p75_days"] or 0
@@ -467,9 +544,10 @@ def stuck_deals(conn, category_id: int, limit: int = 50) -> list[dict[str, Any]]
         LEFT JOIN dim_stage s ON s.stage_id = d.stage_id AND s.category_id = d.category_id
         LEFT JOIN dim_user u ON u.user_id = d.assigned_by_id
         WHERE d.category_id = :cat AND d.is_deleted = 0 AND d.is_closed = 0
+          AND (:dept IS NULL OR u.department_id = :dept)
         ORDER BY days_in_stage DESC
         """,
-        {"cat": category_id},
+        {"cat": category_id, "dept": department_id},
     )
     stuck = [
         row for row in rows
