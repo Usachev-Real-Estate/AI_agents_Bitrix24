@@ -443,6 +443,8 @@ def is_excluded_quality_lead(lead: dict[str, Any]) -> bool:
 
 def is_quality_candidate(lead: dict[str, Any]) -> bool:
     """Send to LLM if there is meaningful text or an incoming call signal."""
+    if lead.get("evidence_incomplete"):
+        return False
     if is_excluded_quality_lead(lead):
         return False
     text = _combined_text(lead)
@@ -512,6 +514,10 @@ def collect_spam_nontarget_leads(since: str) -> list[dict[str, Any]]:
             "has_incoming_call": False,
             "phones": [],
             "has_deal_by_phone": False,
+            # «Не смогли прочитать» — не то же самое, что «там ничего нет».
+            # Такой лид уходит мимо модели: пустой таймлайн выглядит как
+            # молчание, а has_incoming_call=False она прочтёт как «не звонил».
+            "evidence_incomplete": False,
         }
 
     if not records:
@@ -533,12 +539,27 @@ def collect_spam_nontarget_leads(since: str) -> list[dict[str, Any]]:
             try:
                 result = future.result()
             except Exception:
+                logger.warning(
+                    "Lead %s: %s fetch failed — lead excluded from analysis",
+                    lid, kind,
+                )
+                records[lid]["evidence_incomplete"] = True
                 continue
             if kind == "timeline":
-                _, timeline = result
+                _, timeline, failed = result
                 records[lid]["timeline"] = timeline
+                if failed:
+                    records[lid]["evidence_incomplete"] = True
             else:
                 records[lid]["has_incoming_call"] = bool(result)
+
+    incomplete = sum(1 for r in records.values() if r["evidence_incomplete"])
+    if incomplete:
+        # Молча потерянные лиды выглядят как «спама сегодня нет».
+        logger.warning(
+            "Lead quality: %d of %d leads could not be read in full — skipped",
+            incomplete, len(records),
+        )
 
     enrich_leads_phone_deal_flags(records)
     return list(records.values())
