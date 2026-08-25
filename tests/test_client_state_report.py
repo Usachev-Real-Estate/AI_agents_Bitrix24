@@ -70,7 +70,9 @@ def test_every_enum_value_has_a_translation():
     from client_state import compute_temperature  # noqa: F401
     from funnel_profiles import BUYER_PROFILE  # noqa: F401
 
-    assert set(TEMPERATURE_RU) == {"hot", "warm", "cold", "unknown"}
+    assert set(TEMPERATURE_RU) == {
+        "hot", "warm", "cold", "unknown", "not_qualified",
+    }
     assert set(RISK_RU) == {"low", "medium", "high"}
     assert set(WHO_RU) == {"broker", "client", "unknown"}
     assert set(VERDICT_RU) == {
@@ -247,6 +249,7 @@ def test_stage_mix_reaches_the_summary():
 # ── Два раздела по зоне ответственности ────────────────────────────────
 def _res(deal_id: int, **state_over: Any) -> dict[str, Any]:
     state = _state(**state_over)
+    state.setdefault("temperature", "warm")
     return {"deal_id": deal_id, "skipped": False, "reason": "", "state": state}
 
 
@@ -427,3 +430,51 @@ def test_such_a_stage_is_still_checked_for_broker_work():
     losing, neglect, _fine = split_sections([silent])
     assert losing == []
     assert [r["deal_id"] for r in neglect] == [15]
+
+
+def test_a_field_check_stage_shows_no_contradictory_noise():
+    """«Хорошо — заполнено: ID Афины» и «карточка неинформативна» рядом —
+    прямое противоречие: фактов из текста этот этап не требует."""
+    result = _res(16, temperature="", recoverable=False,
+                  missing=["стоимость объекта", "параметры объекта"])
+    result["state"]["verdict"] = "good"
+    result["state"]["verdict_reason"] = "заполнено: ID объекта Афины"
+    card = format_card(result, "Собственник — ЖК «RedSide»", WEBHOOK)
+    assert "заполнено: ID объекта Афины" in card
+    assert "неинформативна" not in card
+    assert "Не хватает" not in card
+
+
+def test_a_qualified_card_still_shows_both():
+    result = _res(17, recoverable=False, missing=["бюджет"])
+    card = format_card(result, "Покупка", WEBHOOK)
+    assert "неинформативна" in card
+    assert "Не хватает: бюджет" in card
+
+
+def test_summary_separates_not_qualified_from_unknown():
+    """«Решили не оценивать» и «не смогли разобраться» — разные вещи."""
+    summary = format_summary({
+        "funnel_label": "Продавцы",
+        "total": 10, "analyzed": 10,
+        "temperature": {"hot": 0, "warm": 0, "cold": 0, "unknown": 8,
+                        "not_qualified": 2},
+        "verdicts": {"good": 2, "tolerable": 0, "poor": 7, "too_early": 1,
+                     "out_of_qc": 0, "no_rules": 0},
+        "cost_rub": 3.7, "cost_rub_per_card": 0.37,
+    })
+    assert "неизвестно 8" in summary
+    assert "без квалификации 2" in summary
+
+
+def test_summary_hides_the_not_qualified_bucket_when_empty():
+    summary = format_summary({
+        "funnel_label": "Покупатели",
+        "total": 1, "analyzed": 1,
+        "temperature": {"hot": 0, "warm": 1, "cold": 0, "unknown": 0,
+                        "not_qualified": 0},
+        "verdicts": {"good": 1, "tolerable": 0, "poor": 0, "too_early": 0,
+                     "out_of_qc": 0, "no_rules": 0},
+        "cost_rub": 0.5, "cost_rub_per_card": 0.5,
+    })
+    assert "без квалификации" not in summary

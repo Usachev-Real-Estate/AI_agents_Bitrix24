@@ -1373,7 +1373,12 @@ def run_client_state(
         # итог из-за перекоса выборки, и каждый раз это приходилось
         # раскапывать. Пусть перекос будет виден сразу.
         "stages": {},
-        "temperature": {"hot": 0, "warm": 0, "cold": 0, "unknown": 0},
+        # not_qualified — этапы, на которых агентство решило клиента не
+        # оценивать. Считать их «неизвестно» значит выдать наше решение за
+        # неспособность разобраться.
+        "temperature": {
+            "hot": 0, "warm": 0, "cold": 0, "unknown": 0, "not_qualified": 0,
+        },
         "verdicts": {
             "good": 0, "tolerable": 0, "poor": 0,
             "too_early": 0, "out_of_qc": 0, "no_rules": 0,
@@ -1434,7 +1439,9 @@ def run_client_state(
                 # отчёт, значит должна попадать и в сводку. Иначе шапка
                 # покажет 4 тёплых из 20, пока в теле их пятнадцать.
                 cached = result.get("state") or {}
-                cached_level = str(cached.get("temperature") or "unknown")
+                cached_level = (
+                    str(cached.get("temperature") or "") or "not_qualified"
+                )
                 if cached_level in stats["temperature"]:
                     stats["temperature"][cached_level] += 1
                 cached_verdict = str(cached.get("verdict") or "")
@@ -1463,7 +1470,7 @@ def run_client_state(
             1 for c in contradictions
             if str(c.get("severity", "medium")).lower() in MINOR_SEVERITY
         )
-        level = str(state.get("temperature") or "unknown")
+        level = str(state.get("temperature") or "") or "not_qualified"
         if level in stats["temperature"]:
             stats["temperature"][level] += 1
         verdict = str(state.get("verdict") or "out_of_qc")

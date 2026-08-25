@@ -967,7 +967,9 @@ def test_cached_cards_are_counted_in_the_summary(monkeypatch):
     ])
     assert stats["analyzed"] == 1, "разобрана моделью только одна"
     assert stats["skipped_unchanged"] == 2
-    assert stats["temperature"] == {"hot": 0, "warm": 1, "cold": 2, "unknown": 0}
+    assert stats["temperature"] == {
+        "hot": 0, "warm": 1, "cold": 2, "unknown": 0, "not_qualified": 0,
+    }
     assert stats["verdicts"]["poor"] == 1
     assert stats["verdicts"]["good"] == 2
     assert stats["unrecoverable"] == 2

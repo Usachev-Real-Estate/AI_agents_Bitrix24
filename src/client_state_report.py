@@ -23,6 +23,9 @@ TEMPERATURE_RU: dict[str, str] = {
     "warm": "тёплый",
     "cold": "холодный",
     "unknown": "неизвестно",
+    # Не «не смогли определить», а «решили не определять». Разница в том,
+    # чья это недоработка.
+    "not_qualified": "без квалификации",
 }
 
 TEMPERATURE_ICON: dict[str, str] = {
@@ -30,6 +33,7 @@ TEMPERATURE_ICON: dict[str, str] = {
     "warm": "🌤",
     "cold": "❄️",
     "unknown": "❓",
+    "not_qualified": "➖",
 }
 
 RISK_RU: dict[str, str] = {
@@ -173,7 +177,12 @@ def format_card(
             f" (норма этапа {work.get('window_days')} дн.{quiet_text})",
         )
 
-    if state.get("recoverable") is False:
+    # На этапе без квалификации ни «неинформативна», ни список недостающих
+    # фактов не имеют смысла: там не требуют ни того, ни другого, а рядом с
+    # «хорошо — заполнено: ID объекта Афины» они прямо противоречат вердикту.
+    qualified = bool(str(state.get("temperature") or ""))
+
+    if qualified and state.get("recoverable") is False:
         lines.append("⚠️ Карточка неинформативна — картину клиента не восстановить")
 
     for item in state.get("contradictions") or []:
@@ -185,7 +194,7 @@ def format_card(
         lines.append(f"   в разговоре: «{humanize(item.get('in_call'))}»")
 
     missing = [str(m).strip() for m in (state.get("missing") or []) if str(m).strip()]
-    if missing:
+    if missing and qualified:
         lines.append("Не хватает: " + ", ".join(missing))
 
     if reason in CACHED_REASONS:
@@ -223,7 +232,8 @@ def format_summary(stats: dict[str, Any]) -> str:
         " | ".join(
             f"{TEMPERATURE_ICON[key]} {TEMPERATURE_RU[key]} "
             f"{int(temperature.get(key) or 0)}"
-            for key in ("hot", "warm", "cold", "unknown")
+            for key in ("hot", "warm", "cold", "unknown", "not_qualified")
+            if key != "not_qualified" or temperature.get(key)
         ),
         "Оценка карточек: " + " | ".join(
             f"{VERDICT_RU[key]} {int(verdicts.get(key) or 0)}"
