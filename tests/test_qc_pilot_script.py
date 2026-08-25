@@ -133,16 +133,37 @@ def test_report_carries_no_service_codes(pilot):
         assert code not in report, f"служебный код {code!r} дошёл до РОПа"
 
 
-def test_report_shows_a_cached_card_instead_of_a_skip_line(pilot):
+def test_a_problem_card_from_cache_is_shown_in_full(pilot):
+    """Карточка с претензией печатается разбором, даже если он из кэша."""
     cached = _stats("Покупатели", analyzed=0, skipped_unchanged=1)
     cached["results"][0]["skipped"] = True
     cached["results"][0]["reason"] = "no_new_events"
+    cached["results"][0]["state"]["work_evidence"] = {
+        "proven": False, "reason": "no_trace", "window_days": 3,
+        "days_quiet": 12.0,
+    }
     report = pilot.format_report(
         [(cached, {16858: "Михаил Лужники"})],
         "https://b24-po7frr.bitrix24.ru/rest/1/t/",
     )
+    assert "НЕДОРАБОТКА БРОКЕРА — 1" in report
     assert "Цель: Покупка" in report
     assert "без изменений с прошлого разбора" in report
+
+
+def test_a_healthy_card_is_compressed_to_one_line(pilot):
+    """Четыре экрана про здоровые сделки топят те две, ради которых открывали."""
+    healthy = _stats("Покупатели")
+    healthy["results"][0]["state"]["work_evidence"] = {
+        "proven": True, "reason": "call", "window_days": 3, "days_quiet": 1.0,
+    }
+    report = pilot.format_report(
+        [(healthy, {16858: "Михаил Лужники"})],
+        "https://b24-po7frr.bitrix24.ru/rest/1/t/",
+    )
+    assert "В РАБОТЕ — 1" in report
+    assert "#16858 Михаил Лужники — Позвонить" in report
+    assert "Ситуация:" not in report
 
 
 def test_judgeable_order_excludes_stages_qc_will_not_judge(pilot, monkeypatch):

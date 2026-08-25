@@ -25,7 +25,7 @@ from client_state import (  # noqa: E402
     _stage_hours,
     run_client_state,
 )
-from client_state_report import format_card, format_summary  # noqa: E402
+from client_state_report import format_sections, format_summary  # noqa: E402
 from config import get_settings, setup_logging  # noqa: E402
 from db import init_db  # noqa: E402
 from funnel_profiles import BUYER_PROFILE, SELLER_PROFILE, FunnelProfile  # noqa: E402
@@ -117,10 +117,10 @@ def format_report(
     for stats, titles in sections:
         parts.append(format_summary(stats))
         parts.append("")
-        for result in stats.get("results", []):
-            deal_id = _coerce_int(result.get("deal_id"))
-            parts.append(format_card(result, titles.get(deal_id, ""), webhook_url))
-            parts.append("")
+        parts.append(
+            format_sections(stats.get("results", []), titles, webhook_url),
+        )
+        parts.append("")
     return "\n".join(parts).strip()
 
 

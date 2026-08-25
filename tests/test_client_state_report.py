@@ -242,3 +242,105 @@ def test_stage_mix_reaches_the_summary():
     })
     assert "Переговоры 6" in summary
     assert "Поиск клиента 4" in summary
+
+
+# ── Два раздела по зоне ответственности ────────────────────────────────
+def _res(deal_id: int, **state_over: Any) -> dict[str, Any]:
+    state = _state(**state_over)
+    return {"deal_id": deal_id, "skipped": False, "reason": "", "state": state}
+
+
+def _work(proven: bool, reason: str = "no_trace") -> dict[str, Any]:
+    return {
+        "proven": proven, "reason": reason, "window_days": 3, "days_quiet": 9.0,
+    }
+
+
+def test_losing_and_neglected_are_separate_lists():
+    from client_state_report import split_sections
+
+    cold = _res(1, temperature="cold")
+    cold["state"]["work_evidence"] = _work(True, "call")
+    neglected = _res(2, temperature="warm")
+    neglected["state"]["work_evidence"] = _work(False)
+    ok = _res(3, temperature="warm")
+    ok["state"]["work_evidence"] = _work(True, "call")
+
+    losing, neglect, fine = split_sections([cold, neglected, ok])
+    assert [r["deal_id"] for r in losing] == [1]
+    assert [r["deal_id"] for r in neglect] == [2]
+    assert [r["deal_id"] for r in fine] == [3]
+
+
+def test_a_card_can_be_in_both_sections():
+    """Клиент часто остывает именно потому, что с ним не работают."""
+    from client_state_report import split_sections
+
+    both = _res(4, temperature="cold")
+    both["state"]["work_evidence"] = _work(False)
+    losing, neglect, fine = split_sections([both])
+    assert [r["deal_id"] for r in losing] == [4]
+    assert [r["deal_id"] for r in neglect] == [4]
+    assert fine == []
+
+
+def test_an_uninformative_card_counts_as_losing_the_client():
+    from client_state_report import split_sections
+
+    blind = _res(5, recoverable=False)
+    blind["state"]["work_evidence"] = _work(True, "call")
+    losing, _neglect, _fine = split_sections([blind])
+    assert [r["deal_id"] for r in losing] == [5]
+
+
+def test_a_contradiction_counts_as_losing_the_client():
+    from client_state_report import split_sections
+
+    lying = _res(6, contradictions=[{
+        "what": "бюджет", "in_card": "30", "in_call": "20", "severity": "high",
+    }])
+    lying["state"]["work_evidence"] = _work(True, "call")
+    losing, _n, _f = split_sections([lying])
+    assert [r["deal_id"] for r in losing] == [6]
+
+
+def test_unproven_work_is_spelled_out_on_the_card():
+    result = _res(7)
+    result["state"]["work_evidence"] = {
+        "proven": False, "reason": "claimed_message_no_proof",
+        "window_days": 3, "days_quiet": 5.0,
+    }
+    card = format_card(result, "ЖК «Will Towers»", WEBHOOK)
+    assert "Работа не подтверждена" in card
+    assert "скриншота переписки нет" in card
+    assert "норма этапа 3 дн." in card
+    assert "claimed_message_no_proof" not in card
+
+
+def test_proven_work_adds_no_noise():
+    result = _res(8)
+    result["state"]["work_evidence"] = _work(True, "call")
+    assert "Работа не подтверждена" not in format_card(result, "X", WEBHOOK)
+
+
+def test_empty_sections_say_so_rather_than_vanish():
+    from client_state_report import format_sections
+
+    ok = _res(9)
+    ok["state"]["work_evidence"] = _work(True, "call")
+    body = format_sections([ok], {9: "Сделка"}, WEBHOOK)
+    assert "ТЕРЯЕМ КЛИЕНТА — 0" in body
+    assert "Ни одной карточки с признаками потери" in body
+    assert "НЕДОРАБОТКА БРОКЕРА — 0" in body
+
+
+def test_a_card_in_both_sections_is_printed_once():
+    from client_state_report import format_sections
+
+    both = _res(10, temperature="cold")
+    both["state"]["work_evidence"] = _work(False)
+    body = format_sections([both], {10: "ЖК «Hide»"}, WEBHOOK)
+    assert body.count("Ситуация:") == 1
+    assert "#10 ЖК «Hide» — см. выше" in body
+    assert "ТЕРЯЕМ КЛИЕНТА — 1" in body
+    assert "НЕДОРАБОТКА БРОКЕРА — 1" in body

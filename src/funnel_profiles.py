@@ -10,7 +10,7 @@ signals, own temperature rule.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 _COMMON_RULES = """\
@@ -38,7 +38,15 @@ _COMMON_RULES = """\
    верни объект {present: bool, quote: string}. Если факт найден в карточке —
    ставь present=true и обязательно приводи дословную цитату. Не нашёл —
    present=false, quote="". Не додумывай.
-9. Уровни расхождения (severity в contradictions):
+9. broker_work — про то, ЧЕМ брокер подтверждает работу, а не хорошо ли он
+   работает. Оценку даёт код, ты только читаешь текст:
+   * claims_messaged=true, если в последних комментариях брокер утверждает,
+     что писал клиенту (в вотсап, телеграм, почту, «отправил», «скинул»).
+     Обязательно приведи цитату в claims_messaged_quote. Не нашёл — false.
+   * comment_informative=true, если по последним комментариям брокера понятно,
+     что происходит с клиентом и что дальше. «Созвонился», «ок», «ждём» —
+     это false: такой комментарий не заменяет разговора.
+10. Уровни расхождения (severity в contradictions):
    * low — мелкое: сдвиг дат, разница по цифрам до 30 %, уточнение
      формулировок. Не влияет на итоговый вердикт.
    * medium/high — существенное: искажена позиция клиента, готовность к
@@ -64,6 +72,11 @@ _COMMON_SCHEMA_HEAD = """\
   ],
   "stage_facts": {
     "<ключ из facts_needed>": {"present": true, "quote": "дословная цитата"}
+  },
+  "broker_work": {
+    "claims_messaged": false,
+    "claims_messaged_quote": "",
+    "comment_informative": true
   },
 """
 
@@ -363,6 +376,29 @@ SELLER_STAGES_OUT_OF_QC = frozenset({
 SELLER_GRACE_HOURS: dict[str, int] = {"_default": 24}
 
 
+# Сколько дней у брокера есть на след работы по клиенту. Значения взяты из
+# каденса основного аудита (BUYERS_STAGE_AUDIT_RULE / SELLERS_STAGE_CADENCE):
+# двум правилам об одном и том же расходиться нельзя, иначе брокер получит
+# два разных срока за одну и ту же работу.
+BUYER_WORK_WINDOW_DAYS: dict[str, int] = {
+    "C18:NEW": 2,           # Подбор
+    "C18:UC_UFPFKK": 3,     # Первый показ
+    "C18:UC_DVW1P9": 3,     # Повторный показ
+    "C18:UC_8Z3SP6": 6,     # Офер
+    "C18:LOSE": 5,          # Отложенный спрос
+    "C18:APOLOGY": 7,       # Сделка проиграна
+    "_default": 7,
+}
+
+SELLER_WORK_WINDOW_DAYS: dict[str, int] = {
+    "NEW": 1,               # Назначение встречи — каденс 24 часа
+    "FINAL_INVOICE": 7,     # Подготовка в рекламу
+    "LOSE": 7,              # Отложенная продажа
+    "APOLOGY": 7,           # Проиграна
+    "_default": 7,
+}
+
+
 # Условные факты — LLM их извлекает, но за отсутствие не наказываем.
 BUYER_OPTIONAL_FACTS: dict[str, tuple[tuple[str, str], ...]] = {}
 SELLER_OPTIONAL_FACTS: dict[str, tuple[tuple[str, str], ...]] = {
@@ -417,6 +453,10 @@ class FunnelProfile:
     # Заполнить реальными кодами перед включением проверки.
     qualification_fields: tuple[tuple[str, str], ...] = ()
     qualification_stage: str = ""  # этап, на котором проверка обязательна
+    # Сколько дней у брокера есть на след работы по этапу. Взято из каденса
+    # основного аудита: две нормы на одно и то же не должны расходиться.
+    # Ключ ``_default`` — для этапов вне таблицы.
+    work_window_days: dict[str, int] = field(default_factory=lambda: {"_default": 7})
 
 
 BUYER_PROFILE = FunnelProfile(
@@ -431,6 +471,7 @@ BUYER_PROFILE = FunnelProfile(
     stages_out_of_qc=BUYER_STAGES_OUT_OF_QC,
     qualification_fields=BUYER_QUALIFICATION_FIELDS,
     qualification_stage=BUYER_QUAL_STAGE,
+    work_window_days=BUYER_WORK_WINDOW_DAYS,
 )
 
 SELLER_PROFILE = FunnelProfile(
@@ -443,6 +484,7 @@ SELLER_PROFILE = FunnelProfile(
     stage_requirements=SELLER_STAGE_REQUIREMENTS,
     grace_hours=SELLER_GRACE_HOURS,
     stages_out_of_qc=SELLER_STAGES_OUT_OF_QC,
+    work_window_days=SELLER_WORK_WINDOW_DAYS,
 )
 
 PROFILES = {p.key: p for p in (BUYER_PROFILE, SELLER_PROFILE)}
