@@ -229,14 +229,14 @@ def test_qualification_fields_all_filled_returns_ok():
         "UF_CRM_1774364869184": "Хамовники",
         "UF_CRM_1747291787883": "квартира",
     }
-    ok, missing = check_qualification_fields(deal, BUYER_PROFILE)
+    ok, missing = check_qualification_fields(deal, BUYER_PROFILE, "C18:NEW")
     assert ok is True and missing == []
 
 
 def test_qualification_fields_missing_ones_listed_in_russian():
     from client_state import check_qualification_fields
     deal = {"UF_CRM_1774363333518": "до 25 млн"}  # район и тип пустые
-    ok, missing = check_qualification_fields(deal, BUYER_PROFILE)
+    ok, missing = check_qualification_fields(deal, BUYER_PROFILE, "C18:NEW")
     assert ok is False
     assert "район/локация" in missing and "тип недвижимости" in missing
 
@@ -248,14 +248,14 @@ def test_qualification_treats_empty_string_and_zero_as_unfilled():
         "UF_CRM_1774364869184": "0",
         "UF_CRM_1747291787883": None,
     }
-    ok, missing = check_qualification_fields(deal, BUYER_PROFILE)
+    ok, missing = check_qualification_fields(deal, BUYER_PROFILE, "C18:NEW")
     assert ok is False and len(missing) == 3
 
 
 def test_qualification_returns_none_when_not_configured():
     """У продавцов проверка полей не настроена — вердикт её не учитывает."""
     from client_state import check_qualification_fields
-    ok, missing = check_qualification_fields({}, SELLER_PROFILE)
+    ok, missing = check_qualification_fields({}, SELLER_PROFILE, "NEW")
     assert ok is None and missing == []
 
 
@@ -393,3 +393,85 @@ def test_the_score_does_not_move_the_threshold():
     assert compute_completeness_verdict(
         "C18:NEW", two_missing, BUYER_PROFILE, hours_on_stage=100,
     )[0] == "poor"
+
+
+def test_a_stage_without_rules_gets_its_own_verdict():
+    """Раньше такой этап показывался как «вне контроля качества» —
+    ненаписанные правила выглядели решением руководства."""
+    level, why = compute_completeness_verdict(
+        "UC_BRAND_NEW_STAGE", _state(), SELLER_PROFILE, hours_on_stage=1000,
+    )
+    assert level == "no_rules"
+    assert "правила полноты" in why
+
+
+def test_an_excluded_stage_still_says_out_of_qc():
+    """Решение агентства должно остаться отличимым от нашей недоделки."""
+    level, why = compute_completeness_verdict(
+        "UC_KEOOG8", _state(), SELLER_PROFILE, hours_on_stage=1000,
+    )
+    assert level == "out_of_qc"
+    assert "у руководства" in why
+
+
+def test_every_known_seller_stage_is_now_covered():
+    """Пробел, в который ушли 4 из 10 карточек, закрыт «Закрытой продажей»."""
+    from funnel_profiles import (
+        SELLER_DIRECT_FIELD_CHECKS,
+        SELLER_STAGE_REQUIREMENTS,
+        SELLER_STAGES_OUT_OF_QC,
+    )
+    from tools import SELLERS_STAGE_NAMES
+
+    for stage in SELLERS_STAGE_NAMES:
+        assert (
+            stage in SELLER_STAGE_REQUIREMENTS
+            or stage in SELLER_STAGES_OUT_OF_QC
+            or stage in SELLER_DIRECT_FIELD_CHECKS
+        ), f"{stage} не покрыт ни одним правилом"
+
+
+# ── «Закрытая продажа»: только ID Афины, без квалификации клиента ──────
+def test_closed_sale_is_good_when_the_afina_id_is_filled():
+    level, why = compute_completeness_verdict(
+        "UC_A94BGF", _state(), SELLER_PROFILE,
+        hours_on_stage=1000, qualification_ok=True,
+    )
+    assert level == "good"
+    assert "ID объекта Афины" in why
+
+
+def test_closed_sale_is_poor_when_the_afina_id_is_empty():
+    level, why = compute_completeness_verdict(
+        "UC_A94BGF", _state(), SELLER_PROFILE,
+        hours_on_stage=1000, qualification_ok=False,
+    )
+    assert level == "poor"
+    assert "не заполнено: ID объекта Афины" in why
+
+
+def test_closed_sale_needs_no_text_facts():
+    """Пустая карточка на этом этапе — не «плохо», если поле заполнено."""
+    level, _ = compute_completeness_verdict(
+        "UC_A94BGF", _state(stage_facts={}), SELLER_PROFILE,
+        hours_on_stage=1000, qualification_ok=True,
+    )
+    assert level == "good"
+
+
+def test_an_unchecked_field_is_not_reported_as_good():
+    """Ставить «хорошо» по непроверенному полю — выдать пробел за результат."""
+    level, why = compute_completeness_verdict(
+        "UC_A94BGF", _state(), SELLER_PROFILE,
+        hours_on_stage=1000, qualification_ok=None,
+    )
+    assert level == "no_rules"
+    assert "не проверены" in why
+
+
+def test_the_afina_field_is_the_one_the_agency_named():
+    from funnel_profiles import SELLER_DIRECT_FIELD_CHECKS
+
+    assert SELLER_DIRECT_FIELD_CHECKS["UC_A94BGF"] == (
+        ("UF_CRM_1780911079", "ID объекта Афины"),
+    )

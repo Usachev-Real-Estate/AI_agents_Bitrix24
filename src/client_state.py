@@ -417,20 +417,22 @@ def grace_period_for(profile: FunnelProfile, stage_id: str) -> int:
 def check_qualification_fields(
     deal: dict[str, Any],
     profile: FunnelProfile,
+    stage_id: str = "",
 ) -> tuple[bool | None, list[str]]:
-    """Прямая проверка UF-полей карточки (без LLM).
+    """Прямая проверка UF-полей карточки для этапа (без LLM).
 
-    Возвращает (все_заполнены?, список_пустых). None — проверка не настроена
-    (в профиле пустой qualification_fields), и вердикт её не применяет.
+    Возвращает (все_заполнены?, список_пустых). None — для этапа проверка не
+    настроена, и вердикт её не применяет.
 
     Значение считается заполненным, если поле не пустое, не False, не None
     и не строка вида ""/"0". UF Битрикса бывают строкой, числом, списком —
     все три случая покрываем как пустоту если "содержательного" ничего нет.
     """
-    if not profile.qualification_fields:
+    fields = profile.fields_for_stage(stage_id)
+    if not fields:
         return None, []
     missing: list[str] = []
-    for code, name in profile.qualification_fields:
+    for code, name in fields:
         value = deal.get(code)
         if value in (None, "", "0", 0, False, []):
             missing.append(name)
@@ -500,8 +502,25 @@ def compute_completeness_verdict(
     # («budget», «timeline») в отчёте делать нечего.
     fact_names = {key: name for key, name in requirements}
     if not required_keys:
-        # Этап не покрыт правилами — не судим.
-        return "out_of_qc", "для этапа не заданы требования"
+        field_names = [name for _code, name in profile.fields_for_stage(stage_id)]
+        if field_names:
+            # Этап проверяется только полями CRM («Закрытая продажа» — ID
+            # Афины). Фактов из текста здесь не требуют, поэтому вердикт
+            # целиком определяет прямая проверка.
+            listed = ", ".join(field_names)
+            if qualification_ok is False:
+                return "poor", f"не заполнено: {listed}"
+            if qualification_ok is None:
+                # Проверку не выполнили — судить не о чем. Ставить «хорошо»
+                # по непроверенному полю значит выдать пробел за результат.
+                return "no_rules", f"поля этапа не проверены: {listed}"
+            return "good", f"заполнено: {listed}"
+        # Отдельный вердикт, а не out_of_qc. «Сняли с контроля» — решение
+        # агентства, «правила не написаны» — наша недоделка, и показывать
+        # вторую как первую значит спрятать пробел за формулировкой.
+        # Разбор при этом идёт: температура, риск потери и подтверждение
+        # работы брокера от полноты карточки не зависят.
+        return "no_rules", "правила полноты для этапа не заданы"
 
     # Отсрочка проверяется РАНЬШЕ, чем «карточка неинформативна». Лид, который
     # пришёл час назад, пуст по определению — брокер ещё не звонил. Пометить
@@ -618,6 +637,8 @@ def _normalize_broker_work(raw: Any) -> dict[str, Any]:
     return {
         "claims_messaged": bool(data.get("claims_messaged")),
         "claims_messaged_quote": _clean_str(data.get("claims_messaged_quote")),
+        "claims_no_answer": bool(data.get("claims_no_answer")),
+        "claims_no_answer_quote": _clean_str(data.get("claims_no_answer_quote")),
         "comment_informative": bool(data.get("comment_informative", True)),
     }
 
@@ -950,16 +971,22 @@ def apply_derived_verdict(
     deal_id = _coerce_int(record.get("ID") or record.get("id"))
     envelope = envelope if envelope is not None else {}
 
-    level, why = compute_temperature(
-        state.get("signals", {}),
-        recoverable=bool(state.get("recoverable", True)),
-        profile=profile,
-    )
+    stage_id = _clean_str(record.get("STAGE_ID") or record.get("stage_id"))
+
+    if stage_id in profile.stages_without_temperature:
+        # По решению агентства на этих этапах клиента не квалифицируем:
+        # сделка уже идёт, «горячий/холодный» там ничего не решает и только
+        # шумит в разделе «теряем клиента».
+        level, why = "", "на этом этапе клиента не квалифицируем"
+    else:
+        level, why = compute_temperature(
+            state.get("signals", {}),
+            recoverable=bool(state.get("recoverable", True)),
+            profile=profile,
+        )
     state["temperature"] = level
     state["temperature_reason"] = why
     envelope["temperature"] = level
-
-    stage_id = _clean_str(record.get("STAGE_ID") or record.get("stage_id"))
     hours_on_stage = _stage_hours(record, datetime.now(timezone.utc))
     envelope["stage_age_known"] = hours_on_stage is not None
     if hours_on_stage is None:
@@ -970,15 +997,15 @@ def apply_derived_verdict(
 
     # Прямая проверка полей квалификации — только на этапе, для которого
     # она настроена. Иначе qualification_ok=None, вердикт её не учитывает.
-    qualification_ok: bool | None = None
-    if stage_id == profile.qualification_stage:
-        qualification_ok, missing_fields = check_qualification_fields(record, profile)
-        envelope["qualification_missing"] = missing_fields
-        if missing_fields:
-            logger.info(
-                "Deal %s: unfilled qualification fields: %s",
-                deal_id, ", ".join(missing_fields),
-            )
+    qualification_ok, missing_fields = check_qualification_fields(
+        record, profile, stage_id,
+    )
+    envelope["qualification_missing"] = missing_fields
+    if missing_fields:
+        logger.info(
+            "Deal %s: unfilled qualification fields: %s",
+            deal_id, ", ".join(missing_fields),
+        )
 
     verdict, verdict_reason = compute_completeness_verdict(
         stage_id, state, profile,
@@ -993,27 +1020,39 @@ def apply_derived_verdict(
     # прогоне: скриншот могли приложить уже после разбора, а обвинение по
     # устаревшим данным — худшее, что этот отчёт может сделать.
     work = state.get("broker_work") or {}
-    claims = bool(work.get("claims_messaged"))
-    if claims and events is not None:
-        # Цитата ведёт к претензии, поэтому планка та же, что у evidence:
-        # не нашли дословно — считаем, что утверждения не было.
-        corpus = _normalize_for_match(
-            " ".join(str(e.get("text") or "") for e in events),
-        )
-        needle = _normalize_for_match(work.get("claims_messaged_quote"))
+    # Цитата ведёт к претензии, поэтому планка та же, что у evidence:
+    # не нашли дословно — считаем, что утверждения не было.
+    corpus = (
+        _normalize_for_match(" ".join(str(e.get("text") or "") for e in events))
+        if events is not None else None
+    )
+
+    def _claimed(flag_key: str, quote_key: str, label: str) -> bool:
+        if not work.get(flag_key):
+            return False
+        if corpus is None:
+            return True
+        needle = _normalize_for_match(work.get(quote_key))
         if not needle or needle not in corpus:
             logger.info(
-                "Deal %s: цитата «написал клиенту» не найдена в карточке — "
+                "Deal %s: цитата «%s» не найдена в карточке — "
                 "утверждение не засчитано",
-                deal_id,
+                deal_id, label,
             )
-            claims = False
+            return False
+        return True
+
     state["work_evidence"] = assess_broker_work(
         events or [],
         profile=profile,
         stage_id=stage_id,
         hours_on_stage=hours_on_stage,
-        claims_messaged=claims,
+        claims_messaged=_claimed(
+            "claims_messaged", "claims_messaged_quote", "написал клиенту",
+        ),
+        claims_no_answer=_claimed(
+            "claims_no_answer", "claims_no_answer_quote", "клиент не отвечает",
+        ),
         comment_informative=bool(work.get("comment_informative", True)),
     )
     envelope["work_proven"] = state["work_evidence"]["proven"]
@@ -1337,8 +1376,10 @@ def run_client_state(
         "temperature": {"hot": 0, "warm": 0, "cold": 0, "unknown": 0},
         "verdicts": {
             "good": 0, "tolerable": 0, "poor": 0,
-            "too_early": 0, "out_of_qc": 0,
+            "too_early": 0, "out_of_qc": 0, "no_rules": 0,
         },
+        # Этапы, по которым правила полноты ещё не написаны: {этап: сколько}.
+        "stages_without_rules": {},
         "results": [],
     }
     for deal in deals:
@@ -1428,6 +1469,10 @@ def run_client_state(
         verdict = str(state.get("verdict") or "out_of_qc")
         if verdict in stats["verdicts"]:
             stats["verdicts"][verdict] += 1
+        if verdict == "no_rules":
+            stats["stages_without_rules"][stage_code] = (
+                stats["stages_without_rules"].get(stage_code, 0) + 1
+            )
         if state.get("recoverable") is False:
             stats["unrecoverable"] += 1
     usage = stats["usage"]

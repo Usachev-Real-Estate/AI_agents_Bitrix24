@@ -50,6 +50,9 @@ VERDICT_RU: dict[str, str] = {
     "poor": "плохо",
     "too_early": "рано судить",
     "out_of_qc": "вне контроля качества",
+    # Не то же самое, что «вне контроля качества»: там решение агентства,
+    # здесь — ненаписанные правила. Формулировка не должна их смешивать.
+    "no_rules": "полнота не оценивалась",
 }
 
 SEVERITY_RU: dict[str, str] = {
@@ -126,13 +129,18 @@ def format_card(
         lines.append(f"⏭ Не разбиралась: {REASON_RU.get(reason, reason)}")
         return "\n".join(lines)
 
-    level = str(state.get("temperature") or "unknown")
-    icon = TEMPERATURE_ICON.get(level, TEMPERATURE_ICON["unknown"])
+    level = str(state.get("temperature") or "")
     reason_text = str(state.get("temperature_reason") or "").strip()
-    temperature = f"{icon} Температура: [B]{ru(level, TEMPERATURE_RU)}[/B]"
-    if reason_text:
-        temperature += f" — {reason_text}"
-    lines.append(temperature)
+    if level:
+        icon = TEMPERATURE_ICON.get(level, TEMPERATURE_ICON["unknown"])
+        temperature = f"{icon} Температура: [B]{ru(level, TEMPERATURE_RU)}[/B]"
+        if reason_text:
+            temperature += f" — {reason_text}"
+        lines.append(temperature)
+    elif reason_text:
+        # Этап, на котором клиента не квалифицируют. Молча пропустить строку
+        # нельзя: пустое место читается как «забыли посчитать».
+        lines.append(f"➖ {reason_text}")
 
     verdict = str(state.get("verdict") or "")
     if verdict:
@@ -153,10 +161,12 @@ def format_card(
     work = state.get("work_evidence") or {}
     if work and not work.get("proven"):
         quiet = work.get("days_quiet")
-        quiet_text = (
-            f", последний след {quiet:.0f} дн. назад" if isinstance(quiet, (int, float))
-            else ", следов нет вовсе"
-        )
+        if not isinstance(quiet, (int, float)):
+            quiet_text = ", следов нет вовсе"
+        elif quiet < 1:
+            quiet_text = ", последний след сегодня"
+        else:
+            quiet_text = f", последний след {quiet:.0f} дн. назад"
         lines.append(
             f"🔧 Работа не подтверждена: "
             f"{WORK_REASON_RU.get(str(work.get('reason')), work.get('reason'))}"
@@ -217,7 +227,9 @@ def format_summary(stats: dict[str, Any]) -> str:
         ),
         "Оценка карточек: " + " | ".join(
             f"{VERDICT_RU[key]} {int(verdicts.get(key) or 0)}"
-            for key in ("good", "tolerable", "poor", "too_early", "out_of_qc")
+            for key in (
+                "good", "tolerable", "poor", "too_early", "out_of_qc", "no_rules",
+            )
         ),
     ]
 
@@ -252,6 +264,16 @@ def format_summary(stats: dict[str, Any]) -> str:
     # Если возраст этапа неизвестен, отсрочка не применяется и вердикты
     # смещены в сторону «плохо». Молчать об этом нельзя: РОП примет завышенную
     # строгость за реальное качество работы брокеров.
+    # Пробел в правилах — это наша недоделка, и молчать о ней нельзя:
+    # иначе карточки годами лежат «неоценёнными» и это выглядит нормой.
+    gaps = stats.get("stages_without_rules") or {}
+    if gaps:
+        listed = ", ".join(
+            f"{stage_name(code)} {count}"
+            for code, count in sorted(gaps.items(), key=lambda kv: (-kv[1], kv[0]))
+        )
+        parts.append(f"📋 Правила полноты не заданы для этапов: {listed}")
+
     unknown_age = int(stats.get("stage_age_unknown") or 0)
     if unknown_age:
         parts.append(
@@ -288,8 +310,15 @@ def format_stage_mix(stages: dict[str, int]) -> str:
 
 # ── Два раздела: клиент уходит / брокер не дорабатывает ────────────────
 def _is_losing_client(state: dict[str, Any]) -> bool:
-    """Признаки, что клиента теряем: остыл, замолчал, картины нет."""
-    if str(state.get("temperature") or "") == "cold":
+    """Признаки, что клиента теряем: остыл, замолчал, картины нет.
+
+    На этапах без квалификации (пустая temperature) раздела «теряем клиента»
+    нет по определению: агентство решило там клиента не оценивать, и
+    затаскивать карточку в тревожный список через другую дверь нечестно.
+    """
+    if not str(state.get("temperature") or ""):
+        return False
+    if str(state.get("temperature")) == "cold":
         return True
     if state.get("recoverable") is False:
         return True

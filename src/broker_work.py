@@ -34,6 +34,7 @@ PROVEN_BY_SCREENSHOT = "screenshot"
 PROVEN_BY_COMMENT = "comment"
 # Чем не подтверждена.
 GAP_CLAIMED_MESSAGE = "claimed_message_no_proof"
+GAP_CLAIMED_NO_ANSWER = "claimed_no_answer_no_calls"
 GAP_EMPTY_COMMENT = "comment_says_nothing"
 GAP_NO_TRACE = "no_trace"
 GAP_OUT_OF_WINDOW = "window_not_started"
@@ -45,6 +46,9 @@ REASON_RU: dict[str, str] = {
     PROVEN_BY_SCREENSHOT: "написал клиенту, приложен скриншот переписки",
     PROVEN_BY_COMMENT: "есть развёрнутый комментарий",
     GAP_CLAIMED_MESSAGE: "брокер пишет, что написал клиенту, но скриншота переписки нет",
+    GAP_CLAIMED_NO_ANSWER: (
+        "брокер пишет, что клиент не отвечает, но попыток звонка в таймлайне нет"
+    ),
     GAP_EMPTY_COMMENT: "комментарии есть, но по ним не понять, что с клиентом",
     GAP_NO_TRACE: "следов работы нет",
     GAP_OUT_OF_WINDOW: "срок ещё не наступил",
@@ -106,6 +110,23 @@ def _has_call(events: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _has_call_attempt(events: list[dict[str, Any]]) -> bool:
+    """Хотя бы попытка дозвона, снятая трубка или нет.
+
+    Отдельно от _has_call: «клиент не отвечает» — самое удобное объяснение
+    бездействия, и проверять его надо не по факту разговора, а по факту
+    попытки. Несостоявшийся звонок тоже оставляет активность в таймлайне.
+    """
+    for event in events:
+        if event.get("kind") == "transcript":
+            return True
+        if event.get("kind") != "activity":
+            continue
+        if int(event.get("type_id") or 0) == CALL_ACTIVITY_TYPE_ID:
+            return True
+    return False
+
+
 def assess_broker_work(
     events: list[dict[str, Any]],
     *,
@@ -114,6 +135,7 @@ def assess_broker_work(
     hours_on_stage: float | None,
     claims_messaged: bool,
     comment_informative: bool,
+    claims_no_answer: bool = False,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Подтверждена ли работа брокера за последнее окно по этапу.
@@ -151,6 +173,11 @@ def assess_broker_work(
         reason = PROVEN_BY_CALL
     elif not comments:
         reason = GAP_NO_TRACE
+    elif claims_no_answer and not _has_call_attempt(window):
+        # «Не дозвонился» проверяется первым: это объяснение бездействия, и
+        # оно должно стоить дороже остальных. Есть попытки — брокер работал,
+        # даже если трубку не взяли; нет попыток — работы не было.
+        reason = GAP_CLAIMED_NO_ANSWER
     elif claims_messaged:
         # Утверждение «написал клиенту» засчитывается только со скриншотом.
         has_screenshot = any(e.get("has_files") for e in comments)

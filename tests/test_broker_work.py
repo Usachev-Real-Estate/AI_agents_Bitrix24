@@ -15,6 +15,7 @@ if str(_SRC) not in sys.path:
 
 from broker_work import (  # noqa: E402
     GAP_CLAIMED_MESSAGE,
+    GAP_CLAIMED_NO_ANSWER,
     GAP_EMPTY_COMMENT,
     GAP_NO_TRACE,
     GAP_OUT_OF_WINDOW,
@@ -53,6 +54,7 @@ def _assess(events: list[dict], **over: Any) -> dict:
         "stage_id": "C18:UC_DVW1P9",   # Повторный показ, окно 3 дня
         "hours_on_stage": 1000.0,
         "claims_messaged": False,
+        "claims_no_answer": False,
         "comment_informative": True,
         "now": NOW,
     }
@@ -175,3 +177,70 @@ def test_window_matches_the_main_audit_cadence():
 
 def test_unknown_stage_falls_back_to_the_default_window():
     assert work_window_days(BUYER_PROFILE, "C18:SOMETHING_NEW") == 7
+
+
+# ── «Клиент не отвечает» — самое удобное объяснение бездействия ─────────
+def test_claiming_no_answer_without_any_call_attempt_is_a_gap():
+    """Не дозвонился — покажи попытки. Иначе это не объяснение, а отговорка."""
+    result = _assess(
+        [_comment(hours=10, text="клиент не берёт трубку")],
+        claims_no_answer=True,
+    )
+    assert result["proven"] is False
+    assert result["reason"] == GAP_CLAIMED_NO_ANSWER
+
+
+def test_an_unanswered_call_attempt_counts_as_work():
+    """Трубку не взяли — но брокер звонил, и это видно в таймлайне."""
+    attempt = {
+        "kind": "activity", "created": _ago(10), "type_id": 2,
+        "completed": "N", "text": "Звонок",
+    }
+    result = _assess(
+        [attempt, _comment(hours=10, text="не отвечает")],
+        claims_no_answer=True,
+    )
+    assert result["proven"] is True
+
+
+def test_a_completed_call_also_clears_the_no_answer_claim():
+    result = _assess(
+        [_call(hours=10), _comment(hours=10, text="не дозвонился")],
+        claims_no_answer=True,
+    )
+    assert result["reason"] == PROVEN_BY_CALL
+
+
+def test_call_attempts_outside_the_window_do_not_count():
+    """Звонки месячной давности не оправдывают тишину на этой неделе."""
+    old_attempt = {
+        "kind": "activity", "created": _ago(24 * 30), "type_id": 2,
+        "completed": "N", "text": "Звонок",
+    }
+    result = _assess(
+        [old_attempt, _comment(hours=10, text="не отвечает")],
+        claims_no_answer=True,
+    )
+    assert result["reason"] == GAP_CLAIMED_NO_ANSWER
+
+
+def test_no_answer_outranks_a_missing_screenshot():
+    """«Не дозвонился» — объяснение бездействия, оно дороже «написал»."""
+    result = _assess(
+        [_comment(hours=10, text="написал, но не отвечает")],
+        claims_no_answer=True, claims_messaged=True,
+    )
+    assert result["reason"] == GAP_CLAIMED_NO_ANSWER
+
+
+def test_a_task_of_another_type_is_not_a_call_attempt():
+    """Задача «подготовить документы» не доказывает попытку дозвона."""
+    task = {
+        "kind": "activity", "created": _ago(10), "type_id": 3,
+        "completed": "Y", "text": "Задача",
+    }
+    result = _assess(
+        [task, _comment(hours=10, text="не отвечает")],
+        claims_no_answer=True,
+    )
+    assert result["reason"] == GAP_CLAIMED_NO_ANSWER
