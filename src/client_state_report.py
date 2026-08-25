@@ -50,6 +50,9 @@ VERDICT_RU: dict[str, str] = {
     "poor": "плохо",
     "too_early": "рано судить",
     "out_of_qc": "вне контроля качества",
+    # Не то же самое, что «вне контроля качества»: там решение агентства,
+    # здесь — ненаписанные правила. Формулировка не должна их смешивать.
+    "no_rules": "полнота не оценивалась",
 }
 
 SEVERITY_RU: dict[str, str] = {
@@ -153,10 +156,12 @@ def format_card(
     work = state.get("work_evidence") or {}
     if work and not work.get("proven"):
         quiet = work.get("days_quiet")
-        quiet_text = (
-            f", последний след {quiet:.0f} дн. назад" if isinstance(quiet, (int, float))
-            else ", следов нет вовсе"
-        )
+        if not isinstance(quiet, (int, float)):
+            quiet_text = ", следов нет вовсе"
+        elif quiet < 1:
+            quiet_text = ", последний след сегодня"
+        else:
+            quiet_text = f", последний след {quiet:.0f} дн. назад"
         lines.append(
             f"🔧 Работа не подтверждена: "
             f"{WORK_REASON_RU.get(str(work.get('reason')), work.get('reason'))}"
@@ -217,7 +222,9 @@ def format_summary(stats: dict[str, Any]) -> str:
         ),
         "Оценка карточек: " + " | ".join(
             f"{VERDICT_RU[key]} {int(verdicts.get(key) or 0)}"
-            for key in ("good", "tolerable", "poor", "too_early", "out_of_qc")
+            for key in (
+                "good", "tolerable", "poor", "too_early", "out_of_qc", "no_rules",
+            )
         ),
     ]
 
@@ -252,6 +259,16 @@ def format_summary(stats: dict[str, Any]) -> str:
     # Если возраст этапа неизвестен, отсрочка не применяется и вердикты
     # смещены в сторону «плохо». Молчать об этом нельзя: РОП примет завышенную
     # строгость за реальное качество работы брокеров.
+    # Пробел в правилах — это наша недоделка, и молчать о ней нельзя:
+    # иначе карточки годами лежат «неоценёнными» и это выглядит нормой.
+    gaps = stats.get("stages_without_rules") or {}
+    if gaps:
+        listed = ", ".join(
+            f"{stage_name(code)} {count}"
+            for code, count in sorted(gaps.items(), key=lambda kv: (-kv[1], kv[0]))
+        )
+        parts.append(f"📋 Правила полноты не заданы для этапов: {listed}")
+
     unknown_age = int(stats.get("stage_age_unknown") or 0)
     if unknown_age:
         parts.append(

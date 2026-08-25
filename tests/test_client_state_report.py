@@ -74,7 +74,7 @@ def test_every_enum_value_has_a_translation():
     assert set(RISK_RU) == {"low", "medium", "high"}
     assert set(WHO_RU) == {"broker", "client", "unknown"}
     assert set(VERDICT_RU) == {
-        "good", "tolerable", "poor", "too_early", "out_of_qc",
+        "good", "tolerable", "poor", "too_early", "out_of_qc", "no_rules",
     }
 
 
@@ -344,3 +344,53 @@ def test_a_card_in_both_sections_is_printed_once():
     assert "#10 ЖК «Hide» — см. выше" in body
     assert "ТЕРЯЕМ КЛИЕНТА — 1" in body
     assert "НЕДОРАБОТКА БРОКЕРА — 1" in body
+
+
+# ── Пробел в правилах ≠ решение агентства ──────────────────────────────
+def test_a_stage_without_rules_is_not_called_out_of_quality_control():
+    """«Сняли с контроля» — решение; «правил нет» — наша недоделка."""
+    result = _res(11)
+    result["state"]["verdict"] = "no_rules"
+    result["state"]["verdict_reason"] = "правила полноты для этапа не заданы"
+    card = format_card(result, "Закрытая продажа", WEBHOOK)
+    assert "полнота не оценивалась" in card
+    assert "вне контроля качества" not in card
+    assert "no_rules" not in card
+
+
+def test_summary_names_the_stages_that_have_no_rules():
+    summary = format_summary({
+        "funnel_label": "Продавцы",
+        "total": 10, "analyzed": 10,
+        "temperature": {"hot": 1, "warm": 0, "cold": 4, "unknown": 5},
+        "verdicts": {"good": 0, "tolerable": 0, "poor": 5, "too_early": 1,
+                     "out_of_qc": 0, "no_rules": 4},
+        "stages_without_rules": {"UC_A94BGF": 4},
+        "cost_rub": 3.92, "cost_rub_per_card": 0.392,
+    })
+    assert "Правила полноты не заданы для этапов: Закрытая продажа (На сайт) 4" in summary
+    assert "полнота не оценивалась 4" in summary
+
+
+def test_summary_stays_quiet_when_every_stage_has_rules():
+    summary = format_summary({
+        "funnel_label": "Покупатели",
+        "total": 1, "analyzed": 1,
+        "temperature": {"hot": 0, "warm": 1, "cold": 0, "unknown": 0},
+        "verdicts": {"good": 1, "tolerable": 0, "poor": 0, "too_early": 0,
+                     "out_of_qc": 0, "no_rules": 0},
+        "stages_without_rules": {},
+        "cost_rub": 0.5, "cost_rub_per_card": 0.5,
+    })
+    assert "Правила полноты не заданы" not in summary
+
+
+def test_a_trace_from_today_is_not_called_zero_days_ago():
+    result = _res(12)
+    result["state"]["work_evidence"] = {
+        "proven": False, "reason": "comment_says_nothing",
+        "window_days": 1, "days_quiet": 0.3,
+    }
+    card = format_card(result, "диспозл excel", WEBHOOK)
+    assert "последний след сегодня" in card
+    assert "0 дн. назад" not in card

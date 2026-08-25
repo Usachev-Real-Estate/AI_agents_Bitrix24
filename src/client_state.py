@@ -500,8 +500,12 @@ def compute_completeness_verdict(
     # («budget», «timeline») в отчёте делать нечего.
     fact_names = {key: name for key, name in requirements}
     if not required_keys:
-        # Этап не покрыт правилами — не судим.
-        return "out_of_qc", "для этапа не заданы требования"
+        # Отдельный вердикт, а не out_of_qc. «Сняли с контроля» — решение
+        # агентства, «правила не написаны» — наша недоделка, и показывать
+        # вторую как первую значит спрятать пробел за формулировкой.
+        # Разбор при этом идёт: температура, риск потери и подтверждение
+        # работы брокера от полноты карточки не зависят.
+        return "no_rules", "правила полноты для этапа не заданы"
 
     # Отсрочка проверяется РАНЬШЕ, чем «карточка неинформативна». Лид, который
     # пришёл час назад, пуст по определению — брокер ещё не звонил. Пометить
@@ -1337,8 +1341,10 @@ def run_client_state(
         "temperature": {"hot": 0, "warm": 0, "cold": 0, "unknown": 0},
         "verdicts": {
             "good": 0, "tolerable": 0, "poor": 0,
-            "too_early": 0, "out_of_qc": 0,
+            "too_early": 0, "out_of_qc": 0, "no_rules": 0,
         },
+        # Этапы, по которым правила полноты ещё не написаны: {этап: сколько}.
+        "stages_without_rules": {},
         "results": [],
     }
     for deal in deals:
@@ -1428,6 +1434,10 @@ def run_client_state(
         verdict = str(state.get("verdict") or "out_of_qc")
         if verdict in stats["verdicts"]:
             stats["verdicts"][verdict] += 1
+        if verdict == "no_rules":
+            stats["stages_without_rules"][stage_code] = (
+                stats["stages_without_rules"].get(stage_code, 0) + 1
+            )
         if state.get("recoverable") is False:
             stats["unrecoverable"] += 1
     usage = stats["usage"]

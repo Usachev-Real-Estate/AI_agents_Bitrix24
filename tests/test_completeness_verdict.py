@@ -393,3 +393,30 @@ def test_the_score_does_not_move_the_threshold():
     assert compute_completeness_verdict(
         "C18:NEW", two_missing, BUYER_PROFILE, hours_on_stage=100,
     )[0] == "poor"
+
+
+def test_a_stage_without_rules_gets_its_own_verdict():
+    """Раньше такой этап показывался как «вне контроля качества» —
+    ненаписанные правила выглядели решением руководства."""
+    level, why = compute_completeness_verdict(
+        "UC_A94BGF", _state(), SELLER_PROFILE, hours_on_stage=1000,
+    )
+    assert level == "no_rules"
+    assert "правила полноты" in why
+
+
+def test_an_excluded_stage_still_says_out_of_qc():
+    """Решение агентства должно остаться отличимым от нашей недоделки."""
+    level, why = compute_completeness_verdict(
+        "UC_KEOOG8", _state(), SELLER_PROFILE, hours_on_stage=1000,
+    )
+    assert level == "out_of_qc"
+    assert "у руководства" in why
+
+
+def test_the_uncovered_seller_stage_is_the_one_the_pilot_hit():
+    """Пин на конкретный пробел: 4 из 10 карточек продавцов ушли в него."""
+    from funnel_profiles import SELLER_STAGE_REQUIREMENTS, SELLER_STAGES_OUT_OF_QC
+
+    assert "UC_A94BGF" not in SELLER_STAGE_REQUIREMENTS
+    assert "UC_A94BGF" not in SELLER_STAGES_OUT_OF_QC
