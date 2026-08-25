@@ -15,6 +15,7 @@ from config import Settings, get_settings
 from db import get_client_state, init_db, save_client_state
 from lead_quality_audit import _message_content_to_str
 from funnel_profiles import BUYER_PROFILE, SELLER_PROFILE, FunnelProfile
+from broker_work import assess_broker_work
 from llm import estimate_cost, make_llm
 from masking import MaskMap, apply_mask, build_mask_map, unmask
 from tools import (
@@ -116,18 +117,24 @@ def _event_sort_key(item: dict[str, Any]) -> str:
 
 
 def _normalize_timeline_item(item: dict[str, Any]) -> dict[str, Any]:
+    # has_files намеренно НЕ входит в _event_identity: иначе появление поля
+    # переписало бы content_hash всем карточкам сразу и весь портфель ушёл бы
+    # в модель заново. Доказательства работы считаются из живой карточки на
+    # каждом прогоне, а не из кэша, поэтому в отпечатке им делать нечего.
     return {
         "kind": "comment",
         "id": _coerce_int(item.get("id") or item.get("ID")),
         "created": _clean_str(item.get("created") or item.get("CREATED")),
         "text": _clean_str(item.get("comment") or item.get("COMMENT")),
         "author_id": _coerce_int(item.get("author_id") or item.get("AUTHOR_ID")),
+        "has_files": bool(item.get("has_files")),
     }
 
 
 def _normalize_activity_item(item: dict[str, Any]) -> dict[str, Any]:
     return {
         "kind": "activity",
+        "direction": _coerce_int(item.get("DIRECTION") or item.get("direction")),
         "id": _coerce_int(item.get("ID") or item.get("id")),
         "created": _clean_str(
             item.get("CREATED") or item.get("START_TIME") or item.get("created"),
@@ -517,15 +524,20 @@ def compute_completeness_verdict(
     ]
 
     qual_gap = qualification_ok is False
+    # Сколько фактов всё-таки есть. Без этой цифры «плохо» у карточки с шестью
+    # фактами из восьми и у пустой карточки выглядит одинаково, и РОП не может
+    # понять, с какой начинать. Порог вердикта при этом не меняется.
+    present = len(required_keys) - len(missing)
+    score = f" (есть {present} из {len(required_keys)})"
     if len(missing) >= 2 or (missing and qual_gap):
         return "poor", (
-            "не хватает обязательных фактов: " + ", ".join(missing)
+            "не хватает обязательных фактов: " + ", ".join(missing) + score
             + (" · ключевые поля карточки не заполнены" if qual_gap else "")
         )
     if missing or minor or qual_gap:
         reasons = []
         if missing:
-            reasons.append(f"нет факта: {missing[0]}")
+            reasons.append(f"нет факта: {missing[0]}{score}")
         if minor:
             reasons.append(f"мелкие расхождения: {len(minor)}")
         if qual_gap:
@@ -596,6 +608,20 @@ def _normalize_stage_facts(raw: Any) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _normalize_broker_work(raw: Any) -> dict[str, Any]:
+    """Что модель прочитала про подтверждение работы.
+
+    По умолчанию comment_informative=True: молчание модели не должно
+    превращаться в претензию к брокеру.
+    """
+    data = raw if isinstance(raw, dict) else {}
+    return {
+        "claims_messaged": bool(data.get("claims_messaged")),
+        "claims_messaged_quote": _clean_str(data.get("claims_messaged_quote")),
+        "comment_informative": bool(data.get("comment_informative", True)),
+    }
+
+
 def _normalize_signals(raw: Any, profile: FunnelProfile) -> dict[str, Any]:
     """Facts the temperature rules are computed from (funnel-specific)."""
     data = raw if isinstance(raw, dict) else {}
@@ -663,6 +689,7 @@ def _normalize_state(
         "contradictions": _normalize_contradictions(raw.get("contradictions")),
         "signals": _normalize_signals(raw.get("signals"), profile),
         "stage_facts": _normalize_stage_facts(raw.get("stage_facts")),
+        "broker_work": _normalize_broker_work(raw.get("broker_work")),
     }
 
 
@@ -898,6 +925,101 @@ def prepare_deal_record(deal: dict[str, Any], settings: Settings | None = None) 
     return record
 
 
+def apply_derived_verdict(
+    state: dict[str, Any],
+    record: dict[str, Any],
+    profile: FunnelProfile,
+    envelope: dict[str, Any] | None = None,
+    events: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Пересчитать температуру и вердикт по уже извлечённым фактам.
+
+    И то и другое — чистые функции от state, этапа и его возраста, а не ответ
+    модели. Считать их один раз и класть в кэш нельзя по двум причинам:
+
+    * возраст этапа растёт. Карточка, разобранная внутри отсрочки, навсегда
+      осталась бы «рано судить», даже если после этого в ней месяц ничего не
+      происходит — а это ровно тот случай, ради которого аудит и существует;
+    * правила меняются. content_hash покрывает содержимое карточки, но не
+      порог вердикта, поэтому после правки правил кэш выдавал бы старые
+      оценки как текущие.
+
+    Поэтому дорогое (разбор моделью) кэшируется, а дешёвое считается заново
+    на каждом прогоне.
+    """
+    deal_id = _coerce_int(record.get("ID") or record.get("id"))
+    envelope = envelope if envelope is not None else {}
+
+    level, why = compute_temperature(
+        state.get("signals", {}),
+        recoverable=bool(state.get("recoverable", True)),
+        profile=profile,
+    )
+    state["temperature"] = level
+    state["temperature_reason"] = why
+    envelope["temperature"] = level
+
+    stage_id = _clean_str(record.get("STAGE_ID") or record.get("stage_id"))
+    hours_on_stage = _stage_hours(record, datetime.now(timezone.utc))
+    envelope["stage_age_known"] = hours_on_stage is not None
+    if hours_on_stage is None:
+        logger.info(
+            "Deal %s: момент входа на этап неизвестен — отсрочка не применяется",
+            deal_id,
+        )
+
+    # Прямая проверка полей квалификации — только на этапе, для которого
+    # она настроена. Иначе qualification_ok=None, вердикт её не учитывает.
+    qualification_ok: bool | None = None
+    if stage_id == profile.qualification_stage:
+        qualification_ok, missing_fields = check_qualification_fields(record, profile)
+        envelope["qualification_missing"] = missing_fields
+        if missing_fields:
+            logger.info(
+                "Deal %s: unfilled qualification fields: %s",
+                deal_id, ", ".join(missing_fields),
+            )
+
+    verdict, verdict_reason = compute_completeness_verdict(
+        stage_id, state, profile,
+        hours_on_stage=hours_on_stage,
+        qualification_ok=qualification_ok,
+    )
+    state["verdict"] = verdict
+    state["verdict_reason"] = verdict_reason
+    envelope["verdict"] = verdict
+
+    # Подтверждение работы брокера считается по живой карточке на каждом
+    # прогоне: скриншот могли приложить уже после разбора, а обвинение по
+    # устаревшим данным — худшее, что этот отчёт может сделать.
+    work = state.get("broker_work") or {}
+    claims = bool(work.get("claims_messaged"))
+    if claims and events is not None:
+        # Цитата ведёт к претензии, поэтому планка та же, что у evidence:
+        # не нашли дословно — считаем, что утверждения не было.
+        corpus = _normalize_for_match(
+            " ".join(str(e.get("text") or "") for e in events),
+        )
+        needle = _normalize_for_match(work.get("claims_messaged_quote"))
+        if not needle or needle not in corpus:
+            logger.info(
+                "Deal %s: цитата «написал клиенту» не найдена в карточке — "
+                "утверждение не засчитано",
+                deal_id,
+            )
+            claims = False
+    state["work_evidence"] = assess_broker_work(
+        events or [],
+        profile=profile,
+        stage_id=stage_id,
+        hours_on_stage=hours_on_stage,
+        claims_messaged=claims,
+        comment_informative=bool(work.get("comment_informative", True)),
+    )
+    envelope["work_proven"] = state["work_evidence"]["proven"]
+    return state
+
+
 def analyze_deal(
     deal: dict[str, Any],
     *,
@@ -964,11 +1086,23 @@ def analyze_deal(
     if stored and stored.get("content_hash") == content_hash and not force:
         envelope["skipped"] = True
         envelope["reason"] = "unchanged"
+        cached = json.loads(stored.get("state_json") or "{}")
+        # Факты берём из кэша, оценку считаем заново: этап успел постареть,
+        # а правила могли поменяться с прошлого прогона.
+        apply_derived_verdict(cached, record, profile, envelope, events)
         # В БД состояние лежит замаскированным — разворачиваем, иначе отчёт
         # покажет КЛИЕНТ_1 вместо имени всюду, где карточка взята из кэша.
-        envelope["state"] = unmask_state(
-            json.loads(stored.get("state_json") or "{}"), mask_map, profile,
-        )
+        envelope["state"] = unmask_state(cached, mask_map, profile)
+        if not settings.dry_run:
+            save_client_state(
+                deal_id=deal_id,
+                state_json=json.dumps(cached, ensure_ascii=False),
+                confidence=float(cached.get("confidence") or 0.0),
+                content_hash=content_hash,
+                analyzed_at=str(stored.get("analyzed_at") or ""),
+                model=str(stored.get("model") or ""),
+                analyzed_events=str(stored.get("analyzed_events") or ""),
+            )
         return envelope
 
     previous_state = None
@@ -994,6 +1128,7 @@ def analyze_deal(
         # верным. Перезаписываем хэш, чтобы следующий прогон не пришёл сюда же.
         envelope["skipped"] = True
         envelope["reason"] = "no_new_events"
+        apply_derived_verdict(previous_state, record, profile, envelope, events)
         envelope["state"] = unmask_state(previous_state, mask_map, profile)
         if not settings.dry_run:
             init_db()
@@ -1078,15 +1213,6 @@ def analyze_deal(
         )
     envelope["contradictions_dropped"] = len(unfounded)
 
-    level, why = compute_temperature(
-        state.get("signals", {}),
-        recoverable=bool(state.get("recoverable", True)),
-        profile=profile,
-    )
-    state["temperature"] = level
-    state["temperature_reason"] = why
-    envelope["temperature"] = level
-
     # Проверить цитаты stage_facts: любая невалидная цитата → factum отсутствует.
     # Если модель поставила present=True, но цитаты нет в карточке — это
     # выдумка, обнуляем факт вместо того чтобы засчитать его.
@@ -1110,35 +1236,7 @@ def analyze_deal(
         )
     envelope["stage_facts_dropped"] = unquoted
 
-    stage_id = _clean_str(record.get("STAGE_ID") or record.get("stage_id"))
-    hours_on_stage = _stage_hours(record, datetime.now(timezone.utc))
-    envelope["stage_age_known"] = hours_on_stage is not None
-    if hours_on_stage is None:
-        logger.info(
-            "Deal %s: момент входа на этап неизвестен — отсрочка не применяется",
-            deal_id,
-        )
-
-    # Прямая проверка полей квалификации — только на этапе, для которого
-    # она настроена. Иначе qualification_ok=None, вердикт её не учитывает.
-    qualification_ok: bool | None = None
-    if stage_id == profile.qualification_stage:
-        qualification_ok, missing_fields = check_qualification_fields(record, profile)
-        envelope["qualification_missing"] = missing_fields
-        if missing_fields:
-            logger.info(
-                "Deal %s: unfilled qualification fields: %s",
-                deal_id, ", ".join(missing_fields),
-            )
-
-    verdict, verdict_reason = compute_completeness_verdict(
-        stage_id, state, profile,
-        hours_on_stage=hours_on_stage,
-        qualification_ok=qualification_ok,
-    )
-    state["verdict"] = verdict
-    state["verdict_reason"] = verdict_reason
-    envelope["verdict"] = verdict
+    apply_derived_verdict(state, record, profile, envelope, events)
 
     # В БД уходит замаскированная копия: на следующем прогоне она вернётся
     # в модель как previous_state. Разворачиваем только то, что читают люди.

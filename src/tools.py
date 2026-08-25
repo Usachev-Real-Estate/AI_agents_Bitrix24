@@ -2629,11 +2629,16 @@ def _extract_comments(raw: Any) -> list[dict[str, Any]]:
     """
     comments: list[dict[str, Any]] = []
     for item in _as_list(raw):
+        files = item.get("FILES") or item.get("files") or []
         comments.append(
             {
                 "author_id": int(item.get("AUTHOR_ID") or item.get("authorId") or 0),
                 "comment": _clean_str(item.get("COMMENT") or item.get("comment")),
                 "created": _clean_str(item.get("CREATED") or item.get("created")),
+                # Только факт наличия вложения. Само содержимое не читаем: для
+                # правила «приложи скриншот переписки» хватает того, что файл
+                # есть, а картинку всё равно смотрит человек.
+                "has_files": bool(_as_list(files)),
             }
         )
     return comments
@@ -2946,7 +2951,9 @@ def _fetch_entity_timeline(
                     "ENTITY_ID": entity_id,
                     "ENTITY_TYPE": entity_type,
                 },
-                "select": ["ID", "AUTHOR_ID", "COMMENT", "CREATED"],
+                # FILES — вложения комментария. Нужны правилу «брокер написал,
+                # что написал клиенту» → пусть приложит скриншот переписки.
+                "select": ["ID", "AUTHOR_ID", "COMMENT", "CREATED", "FILES"],
             },
         )
         return (entity_id, _extract_comments(raw), False)
@@ -2988,6 +2995,11 @@ def _fetch_deal_activities(deal_id: int) -> tuple[int, list[dict[str, Any]], boo
                     "COMPLETED",
                     "SUBJECT",
                     "DESCRIPTION",
+                    # TYPE_ID отличает звонок от задачи, DIRECTION — входящий
+                    # от исходящего. Без них «брокер звонил» не отличить от
+                    # «брокер поставил себе задачу позвонить».
+                    "TYPE_ID",
+                    "DIRECTION",
                 ],
             },
         )

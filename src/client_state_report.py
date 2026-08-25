@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from broker_work import REASON_RU as WORK_REASON_RU
 from buyer_commission_reminder import deal_url
 from client_state import MATERIAL_SEVERITY
 from tools import BUYERS_STAGE_NAMES, SELLERS_STAGE_NAMES
@@ -149,6 +150,19 @@ def format_card(
     lines.append(f"Ситуация: {humanize(state.get('situation'))}")
     lines.append(f"Шаг: {format_next_step(state.get('next_step'))}")
 
+    work = state.get("work_evidence") or {}
+    if work and not work.get("proven"):
+        quiet = work.get("days_quiet")
+        quiet_text = (
+            f", последний след {quiet:.0f} дн. назад" if isinstance(quiet, (int, float))
+            else ", следов нет вовсе"
+        )
+        lines.append(
+            f"🔧 Работа не подтверждена: "
+            f"{WORK_REASON_RU.get(str(work.get('reason')), work.get('reason'))}"
+            f" (норма этапа {work.get('window_days')} дн.{quiet_text})",
+        )
+
     if state.get("recoverable") is False:
         lines.append("⚠️ Карточка неинформативна — картину клиента не восстановить")
 
@@ -270,3 +284,103 @@ def format_stage_mix(stages: dict[str, int]) -> str:
     return "Этапы выборки: " + ", ".join(
         f"{stage_name(code)} {count}" for code, count in ranked
     )
+
+
+# ── Два раздела: клиент уходит / брокер не дорабатывает ────────────────
+def _is_losing_client(state: dict[str, Any]) -> bool:
+    """Признаки, что клиента теряем: остыл, замолчал, картины нет."""
+    if str(state.get("temperature") or "") == "cold":
+        return True
+    if state.get("recoverable") is False:
+        return True
+    return bool(state.get("contradictions"))
+
+
+def split_sections(
+    results: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Разложить карточки на «теряем клиента», «недоработка», «в работе».
+
+    Разделение по зоне ответственности, а не по строгости. «Клиент остыл» —
+    забрать себе и решать; «брокер не подтвердил работу» — спросить с брокера.
+    Смешивать их в один список значит заставить РОПа сортировать вручную то,
+    что уже известно.
+
+    Карточка может попасть в оба раздела: клиент остывает ИМЕННО потому, что
+    с ним не работают, и прятать одну половину этой связки нельзя.
+    """
+    losing: list[dict[str, Any]] = []
+    neglected: list[dict[str, Any]] = []
+    fine: list[dict[str, Any]] = []
+    for result in results:
+        state = result.get("state") or {}
+        if not state:
+            continue
+        work = state.get("work_evidence") or {}
+        is_losing = _is_losing_client(state)
+        is_neglected = bool(work) and not work.get("proven")
+        if is_losing:
+            losing.append(result)
+        if is_neglected:
+            neglected.append(result)
+        if not is_losing and not is_neglected:
+            fine.append(result)
+    return losing, neglected, fine
+
+
+def format_sections(
+    results: list[dict[str, Any]],
+    titles: dict[int, str],
+    webhook_url: str,
+) -> str:
+    """Тело отчёта: сначала где теряем клиента, потом где не дорабатывают."""
+    losing, neglected, fine = split_sections(results)
+    blocks: list[str] = []
+    printed: set[int] = set()
+
+    def _block(header: str, rows: list[dict[str, Any]], empty: str) -> None:
+        blocks.append(f"[B]{header}[/B]")
+        if not rows:
+            blocks.append(empty)
+            blocks.append("")
+            return
+        for row in rows:
+            deal_id = int(row.get("deal_id") or 0)
+            title = titles.get(deal_id, "")
+            if deal_id in printed:
+                # Карточка уже напечатана разбором выше. Повторять её целиком
+                # значит удвоить отчёт ради строки, которую читатель только
+                # что прочёл.
+                blocks.append(f"#{deal_id} {title} — см. выше".strip())
+                blocks.append("")
+                continue
+            printed.add(deal_id)
+            blocks.append(format_card(row, title, webhook_url))
+            blocks.append("")
+
+    _block(
+        f"🚨 ТЕРЯЕМ КЛИЕНТА — {len(losing)}", losing,
+        "Ни одной карточки с признаками потери.",
+    )
+    _block(
+        f"🔧 НЕДОРАБОТКА БРОКЕРА — {len(neglected)}", neglected,
+        "Работа подтверждена по всем карточкам.",
+    )
+    if fine:
+        # Карточки без претензий сжимаются в строку: клиент, температура и
+        # следующий шаг. Полный разбор по ним у РОПа не спрашивают, а четыре
+        # экрана текста про здоровые сделки топят те две, ради которых
+        # отчёт открывали.
+        blocks.append(f"[B]✅ В РАБОТЕ — {len(fine)}[/B]")
+        for row in fine:
+            deal_id = int(row.get("deal_id") or 0)
+            state = row.get("state") or {}
+            icon = TEMPERATURE_ICON.get(
+                str(state.get("temperature") or ""), "",
+            )
+            step = format_next_step(state.get("next_step"))
+            blocks.append(
+                f"{icon} #{deal_id} {titles.get(deal_id, '')} — {step}".strip(),
+            )
+        blocks.append("")
+    return "\n".join(blocks).strip()

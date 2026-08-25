@@ -133,16 +133,37 @@ def test_report_carries_no_service_codes(pilot):
         assert code not in report, f"служебный код {code!r} дошёл до РОПа"
 
 
-def test_report_shows_a_cached_card_instead_of_a_skip_line(pilot):
+def test_a_problem_card_from_cache_is_shown_in_full(pilot):
+    """Карточка с претензией печатается разбором, даже если он из кэша."""
     cached = _stats("Покупатели", analyzed=0, skipped_unchanged=1)
     cached["results"][0]["skipped"] = True
     cached["results"][0]["reason"] = "no_new_events"
+    cached["results"][0]["state"]["work_evidence"] = {
+        "proven": False, "reason": "no_trace", "window_days": 3,
+        "days_quiet": 12.0,
+    }
     report = pilot.format_report(
         [(cached, {16858: "Михаил Лужники"})],
         "https://b24-po7frr.bitrix24.ru/rest/1/t/",
     )
+    assert "НЕДОРАБОТКА БРОКЕРА — 1" in report
     assert "Цель: Покупка" in report
     assert "без изменений с прошлого разбора" in report
+
+
+def test_a_healthy_card_is_compressed_to_one_line(pilot):
+    """Четыре экрана про здоровые сделки топят те две, ради которых открывали."""
+    healthy = _stats("Покупатели")
+    healthy["results"][0]["state"]["work_evidence"] = {
+        "proven": True, "reason": "call", "window_days": 3, "days_quiet": 1.0,
+    }
+    report = pilot.format_report(
+        [(healthy, {16858: "Михаил Лужники"})],
+        "https://b24-po7frr.bitrix24.ru/rest/1/t/",
+    )
+    assert "В РАБОТЕ — 1" in report
+    assert "#16858 Михаил Лужники — Позвонить" in report
+    assert "Ситуация:" not in report
 
 
 def test_judgeable_order_excludes_stages_qc_will_not_judge(pilot, monkeypatch):
@@ -180,11 +201,25 @@ def test_random_order_is_the_default_and_reproducible(pilot, monkeypatch):
     assert first != ["1", "2", "3", "4", "5"]
 
 
-def test_random_order_keeps_stages_that_judgeable_would_drop(pilot, monkeypatch):
-    """Представительная выборка показывает воронку целиком, включая вне-QC."""
+@pytest.mark.parametrize("order", ["random", "judgeable", "newest"])
+def test_out_of_qc_stages_never_take_a_slot_in_the_sample(pilot, monkeypatch, order):
+    """По ним вердикта не будет в любом режиме, а место в выборке они занимают."""
     from funnel_profiles import SELLER_PROFILE
 
-    pool = [{"ID": str(i), "STAGE_ID": "UC_KEOOG8"} for i in range(1, 6)]
-    monkeypatch.setattr(pilot, "_bx_get_all_sync", lambda m, p: list(pool))
-    assert len(pilot.pick_deals(SELLER_PROFILE, 0, 5, "random")) == 5
-    assert pilot.pick_deals(SELLER_PROFILE, 0, 5, "judgeable") == []
+    monkeypatch.setattr(pilot, "_bx_get_all_sync", lambda m, p: [
+        {"ID": "1", "STAGE_ID": "UC_KEOOG8"},   # Переговоры — вне QC
+        {"ID": "2", "STAGE_ID": "UC_FADPBF"},   # Поиск клиента — вне QC
+        {"ID": "3", "STAGE_ID": "NEW"},
+        {"ID": "4", "STAGE_ID": "FINAL_INVOICE"},
+    ])
+    picked = pilot.pick_deals(SELLER_PROFILE, 0, 10, order)
+    assert sorted(d["ID"] for d in picked) == ["3", "4"]
+
+
+def test_a_funnel_entirely_out_of_qc_yields_an_empty_sample(pilot, monkeypatch):
+    from funnel_profiles import SELLER_PROFILE
+
+    monkeypatch.setattr(pilot, "_bx_get_all_sync", lambda m, p: [
+        {"ID": str(i), "STAGE_ID": "UC_KEOOG8"} for i in range(1, 6)
+    ])
+    assert pilot.pick_deals(SELLER_PROFILE, 0, 5) == []

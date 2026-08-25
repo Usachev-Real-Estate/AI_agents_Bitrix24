@@ -25,7 +25,7 @@ from client_state import (  # noqa: E402
     _stage_hours,
     run_client_state,
 )
-from client_state_report import format_card, format_summary  # noqa: E402
+from client_state_report import format_sections, format_summary  # noqa: E402
 from config import get_settings, setup_logging  # noqa: E402
 from db import init_db  # noqa: E402
 from funnel_profiles import BUYER_PROFILE, SELLER_PROFILE, FunnelProfile  # noqa: E402
@@ -44,16 +44,20 @@ def pick_deals(
 ) -> list[dict]:
     """Открытые сделки воронки.
 
-    Порядок задаёт, какую часть воронки увидит прогон, и каждый режим отвечает
-    на свой вопрос. Крайности лгут по-разному, поэтому режим выбирается осознанно:
+    Этапы вне контроля качества («Переговоры», «Поиск клиента», «Задаток»,
+    «Агент» и прочие, снятые агентством) отсеиваются во всех режимах: по ним
+    вердикта не будет в любом случае, а место в выборке они занимают. В
+    прошлом прогоне так ушло 6 слотов из 10 у продавцов.
 
-    * "random" (по умолчанию) — представительная выборка. Отвечает на вопрос
-      «как обстоят дела в воронке». Единственный режим, по которому можно
-      судить о распределении: остальные два по построению набирают крайности.
-    * "judgeable" — дольше всего на этапе СРЕДИ тех этапов, что QC судит.
-      Отвечает на «где хуже всего». Этапы вне контроля качества отсеиваются:
-      без этого выборка набивается «Переговорами» и «Поиском клиента», где
-      дела стоят месяцами, и прогон не разбирает ни одной карточки.
+    Порядок задаёт, какую часть оставшейся воронки увидит прогон, и каждый
+    режим отвечает на свой вопрос. Крайности лгут по-разному:
+
+    * "random" (по умолчанию) — представительная выборка среди карточек под
+      контролем качества. Отвечает на «как обстоят дела». Единственный режим,
+      по которому можно судить о распределении.
+    * "judgeable" — дольше всего на этапе. Отвечает на «где хуже всего»;
+      по построению набирает худшее, поэтому доля «плохо» в нём ни о чём
+      не говорит.
     * "newest" — самые свежие. Почти все моложе отсрочки, поэтому годится
       только для отладки свежих лидов, не для оценки качества.
 
@@ -72,7 +76,11 @@ def pick_deals(
             ],
         },
     )
-    deals = [d for d in _as_list(raw) if isinstance(d, dict)]
+    deals = [
+        d for d in _as_list(raw)
+        if isinstance(d, dict)
+        and _clean_str(d.get("STAGE_ID")) not in profile.stages_out_of_qc
+    ]
     if order == "newest":
         deals.sort(key=lambda d: _coerce_int(d.get("ID")), reverse=True)
         return deals[:limit]
@@ -85,17 +93,13 @@ def pick_deals(
         rng.shuffle(pool)
         return pool[:limit]
 
-    judgeable = [
-        d for d in deals
-        if _clean_str(d.get("STAGE_ID")) not in profile.stages_out_of_qc
-    ]
     now = datetime.now(timezone.utc)
     # Карточки без известного возраста ставим в конец: по ним отсрочка не
     # применяется, и они дали бы завышенную строгость на ровном месте.
-    judgeable.sort(
+    deals.sort(
         key=lambda d: (_stage_hours(d, now) is None, -(_stage_hours(d, now) or 0.0)),
     )
-    return judgeable[:limit]
+    return deals[:limit]
 
 
 def format_report(
@@ -113,10 +117,10 @@ def format_report(
     for stats, titles in sections:
         parts.append(format_summary(stats))
         parts.append("")
-        for result in stats.get("results", []):
-            deal_id = _coerce_int(result.get("deal_id"))
-            parts.append(format_card(result, titles.get(deal_id, ""), webhook_url))
-            parts.append("")
+        parts.append(
+            format_sections(stats.get("results", []), titles, webhook_url),
+        )
+        parts.append("")
     return "\n".join(parts).strip()
 
 

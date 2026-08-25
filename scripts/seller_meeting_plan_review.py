@@ -329,16 +329,20 @@ def main() -> int:
         for future in as_completed(comment_futs):
             did = comment_futs[future]
             try:
-                _, comments = future.result()
-                timelines[did] = comments if isinstance(comments, list) else []
+                _, comments, failed = future.result()
+                timelines[did] = (
+                    [] if failed or not isinstance(comments, list) else comments
+                )
             except Exception:
                 logger.exception("timeline failed deal=%s", did)
                 timelines[did] = []
         for future in as_completed(act_futs):
             did = act_futs[future]
             try:
-                _, acts = future.result()
-                activities[did] = [a for a in acts if isinstance(a, dict)]
+                _, acts, failed = future.result()
+                activities[did] = (
+                    [] if failed else [a for a in acts if isinstance(a, dict)]
+                )
             except Exception:
                 logger.exception("activities failed deal=%s", did)
                 activities[did] = []

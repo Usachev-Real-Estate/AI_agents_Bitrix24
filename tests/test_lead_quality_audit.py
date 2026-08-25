@@ -292,3 +292,88 @@ def test_quality_audit_sends_to_admin_not_report_chat(monkeypatch):
     assert sent
     assert sent[0][0] == 154
     assert sent[0][0] != 22358
+
+
+# ── Сбор лидов: контракт с _fetch_entity_timeline ──────────────────────
+def test_timeline_fetch_returns_three_values():
+    """Контракт, который сломался молча.
+
+    _fetch_entity_timeline стала возвращать (id, timeline, failed), три
+    вызова в tools.py обновили, четвёртый — здесь — пропустили. Прод падал
+    пять суток при зелёных тестах.
+    """
+    import inspect
+
+    import tools
+
+    source = inspect.getsource(tools._fetch_entity_timeline)
+    assert "return (entity_id, _extract_comments(raw), False)" in source
+    assert "return (entity_id, [], True)" in source
+
+
+def _lead(lead_id: int) -> dict:
+    return {
+        "ID": str(lead_id), "TITLE": f"Лид {lead_id}", "STATUS_ID": "JUNK",
+        "ASSIGNED_BY_ID": "1", "DATE_CREATE": "2026-08-20T10:00:00+03:00",
+        "COMMENTS": "клиент интересовался квартирой в центре, просил перезвонить",
+        "SOURCE_ID": "CALL",
+    }
+
+
+def _collect(monkeypatch, timeline_result, incoming_result=False):
+    import lead_quality_audit as lq
+
+    monkeypatch.setattr(lq, "_fetch_lead_status_names", lambda: {"JUNK": "Спам"})
+    monkeypatch.setattr(lq, "_bx_get_all_sync", lambda method, params: [_lead(1)])
+    monkeypatch.setattr(lq, "enrich_leads_phone_deal_flags", lambda records: None)
+
+    def _timeline(lead_id, entity_type):
+        if isinstance(timeline_result, Exception):
+            raise timeline_result
+        return timeline_result
+
+    def _incoming(lead_id):
+        if isinstance(incoming_result, Exception):
+            raise incoming_result
+        return incoming_result
+
+    monkeypatch.setattr(lq, "_fetch_entity_timeline", _timeline)
+    monkeypatch.setattr(lq, "lead_has_incoming_activity", _incoming)
+    return lq.collect_spam_nontarget_leads("2026-08-01")
+
+
+def test_collect_unpacks_the_timeline_triple(monkeypatch):
+    """Тест, которого не было: он бы поймал ValueError на проде."""
+    comments = [{"author_id": 1, "comment": "перезвонил", "created": "2026-08-21"}]
+    leads = _collect(monkeypatch, (1, comments, False))
+    assert len(leads) == 1
+    assert leads[0]["timeline"] == comments
+    assert leads[0]["evidence_incomplete"] is False
+
+
+def test_a_failed_timeline_marks_the_lead_incomplete(monkeypatch):
+    """Пустой таймлайн из-за сбоя нельзя показывать модели как молчание."""
+    leads = _collect(monkeypatch, (1, [], True))
+    assert leads[0]["evidence_incomplete"] is True
+    assert is_quality_candidate(leads[0]) is False
+
+
+def test_a_raising_timeline_marks_the_lead_incomplete(monkeypatch):
+    leads = _collect(monkeypatch, RuntimeError("Bitrix down"))
+    assert leads[0]["evidence_incomplete"] is True
+
+
+def test_a_failed_incoming_check_also_excludes_the_lead(monkeypatch):
+    """has_incoming_call=False уходит в модель как «клиент не звонил»."""
+    leads = _collect(
+        monkeypatch, (1, [], False), incoming_result=RuntimeError("timeout"),
+    )
+    assert leads[0]["evidence_incomplete"] is True
+    assert is_quality_candidate(leads[0]) is False
+
+
+def test_a_readable_lead_is_still_a_candidate(monkeypatch):
+    """Починка не должна выключить аудит целиком."""
+    leads = _collect(monkeypatch, (1, [], False), incoming_result=True)
+    assert leads[0]["evidence_incomplete"] is False
+    assert is_quality_candidate(leads[0]) is True

@@ -346,3 +346,50 @@ def test_unknown_stage_age_does_not_grant_an_endless_grace():
         "C18:NEW", _state(recoverable=False), BUYER_PROFILE, hours_on_stage=None,
     )
     assert level == "poor"
+
+
+# ── «Плохо» должно быть сортируемым, иначе им нельзя пользоваться ──────
+def test_poor_verdict_says_how_many_facts_are_present():
+    """Карточка с 5 фактами из 7 и пустая — оба «плохо», но не одно и то же."""
+    almost = _state(stage_facts=_facts(
+        "property_type", "budget", "district", "timeline", "next_step",
+        stage="C18:UC_UFPFKK",
+    ))
+    level, why = compute_completeness_verdict(
+        "C18:UC_UFPFKK", almost, BUYER_PROFILE, hours_on_stage=100,
+    )
+    assert level == "poor"
+    assert "есть 5 из 7" in why
+
+    nothing = _state(stage_facts={})
+    _, why_empty = compute_completeness_verdict(
+        "C18:UC_UFPFKK", nothing, BUYER_PROFILE, hours_on_stage=100,
+    )
+    assert "есть 0 из 7" in why_empty
+
+
+def test_tolerable_verdict_also_carries_the_score():
+    state = _state(stage_facts=_facts(
+        "property_type", "budget", "district", "timeline",
+    ))
+    level, why = compute_completeness_verdict(
+        "C18:NEW", state, BUYER_PROFILE, hours_on_stage=100,
+    )
+    assert level == "tolerable"
+    assert "есть 4 из 5" in why
+
+
+def test_the_score_does_not_move_the_threshold():
+    """Цифра — для сортировки, а не новое правило."""
+    one_missing = _state(stage_facts=_facts(
+        "property_type", "budget", "district", "timeline",
+    ))
+    two_missing = _state(stage_facts=_facts(
+        "property_type", "budget", "district",
+    ))
+    assert compute_completeness_verdict(
+        "C18:NEW", one_missing, BUYER_PROFILE, hours_on_stage=100,
+    )[0] == "tolerable"
+    assert compute_completeness_verdict(
+        "C18:NEW", two_missing, BUYER_PROFILE, hours_on_stage=100,
+    )[0] == "poor"
