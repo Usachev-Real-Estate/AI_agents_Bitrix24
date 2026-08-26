@@ -511,9 +511,14 @@ def next_action(
             f"написать в карточке результат связи с клиентом{tail}"
         )
 
-    if has_open_future_task(events, now):
-        # Дело уже стоит — советовать нечего.
-        return ""
+    scheduled = open_future_deadline(events, now)
+    if scheduled is not None:
+        # Дело уже стоит — советовать нечего, но и молчать нельзя. Пустая
+        # строка в тревожном разделе оставляла РОПа с сигналом без ответа:
+        # карточка помечена «теряем клиента», а что делать — не сказано.
+        # Состояние — тоже ответ: ждём до названного срока.
+        day = scheduled.astimezone(PORTAL_TZ).date().isoformat()
+        return f"Дело стоит на {day} — ждём"
 
     step = state.get("next_step") if isinstance(state.get("next_step"), dict) else {}
     what = str(step.get("what") or "").strip()

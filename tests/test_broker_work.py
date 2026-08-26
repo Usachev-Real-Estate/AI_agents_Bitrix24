@@ -340,9 +340,10 @@ def test_due_task_advice_names_the_deadline() -> None:
     assert "Позвонить" in advice
 
 
-def test_future_task_still_suppresses_advice() -> None:
+def test_future_task_turns_advice_into_a_state_line() -> None:
     events = [_comment(2.0), _task(2.0, (NOW + timedelta(days=2)).isoformat())]
-    assert next_action({"next_step": {"what": "показ", "who": "broker"}}, events, NOW) == ""
+    action = next_action({"next_step": {"what": "показ", "who": "broker"}}, events, NOW)
+    assert action == f"Дело стоит на {(NOW + timedelta(days=2)).date()} — ждём"
 
 
 def test_due_task_advice_beats_a_second_future_task() -> None:

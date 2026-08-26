@@ -173,6 +173,12 @@ def format_card(
             quiet_text = ""
         elif quiet < 1:
             quiet_text = ", последний след сегодня"
+        elif quiet < float(work.get("window_days") or 0) + 1:
+            # «Норма 7 дн., последний след 7 дн. назад» — читатель вычитает и
+            # получает ноль, а мы при этом обвиняем. У самой границы округление
+            # до целого превращает верную претензию в арифметическую ошибку,
+            # поэтому у границы показываем десятую долю.
+            quiet_text = f", последний след {quiet:.1f} дн. назад"
         else:
             quiet_text = f", последний след {quiet:.0f} дн. назад"
         due = work.get("due_task") if isinstance(work.get("due_task"), dict) else None

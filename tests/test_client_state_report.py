@@ -586,3 +586,33 @@ def test_a_waiting_card_is_a_reminder_not_an_accusation():
     assert "🔔 Напоминание" in card
     assert "Работа не подтверждена" not in card
     assert "норма" not in card
+
+
+def test_a_gap_at_the_norm_boundary_shows_the_decimal():
+    """#14190: «норма 7 дн., последний след 7 дн. назад» — вычитание даёт ноль.
+
+    У самой границы округление до целого превращает верную претензию в
+    арифметическую ошибку на глазах у читателя.
+    """
+    from broker_work import GAP_NO_TRACE_IN_WINDOW
+    from client_state_report import format_card
+
+    res = _res(11)
+    res["state"]["work_evidence"] = {
+        "proven": False, "reason": GAP_NO_TRACE_IN_WINDOW,
+        "window_days": 7, "days_quiet": 7.2,
+    }
+    card = format_card(res, "ЖК «Воробьев дом»", WEBHOOK)
+    assert "последний след 7.2 дн. назад" in card
+
+
+def test_a_gap_far_from_the_norm_stays_whole():
+    from broker_work import GAP_NO_TRACE_IN_WINDOW
+    from client_state_report import format_card
+
+    res = _res(12)
+    res["state"]["work_evidence"] = {
+        "proven": False, "reason": GAP_NO_TRACE_IN_WINDOW,
+        "window_days": 2, "days_quiet": 16.4,
+    }
+    assert "последний след 16 дн. назад" in format_card(res, "ЖК «Hide»", WEBHOOK)
