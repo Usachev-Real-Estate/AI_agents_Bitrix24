@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from broker_work import REASON_RU as WORK_REASON_RU
+from broker_work import REMINDERS as WORK_REMINDERS
 from buyer_commission_reminder import deal_url
 from client_state import MATERIAL_SEVERITY
 from tools import (
@@ -182,10 +183,17 @@ def format_card(
             )
         else:
             tail = f"норма этапа {work.get('window_days')} дн.{quiet_text}"
+        reason_code = str(work.get("reason") or "")
+        # Напоминание и претензия не должны выглядеть одинаково: «работа не
+        # подтверждена» про карточку, где клиент сам уехал до сентября, —
+        # выговор за чужой отпуск.
+        head = "🔔 Напоминание" if reason_code in WORK_REMINDERS else (
+            "🔧 Работа не подтверждена"
+        )
+        tail = "" if reason_code in WORK_REMINDERS else f" ({tail})"
         lines.append(
-            f"🔧 Работа не подтверждена: "
-            f"{WORK_REASON_RU.get(str(work.get('reason')), work.get('reason'))}"
-            f" ({tail})",
+            f"{head}: "
+            f"{WORK_REASON_RU.get(reason_code, reason_code)}{tail}",
         )
 
     if state.get("recoverable") is False:
@@ -379,8 +387,9 @@ def split_sections(
     list[dict[str, Any]],
     list[dict[str, Any]],
     list[dict[str, Any]],
+    list[dict[str, Any]],
 ]:
-    """Разложить карточки: теряем / недоработка / рано судить / в работе.
+    """Теряем / недоработка / напомнить / рано судить / в работе.
 
     Разделение по зоне ответственности, а не по строгости. «Клиент остыл» —
     забрать себе и решать; «брокер не подтвердил работу» — спросить с брокера.
@@ -393,9 +402,14 @@ def split_sections(
     «Рано судить» — отдельный список, а не «в работе». Карточка, заведённая
     сутки назад и ещё пустая, — не повод для тревоги, но и галочку ✅ ей
     ставить нельзя: работа по ней не началась.
+
+    «Напомнить» — тоже не «в работе» и не «недоработка». Ход за контрагентом,
+    он сам назвал срок, а дела на возврат к разговору нет. Предъявлять тут
+    не за что, но именно так теряются агенты, обещавшие приехать в сентябре.
     """
     losing: list[dict[str, Any]] = []
     neglected: list[dict[str, Any]] = []
+    reminders: list[dict[str, Any]] = []
     waiting: list[dict[str, Any]] = []
     fine: list[dict[str, Any]] = []
     for result in results:
@@ -403,19 +417,23 @@ def split_sections(
         if not state:
             continue
         work = state.get("work_evidence") or {}
+        reason = str(work.get("reason") or "")
         is_losing = _is_losing_client(state)
-        is_neglected = bool(work) and not work.get("proven")
+        is_reminder = bool(work) and reason in WORK_REMINDERS
+        is_neglected = bool(work) and not work.get("proven") and not is_reminder
         if is_losing:
             losing.append(result)
         if is_neglected:
             neglected.append(result)
         if is_losing or is_neglected:
             continue
-        if str(state.get("verdict") or "") == "too_early":
+        if is_reminder:
+            reminders.append(result)
+        elif str(state.get("verdict") or "") == "too_early":
             waiting.append(result)
         else:
             fine.append(result)
-    return losing, neglected, waiting, fine
+    return losing, neglected, reminders, waiting, fine
 
 
 def format_sections(
@@ -424,7 +442,7 @@ def format_sections(
     webhook_url: str,
 ) -> str:
     """Тело отчёта: сначала где теряем клиента, потом где не дорабатывают."""
-    losing, neglected, waiting, fine = split_sections(results)
+    losing, neglected, reminders, waiting, fine = split_sections(results)
     blocks: list[str] = []
     printed: set[int] = set()
 
@@ -456,6 +474,11 @@ def format_sections(
         f"🔧 НЕДОРАБОТКА БРОКЕРА — {len(neglected)}", neglected,
         "Работа подтверждена по всем карточкам.",
     )
+    if reminders:
+        # Не претензия, а напоминание: ход за контрагентом, и вернуться к
+        # разговору нечем. Отдельно от недоработки — иначе брокер получает
+        # выговор за то, что клиент уехал до сентября.
+        _block(f"🔔 НАПОМНИТЬ БРОКЕРУ — {len(reminders)}", reminders, "")
 
     def _one_liners(header: str, rows: list[dict[str, Any]]) -> None:
         """Карточки без претензий — строкой: клиент, температура, шаг.

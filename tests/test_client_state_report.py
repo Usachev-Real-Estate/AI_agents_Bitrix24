@@ -267,7 +267,7 @@ def test_losing_and_neglected_are_separate_lists():
     ok = _res(3, temperature="warm")
     ok["state"]["work_evidence"] = _work(True, "call")
 
-    losing, neglect, _wait, fine = split_sections([cold, neglected, ok])
+    losing, neglect, _rem, _wait, fine = split_sections([cold, neglected, ok])
     assert [r["deal_id"] for r in losing] == [1]
     assert [r["deal_id"] for r in neglect] == [2]
     assert [r["deal_id"] for r in fine] == [3]
@@ -279,7 +279,7 @@ def test_a_card_can_be_in_both_sections():
 
     both = _res(4, temperature="cold")
     both["state"]["work_evidence"] = _work(False)
-    losing, neglect, _wait, fine = split_sections([both])
+    losing, neglect, _rem, _wait, fine = split_sections([both])
     assert [r["deal_id"] for r in losing] == [4]
     assert [r["deal_id"] for r in neglect] == [4]
     assert fine == []
@@ -290,7 +290,7 @@ def test_an_uninformative_card_counts_as_losing_the_client():
 
     blind = _res(5, recoverable=False)
     blind["state"]["work_evidence"] = _work(True, "call")
-    losing, _neglect, _w, _f = split_sections([blind])
+    losing, _neglect, _rem, _w, _f = split_sections([blind])
     assert [r["deal_id"] for r in losing] == [5]
 
 
@@ -301,7 +301,7 @@ def test_a_contradiction_counts_as_losing_the_client():
         "what": "бюджет", "in_card": "30", "in_call": "20", "severity": "high",
     }])
     lying["state"]["work_evidence"] = _work(True, "call")
-    losing, _n, _w, _f = split_sections([lying])
+    losing, _n, _rem, _w, _f = split_sections([lying])
     assert [r["deal_id"] for r in losing] == [6]
 
 
@@ -408,7 +408,7 @@ def test_a_card_inside_its_grace_period_is_not_called_a_loss():
     fresh = _res(20, recoverable=False, temperature="unknown")
     fresh["state"]["verdict"] = "too_early"
     fresh["state"]["verdict_reason"] = "этап моложе отсрочки (23 ч < 72 ч)"
-    losing, _neglect, waiting, fine = split_sections([fresh])
+    losing, _neglect, _rem, waiting, fine = split_sections([fresh])
     assert losing == []
     # И не «в работе»: работа по ней ещё не начиналась, галочка ✅ здесь лжёт.
     assert fine == []
@@ -421,7 +421,7 @@ def test_a_cold_client_inside_grace_is_still_a_loss():
 
     refused = _res(21, temperature="cold")
     refused["state"]["verdict"] = "too_early"
-    losing, _n, _w, _f = split_sections([refused])
+    losing, _n, _rem, _w, _f = split_sections([refused])
     assert [r["deal_id"] for r in losing] == [21]
 
 
@@ -432,7 +432,7 @@ def test_a_contradiction_inside_grace_is_still_a_loss():
         "what": "бюджет", "in_card": "30", "in_call": "20", "severity": "high",
     }])
     lying["state"]["verdict"] = "too_early"
-    losing, _n, _w, _f = split_sections([lying])
+    losing, _n, _rem, _w, _f = split_sections([lying])
     assert [r["deal_id"] for r in losing] == [22]
 
 
@@ -442,7 +442,7 @@ def test_an_empty_card_past_its_grace_is_still_a_loss():
 
     stale = _res(23, recoverable=False, temperature="unknown")
     stale["state"]["verdict"] = "poor"
-    losing, _n, _w, _f = split_sections([stale])
+    losing, _n, _rem, _w, _f = split_sections([stale])
     assert [r["deal_id"] for r in losing] == [23]
 
 
@@ -480,7 +480,7 @@ def test_the_two_sections_stop_being_identical_lists():
     for card in unworked:
         card["state"]["verdict"] = "poor"
         card["state"]["work_evidence"] = _work(False)
-    losing, neglect, _w, _f = split_sections(unworked)
+    losing, neglect, _rem, _w, _f = split_sections(unworked)
     assert losing == []
     assert len(neglect) == 10
 
@@ -494,7 +494,7 @@ def test_a_hot_client_nobody_works_is_a_loss():
 
     hot = _res(16066, temperature="hot")
     hot["state"]["work_evidence"] = _work(False)
-    losing, neglect, _w, _f = split_sections([hot])
+    losing, neglect, _rem, _w, _f = split_sections([hot])
     assert [r["deal_id"] for r in losing] == [16066]
     assert [r["deal_id"] for r in neglect] == [16066]
 
@@ -504,7 +504,7 @@ def test_a_hot_client_being_worked_is_not_a_loss():
 
     hot = _res(1, temperature="hot")
     hot["state"]["work_evidence"] = _work(True, "call")
-    losing, _n, _w, fine = split_sections([hot])
+    losing, _n, _rem, _w, fine = split_sections([hot])
     assert losing == []
     assert [r["deal_id"] for r in fine] == [1]
 
@@ -515,7 +515,7 @@ def test_a_warm_client_unworked_stays_a_broker_matter():
 
     warm = _res(2, temperature="warm")
     warm["state"]["work_evidence"] = _work(False)
-    losing, neglect, _w, _f = split_sections([warm])
+    losing, neglect, _rem, _w, _f = split_sections([warm])
     assert losing == []
     assert [r["deal_id"] for r in neglect] == [2]
 
@@ -565,3 +565,24 @@ def test_client_card_is_not_marked():
     res = _res(9)
     res["state"]["counterparty"] = {"who": "client", "why": ""}
     assert "Контрагент" not in format_card(res, "ЖК «Will Towers»", WEBHOOK)
+
+
+def test_a_waiting_card_is_a_reminder_not_an_accusation():
+    """#16798: агент сам сказал, что наберёт в сентябре."""
+    from broker_work import GAP_WAITING_NO_TASK
+    from client_state_report import format_card, split_sections
+
+    res = _res(10)
+    res["state"]["work_evidence"] = {
+        "proven": False, "reason": GAP_WAITING_NO_TASK,
+        "window_days": 2, "days_quiet": 5.0,
+    }
+    res["state"]["counterparty"] = {"who": "agent", "why": "тип контакта «Агент»"}
+    losing, neglect, reminders, _wait, fine = split_sections([res])
+    assert [r["deal_id"] for r in reminders] == [10]
+    assert neglect == [] and fine == [] and losing == []
+
+    card = format_card(res, "ЖК «Hide»", WEBHOOK)
+    assert "🔔 Напоминание" in card
+    assert "Работа не подтверждена" not in card
+    assert "норма этапа" not in card

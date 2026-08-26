@@ -16,7 +16,11 @@ from db import get_client_state, init_db, save_client_state
 from lead_quality_audit import _message_content_to_str
 from funnel_profiles import BUYER_PROFILE, SELLER_PROFILE, FunnelProfile
 from broker_work import assess_broker_work, next_action
-from counterparty import classify_counterparty, set_contact_type_names
+from counterparty import (
+    WHO_CLIENT,
+    classify_counterparty,
+    set_contact_type_names,
+)
 from llm import estimate_cost, make_llm
 from masking import MaskMap, apply_mask, build_mask_map, unmask
 from tools import (
@@ -1049,6 +1053,7 @@ def apply_derived_verdict(
             return False
         return True
 
+    _step = state.get("next_step") if isinstance(state.get("next_step"), dict) else {}
     state["work_evidence"] = assess_broker_work(
         events or [],
         profile=profile,
@@ -1061,13 +1066,18 @@ def apply_derived_verdict(
             "claims_no_answer", "claims_no_answer_quote", "клиент не отвечает",
         ),
         comment_informative=bool(work.get("comment_informative", True)),
+        # Ход за контрагентом снимает претензию за тишину: он сам назвал срок.
+        next_step_who=str(_step.get("who") or ""),
+        next_step_when=str(_step.get("when") or ""),
     )
     envelope["work_proven"] = state["work_evidence"]["proven"]
 
     # Клиент или агент. Признак ищется в CRM, а не у модели, и считается
     # заново: тип контакта могли проставить уже после разбора.
-    state["counterparty"] = classify_counterparty(
-        record, _as_list(record.get("contacts")),
+    state["counterparty"] = (
+        classify_counterparty(record, _as_list(record.get("contacts")))
+        if profile.counterparty_can_be_agent
+        else {"who": WHO_CLIENT, "why": ""}
     )
 
     # Рецепт, а не только диагноз. Считается заново на каждом прогоне: дело

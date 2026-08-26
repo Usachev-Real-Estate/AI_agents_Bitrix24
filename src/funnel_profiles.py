@@ -482,6 +482,10 @@ class FunnelProfile:
     # основного аудита: две нормы на одно и то же не должны расходиться.
     # Ключ ``_default`` — для этапов вне таблицы.
     work_window_days: dict[str, int] = field(default_factory=lambda: {"_default": 7})
+    # По ту сторону сделки бывает агент, а не сам клиент. У продавцов такого
+    # не бывает: продаёт собственник, и «агент» в карточке продавца означал бы
+    # либо ошибку разметки, либо нашего же сотрудника.
+    counterparty_can_be_agent: bool = True
 
 
 BUYER_PROFILE = FunnelProfile(
@@ -509,6 +513,7 @@ SELLER_PROFILE = FunnelProfile(
     grace_hours=SELLER_GRACE_HOURS,
     stages_out_of_qc=SELLER_STAGES_OUT_OF_QC,
     work_window_days=SELLER_WORK_WINDOW_DAYS,
+    counterparty_can_be_agent=False,
 )
 
 PROFILES = {p.key: p for p in (BUYER_PROFILE, SELLER_PROFILE)}

@@ -21,9 +21,12 @@ from broker_work import (  # noqa: E402
     GAP_NO_TRACE,
     GAP_ONLY_PLANS,
     GAP_OUT_OF_WINDOW,
+    GAP_WAITING_NO_TASK,
     PROVEN_BY_CALL,
     PROVEN_BY_COMMENT,
     PROVEN_BY_SCREENSHOT,
+    PROVEN_BY_WAITING,
+    REMINDERS,
     assess_broker_work,
     judgement_starts_after,
     next_action,
@@ -369,3 +372,67 @@ def test_judgement_starts_after_takes_the_larger_clock():
 
     assert judgement_starts_after(BP, "C18:NEW") == 72.0          # отсрочка > окна
     assert judgement_starts_after(BP, "C18:UC_DVW1P9") == 72.0    # окно 3 дня > 24 ч
+
+
+# --- Ход за контрагентом ---------------------------------------------------
+# #16798: агент сказал, что наберёт в начале сентября и приедет с покупателем.
+# Пять дней тишины брокера — это ожидание, а не бездействие.
+
+def test_ball_with_the_client_and_a_task_is_not_neglect() -> None:
+    events = [
+        _comment(120.0, "агент наберёт в начале сентября"),
+        _task(120.0, (NOW + timedelta(days=8)).isoformat()),
+    ]
+    result = _assess(events, next_step_who="client", next_step_when="начало сентября")
+    assert result["proven"] is True
+    assert result["reason"] == PROVEN_BY_WAITING
+
+
+def test_ball_with_the_client_without_a_task_is_a_reminder() -> None:
+    """Ждать можно, но с делом: иначе ожидание не отличается от забытья."""
+    events = [_comment(120.0, "агент наберёт в начале сентября")]
+    result = _assess(events, next_step_who="client", next_step_when="начало сентября")
+    assert result["proven"] is False
+    assert result["reason"] == GAP_WAITING_NO_TASK
+    assert GAP_WAITING_NO_TASK in REMINDERS
+
+
+def test_a_passed_term_ends_the_waiting() -> None:
+    """Срок со слов клиента прошёл — карточка снова судится обычными правилами."""
+    events = [_comment(120.0, "перезвонит"), _task(120.0, (NOW + timedelta(days=8)).isoformat())]
+    result = _assess(events, next_step_who="client", next_step_when="2026-08-01")
+    assert result["reason"] != PROVEN_BY_WAITING
+
+
+def test_ball_with_the_broker_is_judged_as_before() -> None:
+    events = [_comment(120.0, "перезвоню")]
+    result = _assess(events, next_step_who="broker", next_step_when="2026-09-10")
+    assert result["reason"] != PROVEN_BY_WAITING
+
+
+def test_a_due_task_still_outranks_waiting() -> None:
+    """Своё же дело с наступившим сроком не отменяется ходом клиента."""
+    events = [_comment(120.0, "ждём"), _task(120.0, _ago(30.0))]
+    result = _assess(events, next_step_who="client", next_step_when="начало сентября")
+    assert result["reason"] == GAP_DUE_TASK_NO_RESULT
+
+
+def test_advice_for_an_agent_names_the_agent_and_the_risk() -> None:
+    state = {
+        "next_step": {"what": "приедет с покупателем", "when": "начало сентября",
+                      "who": "client"},
+        "counterparty": {"who": "agent", "why": "тип контакта «Агент»"},
+    }
+    advice = next_action(state, [], NOW)
+    assert "агентом" in advice
+    assert "контакт потеряется" in advice
+
+
+def test_advice_for_a_client_does_not_call_them_an_agent() -> None:
+    state = {
+        "next_step": {"what": "вывезет мусор", "when": "начало сентября",
+                      "who": "client"},
+        "counterparty": {"who": "client", "why": ""},
+    }
+    advice = next_action(state, [], NOW)
+    assert "клиентом" in advice and "агент" not in advice
