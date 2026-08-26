@@ -30,6 +30,10 @@ CALL_ACTIVITY_TYPE_ID = 2
 # Битрикс отдаёт даты со смещением портала; «сегодня» для отчёта — это
 # московские сутки, а не UTC: иначе вечернее дело уезжает во вчера.
 PORTAL_TZ = timezone(timedelta(hours=3))
+# Битрикс ставит делам без срока 9999-12-31. Это не «дело на будущее», а
+# отсутствие срока: принимая его за план, мы снимали совет с карточки, по
+# которой ничего не запланировано, и печатали «дело стоит на 9999-12-31».
+NO_DEADLINE_YEAR = 9000
 
 # Чем подтверждена работа.
 PROVEN_BY_CALL = "call"
@@ -79,6 +83,23 @@ PROVEN = frozenset({
 })
 # Разрывы, за которые не предъявляют, а напоминают.
 REMINDERS = frozenset({GAP_WAITING_NO_TASK})
+
+# Претензии не к срокам, а к записи в карточке. На них отвечает не
+# ожидание, а конкретное действие брокера, и совет должен называть его.
+# #16210: «из комментария не понять, что с клиентом» — и тут же «дело
+# стоит, ждём». Ждать нечего: надо написать, что происходит.
+RECORD_FIXES: dict[str, str] = {
+    GAP_EMPTY_COMMENT: (
+        "Написать в карточке, что происходит с клиентом — одной отметки «в работе» мало"
+    ),
+    GAP_CLAIMED_MESSAGE: (
+        "Приложить скриншот переписки к комментарию о том, что написали клиенту"
+    ),
+    GAP_CLAIMED_NO_ANSWER: (
+        "Зафиксировать попытки дозвона в таймлайне — иначе «клиент не "
+        "отвечает» ничем не подтверждено"
+    ),
+}
 
 REASON_RU: dict[str, str] = {
     PROVEN_BY_CALL: "есть звонок с клиентом",
@@ -456,6 +477,9 @@ def open_future_deadline(
         deadline = _parse(event.get("deadline"))
         if deadline is None or deadline <= now:
             continue
+        if deadline.year >= NO_DEADLINE_YEAR:
+            # Дело без срока. Оно есть, но ничего не держит.
+            continue
         if nearest is None or deadline < nearest:
             nearest = deadline
     return nearest
@@ -510,6 +534,14 @@ def next_action(
             f"Дело стоит на сегодня ({due['deadline']}) — "
             f"написать в карточке результат связи с клиентом{tail}"
         )
+
+    work = state.get("work_evidence") if isinstance(
+        state.get("work_evidence"), dict
+    ) else {}
+    fix = RECORD_FIXES.get(str(work.get("reason") or ""))
+    if fix:
+        # Претензия к записи в карточке отвечается записью, а не ожиданием.
+        return fix
 
     scheduled = open_future_deadline(events, now)
     if scheduled is not None:

@@ -616,3 +616,34 @@ def test_a_gap_far_from_the_norm_stays_whole():
         "window_days": 2, "days_quiet": 16.4,
     }
     assert "последний след 16 дн. назад" in format_card(res, "ЖК «Hide»", WEBHOOK)
+
+
+def test_field_codes_from_the_model_are_shown_in_russian():
+    """#13340: «Не хватает: budget, district, timeline» в русском отчёте."""
+    from client_state_report import format_card
+
+    res = _res(13)
+    res["state"]["missing"] = ["budget", "district", "timeline"]
+    card = format_card(res, "ЖК «Воробьевы Горы»", WEBHOOK)
+    assert "Не хватает: бюджет, район, сроки покупки" in card
+
+
+def test_an_unknown_code_is_left_as_the_model_wrote_it():
+    """Своя догадка хуже чужого текста."""
+    from client_state_report import format_card
+
+    res = _res(14)
+    res["state"]["missing"] = ["точная дата приезда"]
+    assert "Не хватает: точная дата приезда" in format_card(res, "х", WEBHOOK)
+
+
+def test_a_poor_card_in_the_fine_list_says_so():
+    """#15342: ✅ на карточке, которую тот же отчёт назвал «плохо»."""
+    from client_state_report import format_sections
+
+    res = _res(15, temperature="warm")
+    res["state"]["verdict"] = "poor"
+    res["state"]["work_evidence"] = {"proven": True, "reason": "call"}
+    body = format_sections([res], {15: "Виктори парк"}, WEBHOOK)
+    assert "✅ В РАБОТЕ" in body
+    assert "карточка заполнена плохо" in body
