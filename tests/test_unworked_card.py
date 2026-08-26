@@ -95,14 +95,31 @@ def _card(deal_id: int, **over: Any) -> dict[str, Any]:
 
 
 def test_an_unworked_contact_is_a_broker_failure():
-    _losing, neglect, _fine = split_sections([_card(16306)])
+    _losing, neglect, _w, _f = split_sections([_card(16306)])
     assert [r["deal_id"] for r in neglect] == [16306]
 
 
-def test_an_unworked_contact_is_also_a_client_we_are_losing():
-    """Контакт передали и не позвонили — это ровно то место, где теряют."""
-    losing, _n, _f = split_sections([_card(16306)])
-    assert [r["deal_id"] for r in losing] == [16306]
+def test_an_unworked_contact_is_not_also_called_a_loss():
+    """Я поставил такие карточки в оба раздела — прогон показал, что зря.
+
+    Десять карточек продавцов попали и в «теряем», и в «недоработку»: два
+    одинаковых списка, между которыми РОП ничего не выбирает. Неотработанный
+    контакт — это претензия к брокеру, и называть её ещё и потерей значит
+    писать один факт дважды.
+    """
+    losing, neglect, _w, _f = split_sections([_card(16306)])
+    assert losing == []
+    assert [r["deal_id"] for r in neglect] == [16306]
+
+
+def test_an_uninformative_card_where_work_was_proven_is_a_loss():
+    """Брокер говорил с клиентом, а в карточке этого не видно — картина уходит."""
+    worked = _card(16886)
+    worked["state"]["work_evidence"] = {
+        "proven": True, "reason": "call", "window_days": 1, "days_quiet": 0.2,
+    }
+    losing, _n, _w, _f = split_sections([worked])
+    assert [r["deal_id"] for r in losing] == [16886]
 
 
 def test_the_card_names_the_failure_plainly():
