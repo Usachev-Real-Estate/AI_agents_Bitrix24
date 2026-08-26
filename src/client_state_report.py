@@ -305,12 +305,22 @@ def format_stage_mix(stages: dict[str, int]) -> str:
 
 # ── Два раздела: клиент уходит / брокер не дорабатывает ────────────────
 def _is_losing_client(state: dict[str, Any]) -> bool:
-    """Признаки, что клиента теряем: остыл, замолчал, картины нет."""
+    """Признаки, что клиента теряем: остыл, замолчал, картины нет.
+
+    Внутри отсрочки пустая карточка в этот список не попадает. Лид, заведённый
+    сутки назад, пуст потому, что брокер ещё не работал — мы это уже признали
+    вердиктом «рано судить», и тащить ту же карточку в тревожный раздел значит
+    сказать двумя строками противоположное. Остывший клиент и расхождение с
+    разговором остаются: это события, а не отсутствие данных, и срок им не
+    оправдание.
+    """
     if str(state.get("temperature") or "") == "cold":
         return True
-    if state.get("recoverable") is False:
+    if state.get("contradictions"):
         return True
-    return bool(state.get("contradictions"))
+    if str(state.get("verdict") or "") == "too_early":
+        return False
+    return state.get("recoverable") is False
 
 
 def split_sections(

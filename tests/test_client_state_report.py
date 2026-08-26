@@ -398,3 +398,47 @@ def test_a_trace_from_today_is_not_called_zero_days_ago():
 
 
 # ── Этап без квалификации клиента ──────────────────────────────────────
+
+
+# ── Отсрочка и раздел «теряем клиента» не должны спорить ───────────────
+def test_a_card_inside_its_grace_period_is_not_called_a_loss():
+    """«Рано судить» и «теряем клиента» на одной карточке — противоречие."""
+    from client_state_report import split_sections
+
+    fresh = _res(20, recoverable=False, temperature="unknown")
+    fresh["state"]["verdict"] = "too_early"
+    fresh["state"]["verdict_reason"] = "этап моложе отсрочки (23 ч < 72 ч)"
+    losing, _neglect, fine = split_sections([fresh])
+    assert losing == []
+    assert [r["deal_id"] for r in fine] == [20]
+
+
+def test_a_cold_client_inside_grace_is_still_a_loss():
+    """Клиент сказал «нет» — срок этому не оправдание."""
+    from client_state_report import split_sections
+
+    refused = _res(21, temperature="cold")
+    refused["state"]["verdict"] = "too_early"
+    losing, _n, _f = split_sections([refused])
+    assert [r["deal_id"] for r in losing] == [21]
+
+
+def test_a_contradiction_inside_grace_is_still_a_loss():
+    from client_state_report import split_sections
+
+    lying = _res(22, temperature="warm", contradictions=[{
+        "what": "бюджет", "in_card": "30", "in_call": "20", "severity": "high",
+    }])
+    lying["state"]["verdict"] = "too_early"
+    losing, _n, _f = split_sections([lying])
+    assert [r["deal_id"] for r in losing] == [22]
+
+
+def test_an_empty_card_past_its_grace_is_still_a_loss():
+    """После отсрочки пустая карточка — уже претензия, а не ожидание."""
+    from client_state_report import split_sections
+
+    stale = _res(23, recoverable=False, temperature="unknown")
+    stale["state"]["verdict"] = "poor"
+    losing, _n, _f = split_sections([stale])
+    assert [r["deal_id"] for r in losing] == [23]
