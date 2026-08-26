@@ -249,3 +249,52 @@ def test_stage_semantic_inference(stage_id, code, expected):
 def test_stage_semantic_override_wins():
     """Воронка может объявить успешной произвольную стадию — по имени не видно."""
     assert etl.infer_semantic("C18:UC_RUCRAH", "P", {"C18:UC_RUCRAH": "won"}) == "won"
+
+
+def test_incremental_refreshes_people_but_not_the_whole_dimension_set(analytics_db, fake_client):
+    """Наняли менеджера или перевели между отделами — это должно доехать быстро.
+
+    Отдел сделки определяется по её ответственному. Пока новичка нет в
+    справочнике, его сделки не принадлежат ни одному отделу, и РОП их не
+    видит. При обновлении раз в сутки это провал длиной в рабочий день.
+
+    При этом стадии и воронки в догрузке не трогаем: они меняются раз в
+    квартал, а стоят два десятка запросов против двух-трёх на людей.
+    """
+    client = fake_client(FakeClient(deals=[_deal(101)], leads=[]))
+    etl.run_sync("backfill", since_override="2026-01-01")
+
+    client.calls.clear()
+    etl.run_sync("incremental")
+    methods = [method for method, _ in client.calls]
+
+    assert "user.get" in methods, "справочник людей не обновился при догрузке"
+    assert "crm.status.list" not in methods, "стадии тянутся зря — они меняются редко"
+    assert "crm.category.list" not in methods
+
+
+def test_incremental_picks_up_a_department_transfer(analytics_db, fake_client):
+    """Перевод между отделами обязан доехать догрузкой, а не ждать ночи."""
+    client = fake_client(FakeClient(deals=[_deal(101)], leads=[]))
+    etl.run_sync("backfill", since_override="2026-01-01")
+
+    with analytics_session(readonly=True) as conn:
+        assert conn.execute(
+            "SELECT department_id FROM dim_user WHERE user_id = 32").fetchone()[0] == 44
+
+    # Менеджер 32 переведён в отдел 50.
+    original = client.list_paged
+
+    def moved(method, params):
+        if method == "user.get":
+            yield {"ID": 32, "NAME": "Иван", "LAST_NAME": "Петров",
+                   "ACTIVE": "Y", "UF_DEPARTMENT": [50]}
+            return
+        yield from original(method, params)
+
+    client.list_paged = moved
+    etl.run_sync("incremental")
+
+    with analytics_session(readonly=True) as conn:
+        assert conn.execute(
+            "SELECT department_id FROM dim_user WHERE user_id = 32").fetchone()[0] == 50

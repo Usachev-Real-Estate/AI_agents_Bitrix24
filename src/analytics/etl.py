@@ -641,7 +641,16 @@ def run_sync(kind: str, *, since_override: str | None = None) -> dict[str, Any]:
             logger.info("Режим=%s, окно с %s", kind, since)
 
             incremental = kind == "incremental"
-            if not incremental:
+            if incremental:
+                # Люди меняются часто: наняли менеджера, перевели между
+                # отделами. Пока справочник не обновлён, сделки новичка не
+                # принадлежат ни одному отделу и его РОП их не видит — при
+                # обновлении раз в сутки это провал длиной в рабочий день.
+                # Стадии и воронки, наоборот, меняются раз в квартал, поэтому
+                # тянем только пользователей: это 2-3 запроса против двух
+                # десятков на полный набор измерений.
+                sync_users(client, conn, utc_now_iso())
+            else:
                 sync_dimensions(client, conn, settings)
 
             overlap = settings.analytics_etl_overlap_minutes
