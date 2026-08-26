@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from broker_work import REASON_RU as WORK_REASON_RU
+from broker_work import PROVEN_BY_PAUSE
 from broker_work import REMINDERS as WORK_REMINDERS
 from buyer_commission_reminder import deal_url
 from client_state import MATERIAL_SEVERITY
@@ -498,8 +499,22 @@ def format_sections(
                 str(state.get("temperature") or ""), "",
             )
             step = format_next_step(state.get("next_step"))
+            work = state.get("work_evidence") or {}
+            # Карточка молчит восемь дней и стоит с галочкой ✅ — без
+            # объяснения это выглядит как просмотренная недоработка. Пауза
+            # названа в карточке, значит её надо показать.
+            pause = (
+                f" · ⏸ пауза до {work.get('pause_until')}"
+                if str(work.get("reason") or "") == PROVEN_BY_PAUSE
+                and str(work.get("pause_until") or "unknown") != "unknown"
+                else (
+                    " · ⏸ пауза объяснена"
+                    if str(work.get("reason") or "") == PROVEN_BY_PAUSE
+                    else ""
+                )
+            )
             blocks.append(
-                f"{icon} #{deal_id} {titles.get(deal_id, '')} — {step}".strip(),
+                f"{icon} #{deal_id} {titles.get(deal_id, '')} — {step}{pause}".strip(),
             )
         blocks.append("")
 

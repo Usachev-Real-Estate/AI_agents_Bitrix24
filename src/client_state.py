@@ -652,6 +652,12 @@ def _normalize_broker_work(raw: Any) -> dict[str, Any]:
         "claims_no_answer": bool(data.get("claims_no_answer")),
         "claims_no_answer_quote": _clean_str(data.get("claims_no_answer_quote")),
         "comment_informative": bool(data.get("comment_informative", True)),
+        # Названная причина паузы на стороне клиента: отпуск, документы,
+        # продажа своего объекта. Не то же, что «клиент не отвечает»: там
+        # причины не знают, здесь она есть в тексте карточки.
+        "pause_explained": bool(data.get("pause_explained")),
+        "pause_reason_quote": _clean_str(data.get("pause_reason_quote")),
+        "pause_until": _clean_str(data.get("pause_until")) or "unknown",
     }
 
 
@@ -783,6 +789,13 @@ def unmask_state(
         signals["objections"] = [
             unmask(str(v), mask_map) for v in signals.get("objections") or []
         ]
+    work = out.get("broker_work")
+    if isinstance(work, dict):
+        # Причину паузы читают люди в отчёте — иначе там будет «КЛИЕНТ_1
+        # в отпуске». В базе копия остаётся замаскированной.
+        work["pause_reason_quote"] = unmask(
+            str(work.get("pause_reason_quote") or ""), mask_map,
+        )
     for entry in (out.get("stage_facts") or {}).values():
         if isinstance(entry, dict):
             entry["quote"] = unmask(str(entry.get("quote") or ""), mask_map)
@@ -1069,6 +1082,12 @@ def apply_derived_verdict(
         # Ход за контрагентом снимает претензию за тишину: он сам назвал срок.
         next_step_who=str(_step.get("who") or ""),
         next_step_when=str(_step.get("when") or ""),
+        # Названная причина паузы — тоже снимает, но только вместе с делом
+        # на контроле и только на тот срок, который причина покрывает.
+        pause_explained=_claimed(
+            "pause_explained", "pause_reason_quote", "причина паузы",
+        ),
+        pause_until=str(work.get("pause_until") or ""),
     )
     envelope["work_proven"] = state["work_evidence"]["proven"]
 
