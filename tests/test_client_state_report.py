@@ -547,3 +547,21 @@ def test_overdue_task_line_counts_the_days():
         "due_task": {"deadline": "2026-08-20", "subject": "", "days_overdue": 6},
     }
     assert "просрочено на 6 дн." in format_card(res, "ЖК «Will Towers»", WEBHOOK)
+
+
+def test_agent_card_is_marked():
+    from client_state_report import format_card
+
+    res = _res(8)
+    res["state"]["counterparty"] = {"who": "agent", "why": "тип контакта «Агент»"}
+    card = format_card(res, "Лариса агент", WEBHOOK)
+    assert "👤 Контрагент: агент — тип контакта «Агент»" in card
+
+
+def test_client_card_is_not_marked():
+    """Клиент — норма; строка на каждой карточке была бы шумом."""
+    from client_state_report import format_card
+
+    res = _res(9)
+    res["state"]["counterparty"] = {"who": "client", "why": ""}
+    assert "Контрагент" not in format_card(res, "ЖК «Will Towers»", WEBHOOK)

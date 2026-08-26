@@ -153,6 +153,11 @@ def format_card(
         f"Риск: {ru(state.get('risk'), RISK_RU)} | "
         f"уверенность: {float(state.get('confidence') or 0.0):.2f}",
     )
+    party = state.get("counterparty") if isinstance(state.get("counterparty"), dict) else {}
+    if str(party.get("who") or "") == "agent":
+        why = str(party.get("why") or "").strip()
+        lines.append("👤 Контрагент: агент" + (f" — {why}" if why else ""))
+
     lines.append(f"Цель: {humanize(state.get('client_goal'))}")
     lines.append(f"Ситуация: {humanize(state.get('situation'))}")
     lines.append(f"Шаг: {format_next_step(state.get('next_step'))}")
@@ -252,6 +257,13 @@ def format_summary(stats: dict[str, Any]) -> str:
     parts.append(
         f"⚡ Расхождений с разговором: существенных {material}, мелких {minor}",
     )
+
+    agents = int(stats.get("agent_cards") or 0)
+    if agents:
+        # Агент — не клиент: он не остывает, и мерить его тем же, чем живого
+        # покупателя, нельзя. Строка нужна, чтобы видеть, сколько таких в
+        # выборке, и поправить разметку, если агентов узнали неверно.
+        parts.append(f"👤 Карточек с агентом, а не клиентом: {agents}")
 
     unrecoverable = int(stats.get("unrecoverable") or 0)
     if unrecoverable:

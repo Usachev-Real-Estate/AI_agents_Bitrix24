@@ -16,6 +16,7 @@ from db import get_client_state, init_db, save_client_state
 from lead_quality_audit import _message_content_to_str
 from funnel_profiles import BUYER_PROFILE, SELLER_PROFILE, FunnelProfile
 from broker_work import assess_broker_work, next_action
+from counterparty import classify_counterparty, set_contact_type_names
 from llm import estimate_cost, make_llm
 from masking import MaskMap, apply_mask, build_mask_map, unmask
 from tools import (
@@ -26,6 +27,7 @@ from tools import (
     _evidence_incomplete,
     _fetch_deal_activities,
     _fetch_entity_timeline,
+    fetch_contact_type_names,
 )
 from transcripts import STATUS_NOT_READY, STATUS_OK, fetch_and_cache
 
@@ -1062,6 +1064,12 @@ def apply_derived_verdict(
     )
     envelope["work_proven"] = state["work_evidence"]["proven"]
 
+    # Клиент или агент. Признак ищется в CRM, а не у модели, и считается
+    # заново: тип контакта могли проставить уже после разбора.
+    state["counterparty"] = classify_counterparty(
+        record, _as_list(record.get("contacts")),
+    )
+
     # Рецепт, а не только диагноз. Считается заново на каждом прогоне: дело
     # могли поставить уже после разбора, и тогда совет надо снять.
     state["next_action"] = next_action(state, events or [])
@@ -1320,6 +1328,12 @@ def analyze_deal(
     return envelope
 
 
+def _is_agent_card(state: dict[str, Any]) -> bool:
+    """По ту сторону карточки агент, а не клиент."""
+    party = state.get("counterparty")
+    return isinstance(party, dict) and str(party.get("who") or "") == "agent"
+
+
 def run_client_state(
     profile: FunnelProfile = BUYER_PROFILE,
     deals: list[dict[str, Any]] | None = None,
@@ -1330,6 +1344,9 @@ def run_client_state(
 ) -> dict[str, Any]:
     """Batch runner for one funnel. Reads its open deals when list is omitted."""
     settings = settings or get_settings()
+    # Справочник типов контакта — один запрос на прогон: без него код
+    # «UC_2G0TD3» ничего не говорит, а угадывать, какой из них агент, нельзя.
+    set_contact_type_names(fetch_contact_type_names())
     category_id = (
         settings.sellers_category_id
         if profile.key == "sellers"
@@ -1367,6 +1384,7 @@ def run_client_state(
         "skipped_other": 0,
         "errors": 0,
         "unrecoverable": 0,
+        "agent_cards": 0,
         "evidence_dropped": 0,
         "contradictions_found": 0,
         "contradictions_minor": 0,
@@ -1460,6 +1478,8 @@ def run_client_state(
                     stats["verdicts"][cached_verdict] += 1
                 if cached.get("recoverable") is False:
                     stats["unrecoverable"] += 1
+                if _is_agent_card(cached):
+                    stats["agent_cards"] += 1
             continue
         stats["analyzed"] += 1
         if result.get("empty_card"):
@@ -1493,6 +1513,8 @@ def run_client_state(
             )
         if state.get("recoverable") is False:
             stats["unrecoverable"] += 1
+        if _is_agent_card(state):
+            stats["agent_cards"] += 1
     usage = stats["usage"]
     # Делим неокруглённую сумму: цена за карточку — это копейки, и округление
     # до рублей перед делением её заметно искажает.
