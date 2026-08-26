@@ -13,9 +13,11 @@
       {% endfor %}
     </select>
   </label>
+  {% if is_admin or departments | length > 1 %}
   <label class="field">Отдел
     <select name="department">
-      <option value="all" {{ 'selected' if department_id is none else '' }}>Все отделы</option>
+      <option value="all" {{ 'selected' if department_id is none else '' }}>
+        {{ 'Все отделы' if is_admin else 'Все мои отделы' }}</option>
       {% for department in departments %}
         <option value="{{ department.department_id }}"
           {{ 'selected' if department_id == department.department_id else '' }}>
@@ -23,6 +25,10 @@
       {% endfor %}
     </select>
   </label>
+  {% elif departments %}
+    {# У РОПа один отдел — выбирать не из чего, показываем как есть. #}
+    <span class="field muted">Отдел: {{ departments[0].name }}</span>
+  {% endif %}
 {% endblock %}
 
 {% block content %}

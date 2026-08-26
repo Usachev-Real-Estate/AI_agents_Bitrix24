@@ -14,7 +14,7 @@
 
 Свежая когорта всегда выглядит хуже зрелой, поэтому подменять одно другим —
 готовый способ принять дорогое неправильное решение. Когортные метрики
-считаются по fact_stage_event («достигал стадии»), а не по текущей STAGE_ID.
+считаются по v_stage_event («достигал стадии»), а не по текущей STAGE_ID.
 """
 
 from __future__ import annotations
@@ -186,7 +186,7 @@ def stages(conn, category_id: int) -> list[dict[str, Any]]:
 def users(conn) -> list[dict[str, Any]]:
     return _rows(
         conn,
-        "SELECT user_id, name, department_id, department_name FROM dim_user ORDER BY name",
+        "SELECT user_id, name, department_id, department_name FROM v_user ORDER BY name",
     )
 
 
@@ -199,9 +199,9 @@ def _department_filter(event_alias: str = "e") -> str:
     """Условие «сделка закреплена за отделом» для запросов по событиям стадий."""
     return f"""
           AND (:dept IS NULL OR EXISTS (
-                SELECT 1 FROM fact_deal fd
-                JOIN dim_user du ON du.user_id = fd.assigned_by_id
-                WHERE fd.deal_id = {event_alias}.entity_id AND fd.is_deleted = 0
+                SELECT 1 FROM v_deal fd
+                JOIN v_user du ON du.user_id = fd.assigned_by_id
+                WHERE fd.deal_id = {event_alias}.entity_id
                   AND du.department_id = :dept))
     """
 
@@ -212,8 +212,8 @@ def departments_options(conn) -> list[dict[str, Any]]:
         conn,
         """
         SELECT u.department_id, u.department_name AS name, COUNT(d.deal_id) AS deals
-        FROM dim_user u
-        JOIN fact_deal d ON d.assigned_by_id = u.user_id AND d.is_deleted = 0
+        FROM v_user u
+        JOIN v_deal d ON d.assigned_by_id = u.user_id
         WHERE u.department_id IS NOT NULL AND u.department_name <> ''
         GROUP BY u.department_id
         HAVING deals > 0
@@ -242,8 +242,8 @@ def deal_funnel(conn, category_id: int, since: str, until: str) -> dict[str, Any
     """
     cohort_size = _one(
         conn,
-        "SELECT COUNT(*) AS n FROM fact_deal "
-        "WHERE category_id = :cat AND is_deleted = 0 "
+        "SELECT COUNT(*) AS n FROM v_deal "
+        "WHERE category_id = :cat "
         "AND date_create >= :since AND date_create < :until",
         {"cat": category_id, "since": since, "until": until},
     ).get("n", 0)
@@ -252,17 +252,17 @@ def deal_funnel(conn, category_id: int, since: str, until: str) -> dict[str, Any
         conn,
         """
         SELECT s.stage_id, s.name, s.sort, s.semantic,
-          (SELECT COUNT(*) FROM fact_deal d
-            WHERE d.category_id = s.category_id AND d.is_deleted = 0
+          (SELECT COUNT(*) FROM v_deal d
+            WHERE d.category_id = s.category_id
               AND d.stage_id = s.stage_id) AS count_now,
-          (SELECT COALESCE(SUM(d.opportunity), 0) FROM fact_deal d
-            WHERE d.category_id = s.category_id AND d.is_deleted = 0
+          (SELECT COALESCE(SUM(d.opportunity), 0) FROM v_deal d
+            WHERE d.category_id = s.category_id
               AND d.stage_id = s.stage_id AND d.is_closed = 0) AS amount_open,
           (SELECT COUNT(DISTINCT e.entity_id)
-             FROM fact_stage_event e
-             JOIN fact_deal d ON d.deal_id = e.entity_id
+             FROM v_stage_event e
+             JOIN v_deal d ON d.deal_id = e.entity_id
             WHERE e.entity_type = 'deal' AND e.stage_id = s.stage_id
-              AND d.category_id = s.category_id AND d.is_deleted = 0
+              AND d.category_id = s.category_id
               AND d.date_create >= :since AND d.date_create < :until) AS reached
         FROM dim_stage s
         WHERE s.category_id = :cat
@@ -308,8 +308,8 @@ def win_rate(conn, category_id: int, since: str, until: str) -> dict[str, Any]:
             SUM(is_won) AS won,
             SUM(is_lost) AS lost,
             COALESCE(SUM(CASE WHEN is_won = 1 THEN opportunity ELSE 0 END), 0) AS won_amount
-        FROM fact_deal
-        WHERE is_deleted = 0 AND is_closed = 1
+        FROM v_deal
+        WHERE is_closed = 1
           AND closedate >= :since AND closedate < :until
           AND (:cat IS NULL OR category_id = :cat)
         """,
@@ -336,8 +336,8 @@ def deal_cycle_days(conn, category_id: int | None, since: str, until: str) -> di
             conn,
             """
             SELECT (julianday(closedate) - julianday(date_create)) AS days
-            FROM fact_deal
-            WHERE is_deleted = 0 AND is_closed = 1 AND closedate IS NOT NULL
+            FROM v_deal
+            WHERE is_closed = 1 AND closedate IS NOT NULL
               AND closedate >= :since AND closedate < :until
               AND (:cat IS NULL OR category_id = :cat)
             """,
@@ -385,24 +385,24 @@ def stage_movement(
         conn,
         f"""
         SELECT s.stage_id, s.name, s.sort, s.semantic,
-          (SELECT COUNT(*) FROM fact_stage_event e
+          (SELECT COUNT(*) FROM v_stage_event e
             WHERE e.entity_type = 'deal' AND e.stage_id = s.stage_id
               AND e.category_id = s.category_id
               AND e.entered_at < :since
               AND (e.left_at IS NULL OR e.left_at >= :since)
               {_department_filter()}) AS opening,
-          (SELECT COUNT(*) FROM fact_stage_event e
+          (SELECT COUNT(*) FROM v_stage_event e
             WHERE e.entity_type = 'deal' AND e.stage_id = s.stage_id
               AND e.category_id = s.category_id
               AND e.entered_at >= :since AND e.entered_at < :until
               {_department_filter()}) AS entered,
-          (SELECT COUNT(*) FROM fact_stage_event e
+          (SELECT COUNT(*) FROM v_stage_event e
             WHERE e.entity_type = 'deal' AND e.stage_id = s.stage_id
               AND e.category_id = s.category_id
               AND e.left_at IS NOT NULL
               AND e.left_at >= :since AND e.left_at < :until
               {_department_filter()}) AS left_count,
-          (SELECT COUNT(*) FROM fact_stage_event e
+          (SELECT COUNT(*) FROM v_stage_event e
             WHERE e.entity_type = 'deal' AND e.stage_id = s.stage_id
               AND e.category_id = s.category_id
               AND e.entered_at < :until
@@ -438,8 +438,8 @@ def stage_transitions(
                COALESCE(st.name, e2.stage_id) AS to_name,
                COALESCE(sf.sort, 0) AS from_sort,
                COALESCE(st.sort, 0) AS to_sort
-        FROM fact_stage_event e1
-        JOIN fact_stage_event e2
+        FROM v_stage_event e1
+        JOIN v_stage_event e2
           ON e2.entity_type = e1.entity_type AND e2.entity_id = e1.entity_id
          AND e2.seq = e1.seq + 1
         LEFT JOIN dim_stage sf ON sf.stage_id = e1.stage_id AND sf.category_id = :cat
@@ -473,7 +473,7 @@ def stage_durations(conn, category_id: int, since: str, until: str) -> list[dict
         conn,
         """
         SELECT stage_id, duration_sec / 86400.0 AS days
-        FROM fact_stage_event
+        FROM v_stage_event
         WHERE entity_type = 'deal' AND category_id = :cat
           AND duration_sec IS NOT NULL
           AND left_at >= :since AND left_at < :until
@@ -487,7 +487,7 @@ def stage_durations(conn, category_id: int, since: str, until: str) -> list[dict
         conn,
         """
         SELECT stage_id, (julianday('now') - julianday(entered_at)) AS days
-        FROM fact_stage_event
+        FROM v_stage_event
         WHERE entity_type = 'deal' AND category_id = :cat AND left_at IS NULL
         """,
         {"cat": category_id},
@@ -538,12 +538,12 @@ def stuck_deals(
                COALESCE(u.name, '') AS assignee,
                COALESCE(u.department_name, '') AS department,
                (julianday('now') - julianday(e.entered_at)) AS days_in_stage
-        FROM fact_deal d
-        JOIN fact_stage_event e
+        FROM v_deal d
+        JOIN v_stage_event e
           ON e.entity_type = 'deal' AND e.entity_id = d.deal_id AND e.left_at IS NULL
         LEFT JOIN dim_stage s ON s.stage_id = d.stage_id AND s.category_id = d.category_id
-        LEFT JOIN dim_user u ON u.user_id = d.assigned_by_id
-        WHERE d.category_id = :cat AND d.is_deleted = 0 AND d.is_closed = 0
+        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
+        WHERE d.category_id = :cat AND d.is_closed = 0
           AND (:dept IS NULL OR u.department_id = :dept)
         ORDER BY days_in_stage DESC
         """,
@@ -574,8 +574,8 @@ def lead_funnel(conn, since: str, until: str) -> dict[str, Any]:
     """
     total = _one(
         conn,
-        "SELECT COUNT(*) AS n FROM fact_lead WHERE is_deleted = 0 "
-        "AND date_create >= :since AND date_create < :until",
+        "SELECT COUNT(*) AS n FROM v_lead "
+        "WHERE date_create >= :since AND date_create < :until",
         {"since": since, "until": until},
     ).get("n", 0)
 
@@ -585,9 +585,9 @@ def lead_funnel(conn, since: str, until: str) -> dict[str, Any]:
         SELECT l.status_id, COALESCE(s.name, l.status_id) AS name,
                COALESCE(s.sort, 999) AS sort, COALESCE(s.semantic, 'in_progress') AS semantic,
                COUNT(*) AS count
-        FROM fact_lead l
+        FROM v_lead l
         LEFT JOIN dim_lead_status s ON s.status_id = l.status_id
-        WHERE l.is_deleted = 0 AND l.date_create >= :since AND l.date_create < :until
+        WHERE l.date_create >= :since AND l.date_create < :until
         GROUP BY l.status_id
         ORDER BY sort, name
         """,
@@ -598,8 +598,8 @@ def lead_funnel(conn, since: str, until: str) -> dict[str, Any]:
 
     converted = _one(
         conn,
-        "SELECT COUNT(*) AS n FROM fact_lead WHERE is_deleted = 0 "
-        "AND converted_deal_id IS NOT NULL "
+        "SELECT COUNT(*) AS n FROM v_lead "
+        "WHERE converted_deal_id IS NOT NULL "
         "AND date_create >= :since AND date_create < :until",
         {"since": since, "until": until},
     ).get("n", 0)
@@ -627,10 +627,10 @@ def lead_sources(conn, since: str, until: str) -> list[dict[str, Any]]:
                SUM(CASE WHEN l.status_id IN ('JUNK', 'UC_A7I8DK') THEN 1 ELSE 0 END) AS junk,
                COALESCE(SUM(CASE WHEN d.is_won = 1 THEN d.opportunity ELSE 0 END), 0) AS won_amount,
                SUM(CASE WHEN d.is_won = 1 THEN 1 ELSE 0 END) AS won_deals
-        FROM fact_lead l
+        FROM v_lead l
         LEFT JOIN dim_source s ON s.source_id = l.source_id
-        LEFT JOIN fact_deal d ON d.deal_id = l.converted_deal_id AND d.is_deleted = 0
-        WHERE l.is_deleted = 0 AND l.date_create >= :since AND l.date_create < :until
+        LEFT JOIN v_deal d ON d.deal_id = l.converted_deal_id
+        WHERE l.date_create >= :since AND l.date_create < :until
         GROUP BY l.source_id
         ORDER BY leads DESC
         """,
@@ -669,10 +669,9 @@ def lead_first_move_days(conn, since: str, until: str) -> dict[str, Any]:
             conn,
             """
             SELECT MIN(e.duration_sec) / 86400.0 AS days
-            FROM fact_stage_event e
-            JOIN fact_lead l ON l.lead_id = e.entity_id
+            FROM v_stage_event e
+            JOIN v_lead l ON l.lead_id = e.entity_id
             WHERE e.entity_type = 'lead' AND e.seq = 0 AND e.duration_sec IS NOT NULL
-              AND l.is_deleted = 0
               AND l.date_create >= :since AND l.date_create < :until
             GROUP BY e.entity_id
             """,
@@ -705,8 +704,8 @@ def money(conn, category_id: int | None, since: str, until: str) -> dict[str, An
         SELECT COUNT(*) AS deals,
                SUM(CASE WHEN opportunity > 0 THEN 1 ELSE 0 END) AS filled,
                COALESCE(SUM(opportunity), 0) AS amount
-        FROM fact_deal
-        WHERE is_deleted = 0 AND is_closed = 0
+        FROM v_deal
+        WHERE is_closed = 0
           AND (:cat IS NULL OR category_id = :cat)
         """,
         {"cat": category_id},
@@ -717,8 +716,8 @@ def money(conn, category_id: int | None, since: str, until: str) -> dict[str, An
         """
         SELECT COUNT(*) AS deals,
                SUM(CASE WHEN opportunity > 0 THEN 1 ELSE 0 END) AS filled
-        FROM fact_deal
-        WHERE is_deleted = 0 AND is_won = 1
+        FROM v_deal
+        WHERE is_won = 1
           AND closedate >= :since AND closedate < :until
           AND (:cat IS NULL OR category_id = :cat)
         """,
@@ -750,8 +749,8 @@ def stage_win_probability(conn, category_id: int) -> dict[str, float]:
         SELECT e.stage_id,
                COUNT(DISTINCT CASE WHEN d.is_closed = 1 THEN d.deal_id END) AS closed,
                COUNT(DISTINCT CASE WHEN d.is_won = 1 THEN d.deal_id END) AS won
-        FROM fact_stage_event e
-        JOIN fact_deal d ON d.deal_id = e.entity_id AND d.is_deleted = 0
+        FROM v_stage_event e
+        JOIN v_deal d ON d.deal_id = e.entity_id
         WHERE e.entity_type = 'deal' AND e.category_id = :cat
         GROUP BY e.stage_id
         """,
@@ -776,8 +775,8 @@ def weighted_forecast(conn, category_id: int) -> dict[str, Any]:
         SELECT stage_id, COUNT(*) AS deals,
                COALESCE(SUM(opportunity), 0) AS amount,
                SUM(CASE WHEN opportunity > 0 THEN 1 ELSE 0 END) AS filled
-        FROM fact_deal
-        WHERE category_id = :cat AND is_deleted = 0 AND is_closed = 0
+        FROM v_deal
+        WHERE category_id = :cat AND is_closed = 0
         GROUP BY stage_id
         """,
         {"cat": category_id},
@@ -824,10 +823,9 @@ def people(conn, since: str, until: str, category_id: int | None = None) -> list
                SUM(d.is_won) AS won,
                SUM(d.is_lost) AS lost,
                COALESCE(SUM(CASE WHEN d.is_won = 1 THEN d.opportunity ELSE 0 END), 0) AS won_amount
-        FROM fact_deal d
-        LEFT JOIN dim_user u ON u.user_id = d.assigned_by_id
-        WHERE d.is_deleted = 0
-          AND d.date_create >= :since AND d.date_create < :until
+        FROM v_deal d
+        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
+        WHERE d.date_create >= :since AND d.date_create < :until
           AND (:cat IS NULL OR d.category_id = :cat)
         GROUP BY d.assigned_by_id
         ORDER BY won_amount DESC, deals_created DESC
@@ -881,8 +879,8 @@ def timeseries(
     leads = {
         row["bucket"]: row["n"] for row in _rows(
             conn,
-            f"SELECT {bucket_created} AS bucket, COUNT(*) AS n FROM fact_lead "
-            "WHERE is_deleted = 0 AND date_create >= :since AND date_create < :until "
+            f"SELECT {bucket_created} AS bucket, COUNT(*) AS n FROM v_lead "
+            "WHERE date_create >= :since AND date_create < :until "
             "GROUP BY bucket",
             {"since": since, "until": until},
         )
@@ -890,8 +888,8 @@ def timeseries(
     deals = {
         row["bucket"]: row for row in _rows(
             conn,
-            f"SELECT {bucket_created} AS bucket, COUNT(*) AS n FROM fact_deal "
-            "WHERE is_deleted = 0 AND date_create >= :since AND date_create < :until "
+            f"SELECT {bucket_created} AS bucket, COUNT(*) AS n FROM v_deal "
+            "WHERE date_create >= :since AND date_create < :until "
             "AND (:cat IS NULL OR category_id = :cat) GROUP BY bucket",
             {"since": since, "until": until, "cat": category_id},
         )
@@ -900,8 +898,8 @@ def timeseries(
         row["bucket"]: row for row in _rows(
             conn,
             f"SELECT {bucket_closed} AS bucket, COUNT(*) AS n, "
-            "COALESCE(SUM(opportunity), 0) AS amount FROM fact_deal "
-            "WHERE is_deleted = 0 AND is_won = 1 AND closedate IS NOT NULL "
+            "COALESCE(SUM(opportunity), 0) AS amount FROM v_deal "
+            "WHERE is_won = 1 AND closedate IS NOT NULL "
             "AND closedate >= :since AND closedate < :until "
             "AND (:cat IS NULL OR category_id = :cat) GROUP BY bucket",
             {"since": since, "until": until, "cat": category_id},
@@ -931,8 +929,8 @@ def overview(conn, period: dict[str, str], category_id: int | None = None) -> di
         leads = lead_funnel(conn, a, b)
         deals_created = _one(
             conn,
-            "SELECT COUNT(*) AS n FROM fact_deal WHERE is_deleted = 0 "
-            "AND date_create >= :since AND date_create < :until "
+            "SELECT COUNT(*) AS n FROM v_deal "
+            "WHERE date_create >= :since AND date_create < :until "
             "AND (:cat IS NULL OR category_id = :cat)",
             {"since": a, "until": b, "cat": category_id},
         ).get("n", 0)
@@ -987,6 +985,7 @@ def entity_table(
     *,
     entity: str = "deal",
     category_id: int | None = None,
+    department_id: int | None = None,
     stage_id: str | None = None,
     assigned_by_id: int | None = None,
     source_id: str | None = None,
@@ -1004,6 +1003,11 @@ def entity_table(
     Сортировка выбирается из белого списка колонок, а не подставляется из
     запроса: имя колонки нельзя параметризовать, и приём пользовательской
     строки прямо в ORDER BY — это SQL-инъекция.
+
+    ``department_id`` здесь — фильтр отображения, а не защита: данные уже
+    ограничены на уровне соединения. Он нужен, чтобы разложение сходилось с
+    числом, по которому кликнули: администратор, отфильтровавший «Движение»
+    по отделу, должен увидеть в таблице тот же отдел, а не всю компанию.
     """
     entity = entity if entity in ("deal", "lead") else "deal"
     sort_column = _TABLE_SORTS[entity].get(sort, _TABLE_SORTS[entity]["created"])
@@ -1015,13 +1019,13 @@ def entity_table(
     params: dict[str, Any] = {}
     if entity == "deal":
         base = """
-        FROM fact_deal d
+        FROM v_deal d
         LEFT JOIN dim_stage s ON s.stage_id = d.stage_id AND s.category_id = d.category_id
-        LEFT JOIN dim_user u ON u.user_id = d.assigned_by_id
+        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
         LEFT JOIN dim_source src ON src.source_id = d.source_id
-        LEFT JOIN fact_stage_event e
+        LEFT JOIN v_stage_event e
                ON e.entity_type = 'deal' AND e.entity_id = d.deal_id AND e.left_at IS NULL
-        WHERE d.is_deleted = 0
+
         """
         select = """
         SELECT d.deal_id AS id, d.title, d.stage_id, d.category_id,
@@ -1043,6 +1047,9 @@ def entity_table(
         if category_id is not None:
             conditions.append("d.category_id = :cat")
             params["cat"] = category_id
+        if department_id is not None:
+            conditions.append("u.department_id = :dept")
+            params["dept"] = department_id
         if stage_id:
             conditions.append("d.stage_id = :stage")
             params["stage"] = stage_id
@@ -1065,13 +1072,13 @@ def entity_table(
             params["q"] = f"%{query}%"
     else:
         base = """
-        FROM fact_lead l
+        FROM v_lead l
         LEFT JOIN dim_lead_status st ON st.status_id = l.status_id
-        LEFT JOIN dim_user u ON u.user_id = l.assigned_by_id
+        LEFT JOIN v_user u ON u.user_id = l.assigned_by_id
         LEFT JOIN dim_source src ON src.source_id = l.source_id
-        LEFT JOIN fact_stage_event e
+        LEFT JOIN v_stage_event e
                ON e.entity_type = 'lead' AND e.entity_id = l.lead_id AND e.left_at IS NULL
-        WHERE l.is_deleted = 0
+
         """
         select = """
         SELECT l.lead_id AS id, l.title, l.status_id AS stage_id, 0 AS category_id,
@@ -1087,6 +1094,9 @@ def entity_table(
                l.converted_deal_id,
                (julianday('now') - julianday(e.entered_at)) AS days_in_stage
         """
+        if department_id is not None:
+            conditions.append("u.department_id = :dept")
+            params["dept"] = department_id
         if stage_id:
             conditions.append("l.status_id = :stage")
             params["stage"] = stage_id
@@ -1106,7 +1116,12 @@ def entity_table(
             conditions.append("(l.title LIKE :q OR CAST(l.lead_id AS TEXT) LIKE :q)")
             params["q"] = f"%{query}%"
 
-    where = base + ("".join(f" AND {c}" for c in conditions))
+    # WHERE собирается здесь и только здесь. Приклеивать условия как « AND …»
+    # к заготовке, в которой WHERE уже есть, опасно: стоит этому WHERE
+    # исчезнуть — и условия прицепятся к ON последнего LEFT JOIN. Запрос
+    # останется валидным, но фильтровать перестанет: LEFT JOIN на непопадание
+    # отдаёт NULL-ы, а не отбрасывает строку. Такое молчит и не падает.
+    where = base + ("WHERE " + " AND ".join(conditions) if conditions else "")
     total = _one(conn, f"SELECT COUNT(*) AS n {where}", params).get("n", 0)
     rows = _rows(
         conn,
@@ -1149,8 +1164,8 @@ def data_quality(conn, category_id: int | None = None) -> dict[str, Any]:
                    AS closed_no_date,
                SUM(CASE WHEN is_won = 1 AND opportunity <= 0 THEN 1 ELSE 0 END)
                    AS won_no_amount
-        FROM fact_deal
-        WHERE is_deleted = 0 AND (:cat IS NULL OR category_id = :cat)
+        FROM v_deal
+        WHERE (:cat IS NULL OR category_id = :cat)
         """,
         {"cat": category_id},
     )
@@ -1160,14 +1175,14 @@ def data_quality(conn, category_id: int | None = None) -> dict[str, Any]:
         SELECT COUNT(*) AS total,
                SUM(CASE WHEN source_id = '' THEN 1 ELSE 0 END) AS no_source,
                SUM(CASE WHEN assigned_by_id IS NULL THEN 1 ELSE 0 END) AS no_assignee
-        FROM fact_lead WHERE is_deleted = 0
+        FROM v_lead
         """,
     )
     orphan_stages = _one(
         conn,
         """
-        SELECT COUNT(*) AS n FROM fact_deal d
-        WHERE d.is_deleted = 0 AND NOT EXISTS (
+        SELECT COUNT(*) AS n FROM v_deal d
+        WHERE NOT EXISTS (
             SELECT 1 FROM dim_stage s
             WHERE s.stage_id = d.stage_id AND s.category_id = d.category_id)
         """,
@@ -1177,7 +1192,7 @@ def data_quality(conn, category_id: int | None = None) -> dict[str, Any]:
     # время на стадии и списки зависших карточек.
     future_stages = _one(
         conn,
-        "SELECT COUNT(*) AS n FROM fact_stage_event WHERE entered_at > :now",
+        "SELECT COUNT(*) AS n FROM v_stage_event WHERE entered_at > :now",
         {"now": datetime.now(timezone.utc).isoformat()},
     ).get("n", 0)
 
@@ -1225,9 +1240,9 @@ def etl_status(conn) -> dict[str, Any]:
         "window_since": window,
         "counts": _one(
             conn,
-            "SELECT (SELECT COUNT(*) FROM fact_deal WHERE is_deleted = 0) AS deals, "
-            "(SELECT COUNT(*) FROM fact_lead WHERE is_deleted = 0) AS leads, "
-            "(SELECT COUNT(*) FROM fact_stage_event) AS stage_events",
+            "SELECT (SELECT COUNT(*) FROM v_deal) AS deals, "
+            "(SELECT COUNT(*) FROM v_lead) AS leads, "
+            "(SELECT COUNT(*) FROM v_stage_event) AS stage_events",
         ),
     }
 
@@ -1243,7 +1258,7 @@ def counts_by_pipeline(conn) -> list[dict[str, Any]]:
                COALESCE(SUM(CASE WHEN d.is_closed = 0 THEN d.opportunity ELSE 0 END), 0)
                    AS open_amount
         FROM dim_pipeline p
-        LEFT JOIN fact_deal d ON d.category_id = p.category_id AND d.is_deleted = 0
+        LEFT JOIN v_deal d ON d.category_id = p.category_id
         GROUP BY p.category_id
         ORDER BY p.sort, p.name
         """,

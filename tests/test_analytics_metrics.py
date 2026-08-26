@@ -4,6 +4,7 @@ import analytics  # noqa: F401  — кладёт src/analytics на sys.path
 import metrics
 import pytest
 from schema import analytics_session
+from scope import Scope, scoped_session
 
 
 @pytest.fixture
@@ -107,7 +108,7 @@ AUG = {"since": "2026-08-01T00:00:00+00:00", "until": "2026-09-01T00:00:00+00:00
 
 def test_cohort_reach_counts_ever_reached_not_current_stage(seeded):
     """Ключевое различие витрины: «дошёл до стадии» ≠ «стоит на стадии сейчас»."""
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         funnel = metrics.deal_funnel(conn, 18, AUG["since"], AUG["until"])
     by_stage = {s["stage_id"]: s for s in funnel["stages"]}
 
@@ -121,7 +122,7 @@ def test_cohort_reach_counts_ever_reached_not_current_stage(seeded):
 
 def test_step_conversion_runs_along_the_working_chain(seeded):
     """Цепочка шагов идёт по стадиям «в работе»: WON и LOSE стоят параллельно."""
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         funnel = metrics.deal_funnel(conn, 18, AUG["since"], AUG["until"])
     by_stage = {s["stage_id"]: s for s in funnel["stages"]}
     assert by_stage["C18:NEW"]["conversion_step"] is None  # первая стадия — не из чего
@@ -129,7 +130,7 @@ def test_step_conversion_runs_along_the_working_chain(seeded):
 
 
 def test_win_rate_counts_only_closed_deals(seeded):
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         result = metrics.win_rate(conn, 18, AUG["since"], AUG["until"])
     # Закрыты 2 (выиграна 1, проиграна 1); открытая в знаменатель не входит.
     assert result["closed"] == 2
@@ -140,7 +141,7 @@ def test_win_rate_counts_only_closed_deals(seeded):
 
 def test_money_reports_coverage_next_to_amount(seeded):
     """Сумма без покрытия вводит в заблуждение там, где решается вопрос о деньгах."""
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         cash = metrics.money(conn, 18, AUG["since"], AUG["until"])
     # Открытая сделка одна, и сумма у неё не заполнена.
     assert cash["open_deals"] == 1
@@ -150,7 +151,7 @@ def test_money_reports_coverage_next_to_amount(seeded):
 
 
 def test_stage_movement_accounts_flow_not_snapshot_difference(seeded):
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         movement = {m["stage_id"]: m for m in metrics.stage_movement(conn, 18, **AUG)}
     assert movement["C18:NEW"]["entered"] == 3
     assert movement["C18:NEW"]["left_count"] == 2
@@ -175,7 +176,7 @@ def test_transitions_detect_backward_moves(analytics_db, seeded):
             "entered_at, left_at, duration_sec, seq) "
             "VALUES ('deal', 2, 18, 'C18:NEW', '2026-08-06T00:00:00+00:00', NULL, NULL, 2)"
         )
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         result = metrics.stage_transitions(conn, 18, **AUG)
     assert result["backwards_total"] == 1
     assert result["backwards"][0]["from_stage"] == "C18:SHOW"
@@ -183,7 +184,7 @@ def test_transitions_detect_backward_moves(analytics_db, seeded):
 
 
 def test_stage_durations_use_median_not_mean(seeded):
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         durations = {d["stage_id"]: d for d in metrics.stage_durations(conn, 18, **AUG)}
     assert durations["C18:NEW"]["completed_count"] == 2
     assert durations["C18:NEW"]["median_days"] in (2.0, 3.0)
@@ -191,7 +192,7 @@ def test_stage_durations_use_median_not_mean(seeded):
 
 
 def test_lead_conversion_uses_real_deal_link(seeded):
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         funnel = metrics.lead_funnel(conn, **AUG)
         by_source = metrics.lead_sources(conn, **AUG)
     assert funnel["total"] == 2
@@ -202,7 +203,7 @@ def test_lead_conversion_uses_real_deal_link(seeded):
 
 
 def test_weighted_forecast_uses_own_history(seeded):
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         forecast = metrics.weighted_forecast(conn, 18)
     # Из дошедших до «Подбора» закрылись 2, выиграна 1 → вероятность 50%.
     by_stage = {s["stage_id"]: s for s in forecast["by_stage"]}
@@ -212,7 +213,7 @@ def test_weighted_forecast_uses_own_history(seeded):
 
 
 def test_entity_table_paginates_and_links_rows(seeded):
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         table = metrics.entity_table(conn, entity="deal", category_id=18, page_size=2)
     assert table["total"] == 3
     assert table["pages"] == 2
@@ -223,17 +224,17 @@ def test_entity_table_paginates_and_links_rows(seeded):
 
 def test_entity_table_rejects_unknown_sort_column(seeded):
     """Имя колонки нельзя параметризовать — принимаем только белый список."""
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         table = metrics.entity_table(
             conn, entity="deal", sort="d.deal_id; DROP TABLE fact_deal--",
         )
     assert table["total"] == 3
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         assert conn.execute("SELECT COUNT(*) FROM fact_deal").fetchone()[0] == 3
 
 
 def test_data_quality_surfaces_missing_amounts(seeded):
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         quality = metrics.data_quality(conn, 18)
     assert quality["deals"]["total"] == 3
     assert quality["deals"]["no_amount"] == 1
@@ -242,7 +243,7 @@ def test_data_quality_surfaces_missing_amounts(seeded):
 
 def test_overview_compares_to_previous_period(seeded):
     period = metrics.resolve_period(start="2026-08-01", end="2026-08-31")
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         result = metrics.overview(conn, period, 18)
     assert result["current"]["deals_created"] == 3
     assert result["current"]["won"] == 1
@@ -270,7 +271,7 @@ def test_lost_stage_has_no_step_conversion(seeded):
     Раньше проигрыш делился на последнюю рабочую стадию и выдавал 400%:
     цифра, по которой нельзя принять ни одного решения.
     """
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         funnel = metrics.deal_funnel(conn, 18, AUG["since"], AUG["until"])
     by_stage = {s["stage_id"]: s for s in funnel["stages"]}
     assert by_stage["C18:APOLOGY"]["conversion_step"] is None
@@ -288,7 +289,7 @@ def test_remaining_on_stage_agrees_with_current_snapshot(seeded):
     одной странице, стоят доверия ко всему дашборду.
     """
     far_future = "2999-01-01T00:00:00+00:00"
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         movement = {
             row["stage_id"]: row["remaining"]
             for row in metrics.stage_movement(conn, 18, "0001-01-01T00:00:00+00:00", far_future)
@@ -317,7 +318,7 @@ def test_junk_threshold_comes_from_the_data_not_a_guess(analytics_db, seeded):
                 "VALUES (?, 'Лид', ?, 'WEB', 32, '2026-08-01T00:00:00+00:00', 0, 0, 'x')",
                 (lead_id, status),
             )
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         by_source = {row["source_id"]: row for row in metrics.lead_sources(conn, **AUG)}
     # У «Сайта» мусора 2 из 3, у «Звонка» — 0 из 2: выше среднего только первый.
     assert by_source["WEB"]["junk_above_average"] is True
@@ -332,7 +333,7 @@ def test_future_stage_entry_shows_as_zero_and_is_flagged(analytics_db, seeded):
             "stage_id, entered_at, left_at, duration_sec, seq) "
             "VALUES ('deal', 2, 18, 'C18:NEW', '2099-01-01T00:00:00+00:00', NULL, NULL, 9)"
         )
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         table = metrics.entity_table(conn, entity="deal", category_id=18)
         quality = metrics.data_quality(conn, 18)
     assert all(
@@ -362,7 +363,7 @@ def test_flow_identity_holds_for_every_stage(seeded):
     по нему нельзя судить, наполняется стадия или разгружается, а
     руководитель будет искать затор там, где его нет.
     """
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         assert _flow_identity_holds(conn, 18, AUG["since"], AUG["until"]) == []
 
 
@@ -375,7 +376,7 @@ def test_flow_identity_holds_for_every_stage(seeded):
 ])
 def test_flow_identity_holds_on_arbitrary_windows(seeded, since, until):
     """Тождество не должно зависеть от того, куда попали границы периода."""
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         assert _flow_identity_holds(conn, 18, since, until) == []
 
 
@@ -385,7 +386,7 @@ def test_deal_entering_and_leaving_inside_period_is_counted_both_ways(seeded):
     Сделка, зашедшая на стадию и ушедшая с неё внутри периода, в разности
     срезов не видна вовсе — хотя работа по ней шла.
     """
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         rows = {r["stage_id"]: r for r in metrics.stage_movement(conn, 18, **AUG)}
     show = rows["C18:SHOW"]
     assert show["entered"] == 2 and show["left_count"] == 2
@@ -412,7 +413,7 @@ def test_reentry_counts_as_two_entries(analytics_db, seeded):
             "entered_at, left_at, duration_sec, seq) VALUES "
             "('deal', 2, 18, 'C18:SHOW', '2026-08-07T00:00:00+00:00', NULL, NULL, 2)"
         )
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         rows = {r["stage_id"]: r for r in metrics.stage_movement(conn, 18, **AUG)}
         assert _flow_identity_holds(conn, 18, **AUG) == []
     assert rows["C18:SHOW"]["entered"] == 4      # 2 прежних + 2 захода сделки 2
@@ -430,7 +431,7 @@ def test_department_filter_narrows_movement(analytics_db, seeded):
         conn.execute("UPDATE fact_deal SET assigned_by_id = 99 WHERE deal_id = 4")
         _events(conn, 4, [("C18:NEW", "2026-08-01T00:00:00+00:00", None)])
 
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         everyone = {r["stage_id"]: r for r in metrics.stage_movement(conn, 18, **AUG)}
         trofimova = {
             r["stage_id"]: r
@@ -456,7 +457,7 @@ def test_department_filter_narrows_movement(analytics_db, seeded):
 
 def test_flow_identity_holds_under_department_filter(analytics_db, seeded):
     """Фильтр не должен ломать сходимость потока внутри отдела."""
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         for department_id in (44, 50, None):
             broken = []
             rows = metrics.stage_movement(
@@ -470,7 +471,7 @@ def test_flow_identity_holds_under_department_filter(analytics_db, seeded):
 
 
 def test_department_filter_narrows_transitions_and_stuck(analytics_db, seeded):
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         everyone = metrics.stage_transitions(conn, 18, **AUG)
         other = metrics.stage_transitions(
             conn, 18, AUG["since"], AUG["until"], 999,
@@ -482,7 +483,89 @@ def test_department_filter_narrows_transitions_and_stuck(analytics_db, seeded):
 
 
 def test_departments_options_lists_only_departments_with_deals(seeded):
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(Scope.everything()) as conn:
         options = metrics.departments_options(conn)
     assert [row["name"] for row in options] == ["Отдел Трофимовой"]
     assert options[0]["department_id"] == 44
+
+
+# --------------------------------------------------------------------------
+# фильтры таблицы обязаны фильтровать
+# --------------------------------------------------------------------------
+
+def test_every_table_filter_actually_narrows_the_result(analytics_db, seeded):
+    """Проверка на класс ошибок, который не падает и ничего не пишет в лог.
+
+    Условие, приклеенное к запросу без WHERE, прицепляется к ON последнего
+    LEFT JOIN. Запрос остаётся валидным, но перестаёт фильтровать: LEFT JOIN
+    на непопадание отдаёт NULL-ы, а не отбрасывает строку. Снаружи это
+    выглядит как «фильтр не сработал», и заметить можно только сравнив числа.
+    """
+    with analytics_session() as conn:
+        conn.execute(
+            "INSERT INTO dim_user(user_id, name, department_id, department_name, "
+            "is_active, synced_at) VALUES (77, 'Пётр Сидоров', 50, 'Отдел Волковой', 1, 'x')"
+        )
+        conn.execute(
+            "INSERT INTO dim_source(source_id, name, synced_at) VALUES ('WEB', 'Сайт', 'x')"
+        )
+        _deal(conn, 7, "C18:WON", won=True, amount=1, closed="2026-08-20T00:00:00+00:00")
+        conn.execute(
+            "UPDATE fact_deal SET assigned_by_id = 77, source_id = 'WEB', "
+            "title = 'Особая метка', date_create = '2026-08-20T00:00:00+00:00' "
+            "WHERE deal_id = 7"
+        )
+        _events(conn, 7, [("C18:WON", "2026-08-20T00:00:00+00:00", None)])
+
+    with scoped_session(Scope.everything()) as conn:
+        everything = metrics.entity_table(conn, entity="deal")["total"]
+        cases = {
+            "stage_id": metrics.entity_table(conn, entity="deal", stage_id="C18:WON")["total"],
+            "assigned_by_id": metrics.entity_table(
+                conn, entity="deal", assigned_by_id=77)["total"],
+            "source_id": metrics.entity_table(conn, entity="deal", source_id="WEB")["total"],
+            "query": metrics.entity_table(conn, entity="deal", query="Особая")["total"],
+            "query_by_id": metrics.entity_table(conn, entity="deal", query="7")["total"],
+            "only_open": metrics.entity_table(conn, entity="deal", only_open=True)["total"],
+            "since": metrics.entity_table(
+                conn, entity="deal", since="2026-08-15T00:00:00+00:00")["total"],
+            "until": metrics.entity_table(
+                conn, entity="deal", until="2026-08-15T00:00:00+00:00")["total"],
+            "category_id": metrics.entity_table(
+                conn, entity="deal", category_id=999)["total"],
+        }
+
+    assert everything == 4
+    for name, narrowed in cases.items():
+        assert narrowed < everything, f"фильтр {name} не сузил выборку: {narrowed} из {everything}"
+    # На C18:WON стоят две сделки: одна из фикстуры и добавленная здесь.
+    assert cases["stage_id"] == 2
+    assert cases["assigned_by_id"] == 1
+    assert cases["query"] == 1
+    assert cases["category_id"] == 0
+
+
+def test_lead_table_filters_narrow_too(analytics_db, seeded):
+    with analytics_session() as conn:
+        conn.execute(
+            "INSERT INTO fact_lead(lead_id, title, status_id, source_id, assigned_by_id, "
+            "date_create, is_converted, is_deleted, synced_at) "
+            "VALUES (12, 'Отдельная заявка', 'JUNK', 'CALL', 32, "
+            "'2026-08-20T00:00:00+00:00', 0, 0, 'x')"
+        )
+    with scoped_session(Scope.everything()) as conn:
+        everything = metrics.entity_table(conn, entity="lead")["total"]
+        by_status = metrics.entity_table(conn, entity="lead", stage_id="JUNK")["total"]
+        by_query = metrics.entity_table(conn, entity="lead", query="Отдельная")["total"]
+    assert everything == 3
+    assert by_status == 1 and by_query == 1
+
+
+def test_table_filters_combine_rather_than_replace(analytics_db, seeded):
+    """Два фильтра сразу должны сузить сильнее, чем каждый по отдельности."""
+    with scoped_session(Scope.everything()) as conn:
+        by_stage = metrics.entity_table(conn, entity="deal", stage_id="C18:NEW")["total"]
+        both = metrics.entity_table(
+            conn, entity="deal", stage_id="C18:NEW", query="нет-такой-строки")["total"]
+    assert by_stage >= 1
+    assert both == 0

@@ -14,7 +14,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerifyMismatchError
@@ -37,9 +37,20 @@ _DDL = (
         username       TEXT PRIMARY KEY,
         password_hash  TEXT NOT NULL,
         display_name   TEXT NOT NULL DEFAULT '',
+        role           TEXT NOT NULL DEFAULT 'rop',
         is_active      INTEGER NOT NULL DEFAULT 1,
         created_at     TEXT NOT NULL,
         last_login_at  TEXT
+    );
+    """,
+    # Отделы РОПа списком, а не одним полем: коммерческий директор может
+    # вести несколько отделов, и упереться в это позже значило бы менять
+    # схему на работающей базе.
+    """
+    CREATE TABLE IF NOT EXISTS dash_user_department (
+        username       TEXT NOT NULL,
+        department_id  INTEGER NOT NULL,
+        PRIMARY KEY (username, department_id)
     );
     """,
     """
@@ -108,28 +119,108 @@ def init_store(db_path: str | Path | None = None) -> None:
     with store_session(db_path) as conn:
         for statement in _DDL:
             conn.execute(statement)
+        _migrate_roles(conn)
+
+
+def _migrate_roles(conn: sqlite3.Connection) -> None:
+    """Добавить роль в базы, созданные до разграничения доступа.
+
+    Существующие учётки заводились, когда дашборд видели только руководители,
+    и полный доступ у них уже был — понижать его миграцией значило бы молча
+    отобрать доступ у работающих людей. Поэтому старым строкам ставится
+    admin, а вот умолчание для НОВЫХ учёток — rop: забытый флаг роли должен
+    создавать ограниченного пользователя, а не администратора.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(dash_user)")}
+    if "role" not in columns:
+        conn.execute("ALTER TABLE dash_user ADD COLUMN role TEXT NOT NULL DEFAULT 'rop'")
+        conn.execute("UPDATE dash_user SET role = 'admin'")
+        logger.info("Миграция: существующим учёткам дашборда проставлена роль admin")
 
 
 # --------------------------------------------------------------------------
 # пользователи
 # --------------------------------------------------------------------------
 
-def create_user(username: str, password: str, display_name: str = "") -> None:
-    """Завести пользователя. Пароль хешируется argon2id."""
+ROLE_ADMIN = "admin"
+ROLE_ROP = "rop"
+ROLES = (ROLE_ADMIN, ROLE_ROP)
+
+
+def create_user(
+    username: str,
+    password: str,
+    display_name: str = "",
+    *,
+    role: str = ROLE_ROP,
+    department_ids: Iterable[int] = (),
+) -> None:
+    """Завести пользователя. Пароль хешируется argon2id.
+
+    Роль по умолчанию — самая ограниченная. Забытый флаг должен создавать
+    РОПа без отделов (который не видит ничего), а не администратора: ошибка
+    в сторону меньшего доступа исправляется одной командой, ошибка в другую
+    сторону обнаруживается по утёкшим данным.
+    """
     username = username.strip().lower()
     if not username:
         raise ValueError("Пустой логин")
     if len(password) < 10:
         raise ValueError("Пароль короче 10 символов")
+    if role not in ROLES:
+        raise ValueError(f"Неизвестная роль: {role!r}. Допустимо: {', '.join(ROLES)}")
     with store_session() as conn:
         conn.execute(
-            "INSERT INTO dash_user(username, password_hash, display_name, is_active, created_at) "
-            "VALUES (?, ?, ?, 1, ?) "
+            "INSERT INTO dash_user(username, password_hash, display_name, role, "
+            "is_active, created_at) VALUES (?, ?, ?, ?, 1, ?) "
             "ON CONFLICT(username) DO UPDATE SET "
             "password_hash=excluded.password_hash, display_name=excluded.display_name, "
-            "is_active=1",
-            (username, _HASHER.hash(password), display_name or username, _iso(_now())),
+            "role=excluded.role, is_active=1",
+            (username, _HASHER.hash(password), display_name or username, role, _iso(_now())),
         )
+        _replace_departments(conn, username, department_ids)
+
+
+def _replace_departments(
+    conn: sqlite3.Connection,
+    username: str,
+    department_ids: Iterable[int],
+) -> None:
+    conn.execute("DELETE FROM dash_user_department WHERE username = ?", (username,))
+    rows = sorted({int(d) for d in department_ids if d is not None})
+    if rows:
+        conn.executemany(
+            "INSERT INTO dash_user_department(username, department_id) VALUES (?, ?)",
+            [(username, d) for d in rows],
+        )
+
+
+def set_user_role(username: str, role: str, department_ids: Iterable[int] = ()) -> bool:
+    """Сменить роль и набор отделов.
+
+    Область видимости пересчитывается на каждый запрос из учётной записи,
+    поэтому изменение действует немедленно — переоткрывать сессию не нужно.
+    """
+    if role not in ROLES:
+        raise ValueError(f"Неизвестная роль: {role!r}. Допустимо: {', '.join(ROLES)}")
+    username = username.strip().lower()
+    with store_session() as conn:
+        cursor = conn.execute(
+            "UPDATE dash_user SET role = ? WHERE username = ?", (role, username),
+        )
+        if cursor.rowcount == 0:
+            return False
+        _replace_departments(conn, username, () if role == ROLE_ADMIN else department_ids)
+        return True
+
+
+def user_departments(conn: sqlite3.Connection, username: str) -> list[int]:
+    return [
+        row[0] for row in conn.execute(
+            "SELECT department_id FROM dash_user_department WHERE username = ? "
+            "ORDER BY department_id", (username,),
+        )
+    ]
 
 
 def set_user_active(username: str, active: bool) -> bool:
@@ -143,10 +234,13 @@ def set_user_active(username: str, active: bool) -> bool:
 
 def list_users() -> list[dict[str, Any]]:
     with store_session() as conn:
-        return [dict(row) for row in conn.execute(
-            "SELECT username, display_name, is_active, created_at, last_login_at "
-            "FROM dash_user ORDER BY username"
+        rows = [dict(row) for row in conn.execute(
+            "SELECT username, display_name, role, is_active, created_at, last_login_at "
+            "FROM dash_user ORDER BY role DESC, username"
         )]
+        for row in rows:
+            row["department_ids"] = user_departments(conn, row["username"])
+        return rows
 
 
 def verify_password(username: str, password: str) -> dict[str, Any] | None:
@@ -158,7 +252,7 @@ def verify_password(username: str, password: str) -> dict[str, Any] | None:
     username = (username or "").strip().lower()
     with store_session() as conn:
         row = conn.execute(
-            "SELECT username, password_hash, display_name, is_active "
+            "SELECT username, password_hash, display_name, role, is_active "
             "FROM dash_user WHERE username = ?",
             (username,),
         ).fetchone()
@@ -185,7 +279,12 @@ def verify_password(username: str, password: str) -> dict[str, Any] | None:
             "UPDATE dash_user SET last_login_at = ? WHERE username = ?",
             (_iso(_now()), username),
         )
-        return {"username": row["username"], "display_name": row["display_name"]}
+        return {
+            "username": row["username"],
+            "display_name": row["display_name"],
+            "role": row["role"],
+            "department_ids": user_departments(conn, username),
+        }
 
 
 # --------------------------------------------------------------------------
@@ -257,7 +356,7 @@ def touch_session(sid: str, *, idle_hours: int) -> dict[str, Any] | None:
     with store_session() as conn:
         row = conn.execute(
             "SELECT s.sid, s.username, s.last_seen_at, s.expires_at, s.revoked_at, "
-            "u.display_name, u.is_active "
+            "u.display_name, u.role, u.is_active "
             "FROM dash_session s LEFT JOIN dash_user u ON u.username = s.username "
             "WHERE s.sid = ?",
             (sid,),
@@ -275,7 +374,15 @@ def touch_session(sid: str, *, idle_hours: int) -> dict[str, Any] | None:
             )
             return None
         conn.execute("UPDATE dash_session SET last_seen_at = ? WHERE sid = ?", (_iso(now), sid))
-        return {"username": row["username"], "display_name": row["display_name"] or row["username"]}
+        # Роль и отделы читаются на каждый запрос, а не кладутся в куку:
+        # закрытый доступ должен закрываться сразу, а не после истечения
+        # сессии, и подделать роль на стороне клиента негде.
+        return {
+            "username": row["username"],
+            "display_name": row["display_name"] or row["username"],
+            "role": row["role"] or ROLE_ROP,
+            "department_ids": user_departments(conn, row["username"]),
+        }
 
 
 def revoke_session(sid: str) -> None:

@@ -44,9 +44,60 @@ def _read_password(confirm: bool = True) -> str:
 
 def cmd_adduser(args: argparse.Namespace) -> int:
     store.init_store()
-    store.create_user(args.username, _read_password(), args.name or "")
-    print(f"Пользователь {args.username} создан")
+    departments = _departments_arg(args)
+    store.create_user(
+        args.username, _read_password(), args.name or "",
+        role=args.role, department_ids=departments,
+    )
+    print(f"Пользователь {args.username} создан, роль {args.role}, "
+          f"{_scope_text(args.role, departments)}")
     return 0
+
+
+def cmd_setrole(args: argparse.Namespace) -> int:
+    store.init_store()
+    departments = _departments_arg(args)
+    if not store.set_user_role(args.username, args.role, departments):
+        raise SystemExit(f"Нет такого пользователя: {args.username}")
+    print(f"{args.username}: роль {args.role}, {_scope_text(args.role, departments)}")
+    return 0
+
+
+def cmd_departments(_: argparse.Namespace) -> int:
+    """Отделы из витрины — чтобы админ знал, какие ID назначать РОПам."""
+    import analytics  # noqa: F401  — кладёт src/analytics на sys.path
+    import metrics
+    from scope import Scope, scoped_session
+
+    with scoped_session(Scope.everything()) as conn:
+        rows = metrics.departments_options(conn)
+    if not rows:
+        print("В витрине нет отделов. Сначала запустите ETL.")
+        return 0
+    print(f"{'ID':<8} {'сделок':<8} отдел")
+    for row in rows:
+        print(f"{row['department_id']:<8} {row['deals']:<8} {row['name']}")
+    return 0
+
+
+def _departments_arg(args: argparse.Namespace) -> list[int]:
+    departments = list(args.department or [])
+    if args.role == store.ROLE_ROP and not departments:
+        # Учётка без отделов не видит ничего. Это безопасно, но чаще всего
+        # означает забытый флаг, а не намерение — предупреждаем вслух.
+        print("Внимание: отделы не заданы — этот пользователь не увидит НИЧЕГО. "
+              "Список отделов: manage.py departments")
+    if args.role == store.ROLE_ADMIN and departments:
+        print("Внимание: у администратора отделы не используются — он видит всё.")
+    return departments
+
+
+def _scope_text(role: str, departments: list[int]) -> str:
+    if role == store.ROLE_ADMIN:
+        return "видит всю компанию"
+    if not departments:
+        return "не видит ничего (отделы не назначены)"
+    return f"видит отделы {', '.join(str(d) for d in departments)}"
 
 
 def cmd_passwd(args: argparse.Namespace) -> int:
@@ -66,13 +117,15 @@ def cmd_list(_: argparse.Namespace) -> int:
     store.init_store()
     users = store.list_users()
     if not users:
-        print("Пользователей нет. Заведите: manage.py adduser <логин>")
+        print("Пользователей нет. Заведите: manage.py adduser <логин> --role admin")
         return 0
-    print(f"{'логин':<20} {'активен':<9} {'последний вход':<20} имя")
+    print(f"{'логин':<18} {'роль':<7} {'активен':<9} {'видит':<28} имя")
     for user in users:
         print(
-            f"{user['username']:<20} {'да' if user['is_active'] else 'нет':<9} "
-            f"{(user['last_login_at'] or '—')[:19]:<20} {user['display_name']}"
+            f"{user['username']:<18} {user['role']:<7} "
+            f"{'да' if user['is_active'] else 'нет':<9} "
+            f"{_scope_text(user['role'], user['department_ids']):<28} "
+            f"{user['display_name']}"
         )
     return 0
 
@@ -135,6 +188,8 @@ def main() -> int:
 
     for name, handler, needs_user, help_text in (
         ("adduser", cmd_adduser, True, "завести пользователя"),
+        ("setrole", cmd_setrole, True, "сменить роль и отделы"),
+        ("departments", cmd_departments, False, "список отделов из витрины"),
         ("passwd", cmd_passwd, True, "сменить пароль и отозвать сессии"),
         ("disable", cmd_disable, True, "закрыть доступ"),
         ("enable", cmd_enable, True, "открыть доступ"),
@@ -149,6 +204,14 @@ def main() -> int:
             command.add_argument("username")
         if name == "adduser":
             command.add_argument("--name", default="", help="отображаемое имя")
+        if name in ("adduser", "setrole"):
+            command.add_argument(
+                "--role", choices=store.ROLES, default=store.ROLE_ROP,
+                help="admin — вся компания; rop — только свои отделы (по умолчанию)")
+            command.add_argument(
+                "--department", type=int, action="append", metavar="ID",
+                help="отдел РОПа; можно указать несколько раз. "
+                     "ID смотреть в manage.py departments")
         if name == "sessions":
             command.add_argument("username", nargs="?", default=None)
         command.set_defaults(handler=handler)

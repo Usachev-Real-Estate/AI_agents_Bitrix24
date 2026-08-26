@@ -78,7 +78,7 @@ def hostile_app(analytics_db, monkeypatch):
         )
 
     application = create_app()
-    store.create_user(LOGIN, PASSWORD)
+    store.create_user(LOGIN, PASSWORD, role="admin")
     return application
 
 

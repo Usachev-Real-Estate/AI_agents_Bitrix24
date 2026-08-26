@@ -34,7 +34,7 @@ async def overview(request: Request) -> HTMLResponse:
     context = base_context(request, active="")
     period, category_id = context["period"], context["category_id"]
     grain = _grain_for(period)
-    with read_analytics() as conn:
+    with read_analytics(request) as conn:
         series = metrics.timeseries(
             conn, period["since"], period["until"], category_id, grain=grain,
         )
@@ -51,7 +51,7 @@ async def overview(request: Request) -> HTMLResponse:
 async def leads(request: Request) -> HTMLResponse:
     context = base_context(request, active="leads")
     period = context["period"]
-    with read_analytics() as conn:
+    with read_analytics(request) as conn:
         funnel = metrics.lead_funnel(conn, period["since"], period["until"])
         context.update({
             "funnel": funnel,
@@ -70,7 +70,7 @@ async def deals(request: Request) -> HTMLResponse:
     period = context["period"]
     category_id = _default_category(context)
     context["category_id"] = category_id
-    with read_analytics() as conn:
+    with read_analytics(request) as conn:
         if category_id is None:
             context.update({"funnel": None, "charts": {}})
             return _render(request, "deals.html", context)
@@ -103,7 +103,7 @@ async def movement(request: Request) -> HTMLResponse:
     period = context["period"]
     category_id = _default_category(context)
     context["category_id"] = category_id
-    with read_analytics() as conn:
+    with read_analytics(request) as conn:
         if category_id is None:
             context.update({
                 "movement": [], "transitions": None, "stuck": [],
@@ -133,7 +133,7 @@ async def movement(request: Request) -> HTMLResponse:
 async def people(request: Request) -> HTMLResponse:
     context = base_context(request, active="people")
     period, category_id = context["period"], context["category_id"]
-    with read_analytics() as conn:
+    with read_analytics(request) as conn:
         rows = metrics.people(conn, period["since"], period["until"], category_id)
         context.update({
             "people": rows,
@@ -151,12 +151,13 @@ async def table(request: Request) -> HTMLResponse:
     params = request.query_params
     period = context["period"]
     entity = params.get("entity", "deal")
-    with read_analytics() as conn:
+    with read_analytics(request) as conn:
         context.update({
             "table": metrics.entity_table(
                 conn,
                 entity=entity,
                 category_id=context["category_id"],
+                department_id=context["department_id"],
                 stage_id=params.get("stage") or None,
                 assigned_by_id=_int_or_none(params.get("assignee")),
                 source_id=params.get("source") or None,
@@ -193,7 +194,7 @@ async def table(request: Request) -> HTMLResponse:
 @router.get("/quality", response_class=HTMLResponse)
 async def quality(request: Request) -> HTMLResponse:
     context = base_context(request, active="quality")
-    with read_analytics() as conn:
+    with read_analytics(request) as conn:
         context.update({
             "quality": metrics.data_quality(conn, context["category_id"]),
             "status": metrics.etl_status(conn),

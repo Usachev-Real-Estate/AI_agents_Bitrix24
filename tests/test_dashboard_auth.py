@@ -30,7 +30,7 @@ def dash_app(analytics_db, monkeypatch):
     monkeypatch.setenv("DASHBOARD_COOKIE_SECURE", "false")
     get_settings.cache_clear()
     application = create_app()
-    store.create_user(LOGIN, PASSWORD, "Тестовый Пользователь")
+    store.create_user(LOGIN, PASSWORD, "Тестовый Пользователь", role="admin")
     return application
 
 

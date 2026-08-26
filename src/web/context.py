@@ -9,12 +9,12 @@ from fastapi import Request
 
 import metrics
 from links import crm_link
-from schema import analytics_session
+from scope import ROLE_ADMIN, Scope, scoped_session
 
 # Страницы, умеющие фильтровать по отделу. Остальным параметр не передаётся:
 # иначе он молча остаётся в адресе, страница его игнорирует, и человек видит
 # «Отдел Волковой» в ссылке при данных по всей компании.
-DEPARTMENT_AWARE_PAGES = frozenset({"movement"})
+DEPARTMENT_AWARE_PAGES = frozenset({"movement", "table"})
 
 NAV = [
     ("", "Обзор"),
@@ -28,14 +28,32 @@ NAV = [
 
 
 @contextmanager
-def read_analytics() -> Iterator[Any]:
-    """Витрина — строго на чтение.
+def read_analytics(request: Request) -> Iterator[Any]:
+    """Витрина, суженная до того, что разрешено видеть этому пользователю.
 
-    Единственный писатель витрины — ETL. Веб открывает её в режиме ro, и это
-    не декларация: SQLite откажет в записи на уровне драйвера.
+    Единственный способ читать данные из веба. Область видимости берётся из
+    сессии и задаётся на самом соединении, а не подставляется в запросы:
+    метрики обращаются только к представлениям v_deal / v_lead /
+    v_stage_event / v_user, которых на неограниченном соединении просто нет.
+    Забыть ограничение в новом запросе невозможно — забывать нечего.
+
+    Витрина при этом открыта строго на чтение: единственный её писатель — ETL.
     """
-    with analytics_session(readonly=True) as conn:
+    with scoped_session(scope_for(request)) as conn:
         yield conn
+
+
+def scope_for(request: Request) -> Scope:
+    """Область видимости по пользователю сессии."""
+    return Scope.for_user(getattr(request.state, "user", None))
+
+
+def visible_department_ids(request: Request) -> tuple[int, ...] | None:
+    """Отделы, доступные пользователю. None — все (администратор)."""
+    user = getattr(request.state, "user", None) or {}
+    if user.get("role") == ROLE_ADMIN:
+        return None
+    return tuple(user.get("department_ids") or ())
 
 
 def resolve_filters(request: Request) -> dict[str, Any]:
@@ -44,11 +62,26 @@ def resolve_filters(request: Request) -> dict[str, Any]:
     period = metrics.resolve_period(
         params.get("period"), params.get("start"), params.get("end"),
     )
+    requested_department = _optional_int(params.get("department"))
     return {
         "period": period,
         "category_id": _optional_int(params.get("category")),
-        "department_id": _optional_int(params.get("department")),
+        "department_id": _clamp_department(request, requested_department),
     }
+
+
+def _clamp_department(request: Request, requested: int | None) -> int | None:
+    """Подрезать выбранный отдел по правам пользователя.
+
+    Само по себе это не защита — данные уже ограничены на уровне соединения,
+    и чужой отдел в адресе просто дал бы пустую страницу. Подрезка нужна,
+    чтобы РОП не увидел в фильтре чужое название отдела и не решил, что
+    смотрит его данные.
+    """
+    allowed = visible_department_ids(request)
+    if allowed is None or requested is None:
+        return requested
+    return requested if requested in allowed else None
 
 
 def _optional_int(value: str | None) -> int | None:
@@ -67,14 +100,17 @@ def base_context(request: Request, active: str = "") -> dict[str, Any]:
     settings = request.app.state.settings
     filters = resolve_filters(request)
 
-    with read_analytics() as conn:
+    user = getattr(request.state, "user", None)
+    with read_analytics(request) as conn:
         pipelines = metrics.pipelines(conn)
         departments = metrics.departments_options(conn)
         status = metrics.etl_status(conn)
 
     return {
         "request": request,
-        "user": getattr(request.state, "user", None),
+        "user": user,
+        "is_admin": (user or {}).get("role") == ROLE_ADMIN,
+        "scope_label": scope_for(request).describe(),
         "base_path": config.base_path,
         "nav": NAV,
         "department_aware_pages": DEPARTMENT_AWARE_PAGES,

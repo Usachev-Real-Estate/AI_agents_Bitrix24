@@ -25,7 +25,9 @@
     {% else %}
       <span class="muted">данные не загружались</span>
     {% endif %}
-    <span>{{ user.display_name if user else '' }}</span>
+    <span title="Что вам видно: {{ scope_label }}">
+      {{ user.display_name if user else '' }}{% if not is_admin %}
+        <span class="badge">только свой отдел</span>{% endif %}</span>
     <a class="btn" href="{{ base_path }}/logout">Выйти</a>
   </div>
 </header>

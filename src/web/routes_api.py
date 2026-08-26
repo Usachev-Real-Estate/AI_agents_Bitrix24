@@ -40,7 +40,7 @@ CSV_COLUMNS = [
 @router.get("/overview")
 async def api_overview(request: Request) -> JSONResponse:
     filters = resolve_filters(request)
-    with read_analytics() as conn:
+    with read_analytics(request) as conn:
         return JSONResponse({
             "period": filters["period"],
             "overview": metrics.overview(conn, filters["period"], filters["category_id"]),
@@ -52,7 +52,7 @@ async def api_overview(request: Request) -> JSONResponse:
 async def api_funnel(request: Request) -> JSONResponse:
     filters = resolve_filters(request)
     category_id = filters["category_id"]
-    with read_analytics() as conn:
+    with read_analytics(request) as conn:
         if category_id is None:
             pipelines = metrics.pipelines(conn)
             category_id = pipelines[0]["category_id"] if pipelines else None
@@ -72,7 +72,7 @@ async def api_funnel(request: Request) -> JSONResponse:
 @router.get("/leads")
 async def api_leads(request: Request) -> JSONResponse:
     period = resolve_filters(request)["period"]
-    with read_analytics() as conn:
+    with read_analytics(request) as conn:
         return JSONResponse({
             "funnel": metrics.lead_funnel(conn, period["since"], period["until"]),
             "sources": metrics.lead_sources(conn, period["since"], period["until"]),
@@ -82,7 +82,7 @@ async def api_leads(request: Request) -> JSONResponse:
 @router.get("/quality")
 async def api_quality(request: Request) -> JSONResponse:
     filters = resolve_filters(request)
-    with read_analytics() as conn:
+    with read_analytics(request) as conn:
         return JSONResponse({
             "quality": metrics.data_quality(conn, filters["category_id"]),
             "etl": metrics.etl_status(conn),
@@ -91,7 +91,7 @@ async def api_quality(request: Request) -> JSONResponse:
 
 @router.get("/table")
 async def api_table(request: Request) -> JSONResponse:
-    with read_analytics() as conn:
+    with read_analytics(request) as conn:
         return JSONResponse(_table_from_request(request, conn))
 
 
@@ -108,7 +108,7 @@ async def api_export_csv(request: Request) -> StreamingResponse:
     params["size"] = str(max(1, min(CSV_MAX_ROWS, requested)))
     params["page"] = "1"
 
-    with read_analytics() as conn:
+    with read_analytics(request) as conn:
         result = _table_from_request(request, conn, overrides=params)
 
     buffer = io.StringIO()
@@ -144,6 +144,7 @@ def _table_from_request(
         conn,
         entity=params.get("entity", "deal"),
         category_id=filters["category_id"],
+        department_id=filters["department_id"],
         stage_id=params.get("stage") or None,
         assigned_by_id=_int_or_none(params.get("assignee")),
         source_id=params.get("source") or None,

@@ -95,7 +95,7 @@ def seeded_app(analytics_db, monkeypatch):
         )
 
     application = create_app()
-    store.create_user(LOGIN, PASSWORD, "Руководитель")
+    store.create_user(LOGIN, PASSWORD, "Руководитель", role="admin")
     return application
 
 
@@ -189,7 +189,7 @@ def test_empty_warehouse_explains_itself_instead_of_crashing(analytics_db, monke
     monkeypatch.setenv("DASHBOARD_COOKIE_SECURE", "false")
     get_settings.cache_clear()
     application = create_app()
-    store.create_user(LOGIN, PASSWORD)
+    store.create_user(LOGIN, PASSWORD, role="admin")
     session = TestClient(application, follow_redirects=False)
     session.get(f"{BASE}/login")
     session.post(f"{BASE}/login", data={
