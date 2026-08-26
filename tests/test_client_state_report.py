@@ -483,3 +483,38 @@ def test_the_two_sections_stop_being_identical_lists():
     losing, neglect, _w, _f = split_sections(unworked)
     assert losing == []
     assert len(neglect) == 10
+
+
+def test_a_hot_client_nobody_works_is_a_loss():
+    """#16066: бюджет 130 млн, согласован шаг, 8 дней тишины при норме 3.
+
+    Такая карточка лежала вторым пунктом среди восьми недоработок.
+    """
+    from client_state_report import split_sections
+
+    hot = _res(16066, temperature="hot")
+    hot["state"]["work_evidence"] = _work(False)
+    losing, neglect, _w, _f = split_sections([hot])
+    assert [r["deal_id"] for r in losing] == [16066]
+    assert [r["deal_id"] for r in neglect] == [16066]
+
+
+def test_a_hot_client_being_worked_is_not_a_loss():
+    from client_state_report import split_sections
+
+    hot = _res(1, temperature="hot")
+    hot["state"]["work_evidence"] = _work(True, "call")
+    losing, _n, _w, fine = split_sections([hot])
+    assert losing == []
+    assert [r["deal_id"] for r in fine] == [1]
+
+
+def test_a_warm_client_unworked_stays_a_broker_matter():
+    """Правило добавлено только для горячих — иначе разделы снова сольются."""
+    from client_state_report import split_sections
+
+    warm = _res(2, temperature="warm")
+    warm["state"]["work_evidence"] = _work(False)
+    losing, neglect, _w, _f = split_sections([warm])
+    assert losing == []
+    assert [r["deal_id"] for r in neglect] == [2]

@@ -330,6 +330,13 @@ def _is_losing_client(state: dict[str, Any]) -> bool:
         return True
     if state.get("contradictions"):
         return True
+    work = state.get("work_evidence") or {}
+    if str(state.get("temperature") or "") == "hot" and not work.get("proven", True):
+        # Горячий клиент, которым не занимаются, — самое дорогое в отчёте.
+        # #16066: бюджет 130 млн, согласован шаг, восемь дней тишины при норме
+        # три. Такая карточка не должна лежать вторым пунктом среди восьми
+        # недоработок.
+        return True
     if str(state.get("verdict") or "") == "too_early":
         return False
     if state.get("recoverable") is not False:
@@ -339,7 +346,6 @@ def _is_losing_client(state: dict[str, Any]) -> bool:
     # клиента уходит. Если работа НЕ подтверждена, это недоработка, и звать её
     # ещё и потерей — писать один факт дважды. Прошлый прогон дал два
     # одинаковых списка по десять карточек, и разделение перестало разделять.
-    work = state.get("work_evidence") or {}
     return bool(work.get("proven", True))
 
 

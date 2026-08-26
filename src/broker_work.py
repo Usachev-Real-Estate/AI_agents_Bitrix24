@@ -223,9 +223,17 @@ def has_open_future_task(
     return False
 
 
-def _looks_like_a_date(text: str) -> bool:
-    """Конкретный срок против «на следующей неделе» и «в пятницу»."""
-    return _parse(text) is not None
+def _date_state(text: str, now: datetime) -> str:
+    """Срок: "future" / "past" / "" (не дата).
+
+    Прошедшая дата — не то же самое, что будущая. Совет «запланировать дело
+    на 19 августа», когда сегодня 26-е, читается как издёвка: срок уже
+    сорван, и планировать надо не его, а разговор о новом.
+    """
+    parsed = _parse(text)
+    if parsed is None:
+        return ""
+    return "future" if parsed > now else "past"
 
 
 def next_action(
@@ -254,9 +262,16 @@ def next_action(
     if not what or what.lower() == "unknown":
         return "Запланировать дело: согласовать с клиентом следующий шаг и срок"
 
+    when_state = _date_state(when, now or datetime.now(timezone.utc)) if dated else ""
+
     if who == "client":
-        if dated and _looks_like_a_date(when):
+        if when_state == "future":
             return f"Запланировать дело на {when}: проверить, выполнил ли клиент — {what}"
+        if when_state == "past":
+            return (
+                f"Срок {when} прошёл, клиент не отчитался — связаться "
+                f"и назначить новый: {what}"
+            )
         if dated:
             return (
                 f"Запланировать дело: срок со слов клиента «{when}» — "
@@ -266,8 +281,10 @@ def next_action(
             f"Запланировать дело: связаться с клиентом и согласовать срок — {what}"
         )
 
-    if dated and _looks_like_a_date(when):
+    if when_state == "future":
         return f"Запланировать дело на {when}: {what}"
+    if when_state == "past":
+        return f"Срок {when} прошёл, дела нет — связаться и назначить новый: {what}"
     if dated:
         return f"Запланировать дело: уточнить дату («{when}») и поставить — {what}"
     return f"Запланировать дело с датой: {what}"
