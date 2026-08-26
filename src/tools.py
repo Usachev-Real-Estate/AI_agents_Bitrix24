@@ -2881,6 +2881,31 @@ def _fetch_user_calls_for_audit(
     return calls
 
 
+def fetch_source_names() -> dict[str, str]:
+    """Источник сделки: код → человеческое имя (crm.status.list SOURCE).
+
+    Нужен отчёту: «источник 26» РОПу ничего не говорит, «Диспозл 5%» говорит
+    всё. Не получилось прочитать — работаем по кодам, это не повод падать.
+    """
+    try:
+        raw = _bx_get_all_sync(
+            "crm.status.list",
+            {"filter": {"ENTITY_ID": "SOURCE"}},
+        )
+    except Exception:
+        logger.warning("Source name fetch failed — showing raw codes")
+        return {}
+    names: dict[str, str] = {}
+    for item in _as_list(raw):
+        if not isinstance(item, dict):
+            continue
+        sid = _clean_str(item.get("STATUS_ID"))
+        name = _clean_str(item.get("NAME"))
+        if sid and name:
+            names[sid] = name
+    return names
+
+
 def _fetch_lead_status_names() -> dict[str, str]:
     """Fetch lead status ID → human-readable name mapping.
 

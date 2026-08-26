@@ -387,6 +387,9 @@ STAGE_ENTRY_FIELDS = ("stage_entered_at", "MOVED_TIME", "DATE_CREATE")
 # Те же поля, что можно запросить у crm.deal.list (stage_entered_at ставит
 # основной аудит из истории стадий, у Битрикса такого поля нет).
 STAGE_ENTRY_SELECT = ("MOVED_TIME", "DATE_CREATE")
+# Источник нужен, чтобы отличить холодную базу (выгрузка, реестр) от сделок,
+# где клиент уже есть: терять там нечего, потому что терять пока некого.
+SOURCE_SELECT = ("SOURCE_ID",)
 
 
 def _stage_hours(deal: dict[str, Any], now: datetime) -> float | None:
@@ -952,6 +955,7 @@ def apply_derived_verdict(
     profile: FunnelProfile,
     envelope: dict[str, Any] | None = None,
     events: list[dict[str, Any]] | None = None,
+    settings: Settings | None = None,
 ) -> dict[str, Any]:
     """Пересчитать температуру и вердикт по уже извлечённым фактам.
 
@@ -1009,6 +1013,10 @@ def apply_derived_verdict(
     state["verdict"] = verdict
     state["verdict_reason"] = verdict_reason
     envelope["verdict"] = verdict
+
+    state["source_id"] = _clean_str(
+        record.get("SOURCE_ID") or record.get("source_id"),
+    )
 
     # Подтверждение работы брокера считается по живой карточке на каждом
     # прогоне: скриншот могли приложить уже после разбора, а обвинение по
@@ -1122,7 +1130,7 @@ def analyze_deal(
         cached = json.loads(stored.get("state_json") or "{}")
         # Факты берём из кэша, оценку считаем заново: этап успел постареть,
         # а правила могли поменяться с прошлого прогона.
-        apply_derived_verdict(cached, record, profile, envelope, events)
+        apply_derived_verdict(cached, record, profile, envelope, events, settings)
         # В БД состояние лежит замаскированным — разворачиваем, иначе отчёт
         # покажет КЛИЕНТ_1 вместо имени всюду, где карточка взята из кэша.
         envelope["state"] = unmask_state(cached, mask_map, profile)
@@ -1161,7 +1169,9 @@ def analyze_deal(
         # верным. Перезаписываем хэш, чтобы следующий прогон не пришёл сюда же.
         envelope["skipped"] = True
         envelope["reason"] = "no_new_events"
-        apply_derived_verdict(previous_state, record, profile, envelope, events)
+        apply_derived_verdict(
+            previous_state, record, profile, envelope, events, settings,
+        )
         envelope["state"] = unmask_state(previous_state, mask_map, profile)
         if not settings.dry_run:
             init_db()
@@ -1269,7 +1279,7 @@ def analyze_deal(
         )
     envelope["stage_facts_dropped"] = unquoted
 
-    apply_derived_verdict(state, record, profile, envelope, events)
+    apply_derived_verdict(state, record, profile, envelope, events, settings)
 
     # В БД уходит замаскированная копия: на следующем прогоне она вернётся
     # в модель как previous_state. Разворачиваем только то, что читают люди.
@@ -1331,6 +1341,7 @@ def run_client_state(
                     # Без них _stage_hours возвращает None, отсрочка не
                     # применяется, и свежая карточка судится как застоявшаяся.
                     *STAGE_ENTRY_SELECT,
+                    *SOURCE_SELECT,
                     # UF-поля, которые нужны прямой проверке качества
                     *[code for code, _name in profile.qualification_fields],
                 ],
@@ -1367,6 +1378,9 @@ def run_client_state(
         # итог из-за перекоса выборки, и каждый раз это приходилось
         # раскапывать. Пусть перекос будет виден сразу.
         "stages": {},
+        # Состав выборки по источникам: РОПу важно, из какого канала пришли
+        # карточки, которые не отработали.
+        "sources": {},
         "temperature": {"hot": 0, "warm": 0, "cold": 0, "unknown": 0},
         "verdicts": {
             "good": 0, "tolerable": 0, "poor": 0,
@@ -1398,6 +1412,9 @@ def run_client_state(
                 "state": None,
                 "content_hash": "",
             }
+        source_code = _clean_str(deal.get("SOURCE_ID") or deal.get("source_id"))
+        source_key = source_code or "(без источника)"
+        stats["sources"][source_key] = stats["sources"].get(source_key, 0) + 1
         stats["results"].append(result)
         # Токены считаем и по упавшим карточкам: запрос к модели уже оплачен,
         # даже если ответ не разобрался.

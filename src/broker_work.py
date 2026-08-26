@@ -33,6 +33,9 @@ PROVEN_BY_CALL = "call"
 PROVEN_BY_SCREENSHOT = "screenshot"
 PROVEN_BY_COMMENT = "comment"
 # Чем не подтверждена.
+# GAP_EMPTY_COMMENT — это и есть «неотработанная карточка» в терминах
+# агентства: контакт передали, звонка нет, а в карточке одна отметка
+# «в работе». Такой контакт стоил денег и не отработан.
 GAP_CLAIMED_MESSAGE = "claimed_message_no_proof"
 GAP_CLAIMED_NO_ANSWER = "claimed_no_answer_no_calls"
 GAP_EMPTY_COMMENT = "comment_says_nothing"
@@ -49,7 +52,10 @@ REASON_RU: dict[str, str] = {
     GAP_CLAIMED_NO_ANSWER: (
         "брокер пишет, что клиент не отвечает, но попыток звонка в таймлайне нет"
     ),
-    GAP_EMPTY_COMMENT: "комментарии есть, но по ним не понять, что с клиентом",
+    GAP_EMPTY_COMMENT: (
+        "карточка не отработана: звонка нет, а из комментария не понять, "
+        "что с клиентом"
+    ),
     GAP_NO_TRACE: "следов работы нет",
     GAP_OUT_OF_WINDOW: "срок ещё не наступил",
 }
@@ -152,8 +158,13 @@ def assess_broker_work(
         created = _parse(event.get("created"))
         if created is not None and (last_seen is None or created > last_seen):
             last_seen = created
+    # Округляем: «12.070261341574074 дня» — не точность, а шум. Он уходил в
+    # state_json, менялся каждую секунду и случайно совпадал с цифрами
+    # телефона, из-за чего тест маскировки падал примерно раз на сотню
+    # прогонов. Отчёту хватает одного знака.
     days_quiet = (
-        (now - last_seen).total_seconds() / 86400.0 if last_seen else None
+        round((now - last_seen).total_seconds() / 86400.0, 1)
+        if last_seen else None
     )
 
     # Карточка младше собственного окна: спрашивать не с чего.

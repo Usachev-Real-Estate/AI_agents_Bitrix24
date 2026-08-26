@@ -244,3 +244,12 @@ def test_a_task_of_another_type_is_not_a_call_attempt():
         claims_no_answer=True,
     )
     assert result["reason"] == GAP_CLAIMED_NO_ANSWER
+
+
+def test_days_quiet_is_rounded_not_raw_float():
+    """Полная точность float уходила в state_json и случайно совпадала
+    с цифрами телефона — тест маскировки падал раз на сотню прогонов."""
+    result = _assess([_comment(hours=24 * 12 + 1.7)])
+    quiet = result["days_quiet"]
+    assert quiet == round(quiet, 1)
+    assert len(str(quiet).split(".")[-1]) <= 1

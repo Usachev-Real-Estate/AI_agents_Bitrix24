@@ -1392,3 +1392,16 @@ def test_closed_sale_never_reaches_the_model(monkeypatch):
     assert result["skipped"] is True
     assert result["reason"] == "stage_out_of_qc"
     assert result["verdict"] == "out_of_qc"
+
+
+def test_deal_selection_asks_for_the_source(monkeypatch):
+    """Без SOURCE_ID холодную базу не отличить от сделки с живым клиентом."""
+    import client_state as cs
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        cs, "_bx_get_all_sync",
+        lambda method, params: captured.update(params) or [],
+    )
+    cs.run_client_state(cs.SELLER_PROFILE)
+    assert "SOURCE_ID" in captured["select"]

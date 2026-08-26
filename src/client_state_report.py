@@ -12,7 +12,11 @@ from typing import Any
 from broker_work import REASON_RU as WORK_REASON_RU
 from buyer_commission_reminder import deal_url
 from client_state import MATERIAL_SEVERITY
-from tools import BUYERS_STAGE_NAMES, SELLERS_STAGE_NAMES
+from tools import (
+    BUYERS_STAGE_NAMES,
+    SELLERS_PAID_SOURCE_NAMES,
+    SELLERS_STAGE_NAMES,
+)
 
 # Значение, которым модель отвечает «не знаю». В отчёте показываем словами.
 UNKNOWN = "unknown"
@@ -256,6 +260,10 @@ def format_summary(stats: dict[str, Any]) -> str:
     if stage_line:
         parts.append(stage_line)
 
+    source_line = format_source_mix(stats.get("sources") or {})
+    if source_line:
+        parts.append(source_line)
+
     # Если возраст этапа неизвестен, отсрочка не применяется и вердикты
     # смещены в сторону «плохо». Молчать об этом нельзя: РОП примет завышенную
     # строгость за реальное качество работы брокеров.
@@ -305,12 +313,22 @@ def format_stage_mix(stages: dict[str, int]) -> str:
 
 # ── Два раздела: клиент уходит / брокер не дорабатывает ────────────────
 def _is_losing_client(state: dict[str, Any]) -> bool:
-    """Признаки, что клиента теряем: остыл, замолчал, картины нет."""
+    """Признаки, что клиента теряем: остыл, замолчал, картины нет.
+
+    Внутри отсрочки пустая карточка в этот список не попадает. Лид, заведённый
+    сутки назад, пуст потому, что брокер ещё не работал — мы это уже признали
+    вердиктом «рано судить», и тащить ту же карточку в тревожный раздел значит
+    сказать двумя строками противоположное. Остывший клиент и расхождение с
+    разговором остаются: это события, а не отсутствие данных, и срок им не
+    оправдание.
+    """
     if str(state.get("temperature") or "") == "cold":
         return True
-    if state.get("recoverable") is False:
+    if state.get("contradictions"):
         return True
-    return bool(state.get("contradictions"))
+    if str(state.get("verdict") or "") == "too_early":
+        return False
+    return state.get("recoverable") is False
 
 
 def split_sections(
@@ -401,3 +419,35 @@ def format_sections(
             )
         blocks.append("")
     return "\n".join(blocks).strip()
+
+
+# Известные коды источников из основного аудита. Живые имена подтягивает
+# fetch_source_names(); этот словарь — запасной вариант, когда Битрикс не
+# ответил, и заодно документация на коды, вокруг которых настроена холодная база.
+SOURCE_NAMES: dict[str, str] = dict(SELLERS_PAID_SOURCE_NAMES)
+
+
+def set_source_names(names: dict[str, str]) -> None:
+    """Подставить живые имена источников, прочитанные из Битрикса."""
+    SOURCE_NAMES.update({str(k): str(v) for k, v in names.items() if k and v})
+
+
+def source_name(code: str) -> str:
+    """Человеческое имя источника; неизвестный код показываем как есть."""
+    if not code:
+        return "без источника"
+    return SOURCE_NAMES.get(code, code)
+
+
+def format_source_mix(sources: dict[str, int]) -> str:
+    """Состав выборки по источникам.
+
+    Контакт, пришедший по платному каналу и не отработанный, стоит агентству
+    денег дважды. Строка показывает, из какого канала пришло то, что лежит
+    в отчёте.
+    """
+    if not sources:
+        return ""
+    ranked = sorted(sources.items(), key=lambda kv: (-kv[1], kv[0]))
+    listed = ", ".join(f"{source_name(code)} {count}" for code, count in ranked)
+    return f"Источники выборки: {listed}"
