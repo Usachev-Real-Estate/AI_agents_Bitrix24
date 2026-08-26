@@ -152,8 +152,13 @@ def assess_broker_work(
         created = _parse(event.get("created"))
         if created is not None and (last_seen is None or created > last_seen):
             last_seen = created
+    # Округляем: «12.070261341574074 дня» — не точность, а шум. Он уходил в
+    # state_json, менялся каждую секунду и случайно совпадал с цифрами
+    # телефона, из-за чего тест маскировки падал примерно раз на сотню
+    # прогонов. Отчёту хватает одного знака.
     days_quiet = (
-        (now - last_seen).total_seconds() / 86400.0 if last_seen else None
+        round((now - last_seen).total_seconds() / 86400.0, 1)
+        if last_seen else None
     )
 
     # Карточка младше собственного окна: спрашивать не с чего.

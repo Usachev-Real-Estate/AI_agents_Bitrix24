@@ -21,16 +21,27 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from client_state import (  # noqa: E402
+    SOURCE_SELECT,
     STAGE_ENTRY_SELECT,
     _stage_hours,
     run_client_state,
 )
-from client_state_report import format_sections, format_summary  # noqa: E402
+from client_state_report import (  # noqa: E402
+    format_sections,
+    format_summary,
+    set_source_names,
+)
 from config import get_settings, setup_logging  # noqa: E402
 from db import init_db  # noqa: E402
 from funnel_profiles import BUYER_PROFILE, SELLER_PROFILE, FunnelProfile  # noqa: E402
 from notify import send_chat_message_chunked  # noqa: E402
-from tools import _as_list, _bx_get_all_sync, _clean_str, _coerce_int  # noqa: E402
+from tools import (  # noqa: E402
+    _as_list,
+    _bx_get_all_sync,
+    _clean_str,
+    _coerce_int,
+    fetch_source_names,
+)
 
 MSK = ZoneInfo("Europe/Moscow")
 OUT_PATH = Path("data/client_state_qc_pilot.json")
@@ -72,6 +83,7 @@ def pick_deals(
             "select": [
                 "ID", "TITLE", "STAGE_ID", "ASSIGNED_BY_ID", "CONTACT_ID",
                 *STAGE_ENTRY_SELECT,
+                *SOURCE_SELECT,
                 *[code for code, _name in profile.qualification_fields],
             ],
         },
@@ -149,6 +161,8 @@ def main() -> None:
     init_db()
 
     chat_id = args.chat_id or settings.report_chat_id
+    # Один запрос на прогон: «источник 26» РОПу ничего не говорит.
+    set_source_names(fetch_source_names())
     sections: list[tuple[dict[str, Any], dict[int, str]]] = []
     for profile, category_id in (
         (BUYER_PROFILE, settings.buyers_category_id),

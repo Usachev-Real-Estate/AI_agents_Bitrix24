@@ -12,7 +12,11 @@ from typing import Any
 from broker_work import REASON_RU as WORK_REASON_RU
 from buyer_commission_reminder import deal_url
 from client_state import MATERIAL_SEVERITY
-from tools import BUYERS_STAGE_NAMES, SELLERS_STAGE_NAMES
+from tools import (
+    BUYERS_STAGE_NAMES,
+    SELLERS_PAID_SOURCE_NAMES,
+    SELLERS_STAGE_NAMES,
+)
 
 # Значение, которым модель отвечает «не знаю». В отчёте показываем словами.
 UNKNOWN = "unknown"
@@ -153,6 +157,13 @@ def format_card(
     lines.append(f"Ситуация: {humanize(state.get('situation'))}")
     lines.append(f"Шаг: {format_next_step(state.get('next_step'))}")
 
+    if state.get("cold_base"):
+        source = str(state.get("source_id") or "")
+        label = source_name(source) if source else ""
+        lines.append(
+            "🧊 Холодная база" + (f" — источник «{label}»" if label else ""),
+        )
+
     work = state.get("work_evidence") or {}
     if work and not work.get("proven"):
         quiet = work.get("days_quiet")
@@ -256,6 +267,12 @@ def format_summary(stats: dict[str, Any]) -> str:
     if stage_line:
         parts.append(stage_line)
 
+    source_line = format_source_mix(
+        stats.get("sources") or {}, int(stats.get("cold_base") or 0),
+    )
+    if source_line:
+        parts.append(source_line)
+
     # Если возраст этапа неизвестен, отсрочка не применяется и вердикты
     # смещены в сторону «плохо». Молчать об этом нельзя: РОП примет завышенную
     # строгость за реальное качество работы брокеров.
@@ -319,6 +336,12 @@ def _is_losing_client(state: dict[str, Any]) -> bool:
     if state.get("contradictions"):
         return True
     if str(state.get("verdict") or "") == "too_early":
+        return False
+    if state.get("cold_base"):
+        # Выгрузка из реестра: контакта с собственником ещё не было, значит и
+        # терять пока некого. Пустота такой карточки — это её нормальное
+        # состояние до первого звонка, а не признак ухода клиента. Проверка
+        # работы брокера по ней остаётся: взял в работу — позвони.
         return False
     return state.get("recoverable") is False
 
@@ -411,3 +434,35 @@ def format_sections(
             )
         blocks.append("")
     return "\n".join(blocks).strip()
+
+
+# Известные коды источников из основного аудита. Живые имена подтягивает
+# fetch_source_names(); этот словарь — запасной вариант, когда Битрикс не
+# ответил, и заодно документация на коды, вокруг которых настроена холодная база.
+SOURCE_NAMES: dict[str, str] = dict(SELLERS_PAID_SOURCE_NAMES)
+
+
+def set_source_names(names: dict[str, str]) -> None:
+    """Подставить живые имена источников, прочитанные из Битрикса."""
+    SOURCE_NAMES.update({str(k): str(v) for k, v in names.items() if k and v})
+
+
+def source_name(code: str) -> str:
+    """Человеческое имя источника; неизвестный код показываем как есть."""
+    if not code:
+        return "без источника"
+    return SOURCE_NAMES.get(code, code)
+
+
+def format_source_mix(sources: dict[str, int], cold_base: int) -> str:
+    """Состав выборки по источникам.
+
+    Единственный способ проверить, что коды холодной базы настроены верно:
+    если «Диспозл» в списке есть, а cold_base=0 — настройка мимо.
+    """
+    if not sources:
+        return ""
+    ranked = sorted(sources.items(), key=lambda kv: (-kv[1], kv[0]))
+    listed = ", ".join(f"{source_name(code)} {count}" for code, count in ranked)
+    tail = f" · из них холодная база: {cold_base}" if cold_base else ""
+    return f"Источники выборки: {listed}{tail}"

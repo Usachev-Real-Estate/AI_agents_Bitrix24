@@ -1392,3 +1392,58 @@ def test_closed_sale_never_reaches_the_model(monkeypatch):
     assert result["skipped"] is True
     assert result["reason"] == "stage_out_of_qc"
     assert result["verdict"] == "out_of_qc"
+
+
+def test_deal_selection_asks_for_the_source(monkeypatch):
+    """Без SOURCE_ID холодную базу не отличить от сделки с живым клиентом."""
+    import client_state as cs
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        cs, "_bx_get_all_sync",
+        lambda method, params: captured.update(params) or [],
+    )
+    cs.run_client_state(cs.SELLER_PROFILE)
+    assert "SOURCE_ID" in captured["select"]
+
+
+def test_cold_base_flag_follows_the_configured_sources(monkeypatch):
+    import client_state as cs
+
+    settings = cs.get_settings()
+    record = {"ID": 1, "STAGE_ID": "NEW", "SOURCE_ID": "26"}
+    state = cs._normalize_state({}, cs.SELLER_PROFILE)
+    cs.apply_derived_verdict(
+        state, record, cs.SELLER_PROFILE, {}, [], settings,
+    )
+    assert state["cold_base"] is True
+    assert state["source_id"] == "26"
+
+    warm = cs._normalize_state({}, cs.SELLER_PROFILE)
+    cs.apply_derived_verdict(
+        warm, {"ID": 2, "STAGE_ID": "NEW", "SOURCE_ID": "1"},
+        cs.SELLER_PROFILE, {}, [], settings,
+    )
+    assert warm["cold_base"] is False
+
+
+def test_run_counts_sources_and_cold_base(monkeypatch):
+    import client_state as cs
+
+    def _fake(deal, **kwargs):
+        return {
+            "deal_id": int(deal["ID"]), "skipped": False, "reason": "",
+            "state": {"temperature": "unknown", "verdict": "poor"},
+            "content_hash": "x",
+            "cold_base": deal.get("SOURCE_ID") == "26",
+        }
+
+    monkeypatch.setattr(cs, "analyze_deal", _fake)
+    stats = cs.run_client_state(cs.SELLER_PROFILE, [
+        {"ID": 1, "STAGE_ID": "NEW", "SOURCE_ID": "26"},
+        {"ID": 2, "STAGE_ID": "NEW", "SOURCE_ID": "26"},
+        {"ID": 3, "STAGE_ID": "NEW", "SOURCE_ID": "1"},
+        {"ID": 4, "STAGE_ID": "NEW"},
+    ])
+    assert stats["sources"] == {"26": 2, "1": 1, "(без источника)": 1}
+    assert stats["cold_base"] == 2
