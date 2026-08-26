@@ -510,6 +510,29 @@ def stage_durations(conn, category_id: int, since: str, until: str) -> list[dict
     return out
 
 
+def stage_norms(conn, category_id: int) -> dict[str, float]:
+    """Норма времени на стадии по всей воронке: 75-й перцентиль, в днях.
+
+    Читает v_stage_norm — единственное представление, не суженное по отделу
+    (см. scope.py: в нём нет ни идентификаторов, ни названий, ни сумм, ни
+    ответственных). Норма обязана быть одинаковой для всех, иначе «зависшая
+    сделка» значит разное для РОПа и для директора.
+    """
+    durations: dict[str, list[float]] = {}
+    for row in _rows(
+        conn,
+        "SELECT stage_id, duration_sec / 86400.0 AS days FROM v_stage_norm "
+        "WHERE category_id = :cat",
+        {"cat": category_id},
+    ):
+        if row["days"] is not None and row["days"] >= 0:
+            durations.setdefault(row["stage_id"], []).append(row["days"])
+    return {
+        stage_id: percentile(values, 0.75) or 0.0
+        for stage_id, values in durations.items()
+    }
+
+
 def stuck_deals(
     conn,
     category_id: int,
@@ -522,14 +545,12 @@ def stuck_deals(
     дней: у «Подбора» и «Офера» нормальный срок разный, и единый порог либо
     завалит список шумом, либо пропустит реальные простои.
 
-    При фильтре по отделу порог намеренно остаётся общим по воронке. Считать
-    его внутри отдела значило бы сравнивать медленный отдел сам с собой — он
-    никогда бы не выглядел медленным, и смысл списка пропал бы.
+    Порог общий по воронке независимо от того, кто смотрит: и при фильтре по
+    отделу, и у РОПа, видящего только свой отдел. Иначе медленный отдел
+    сравнивался бы сам с собой и никогда не выглядел медленным, а одна и та же
+    карточка была бы «зависшей» для директора и нормальной для РОПа.
     """
-    thresholds = {
-        row["stage_id"]: row["p75_days"] or 0
-        for row in stage_durations(conn, category_id, "0000", "9999")
-    }
+    thresholds = stage_norms(conn, category_id)
     rows = _rows(
         conn,
         """

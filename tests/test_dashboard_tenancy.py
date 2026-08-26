@@ -362,3 +362,41 @@ def test_rop_cannot_widen_the_table_by_department(rop_a):
     theirs = rop_a.get(f"{BASE}/api/table{PERIOD}&all_time=1&department={DEPT_B}").json()
     ids = {row["id"] for row in theirs["rows"]}
     assert DEAL_B not in ids
+
+
+def test_stuck_threshold_is_the_same_for_rop_and_admin(tenancy_app, rop_a, admin):
+    """Одна карточка не может быть «зависшей» для директора и нормальной для РОПа.
+
+    Порог — 75-й перцентиль времени на стадии по всей воронке. Считай его
+    внутри отдела, и медленный отдел сравнивался бы сам с собой; хуже того,
+    два человека, глядя на одну сделку, расходились бы в оценке.
+    """
+    import metrics
+    from scope import Scope, scoped_session
+
+    with scoped_session(Scope.everything()) as conn:
+        whole = metrics.stage_norms(conn, 18)
+    with scoped_session(Scope.departments([DEPT_A])) as conn:
+        theirs = metrics.stage_norms(conn, 18)
+    assert theirs == whole, "норма стадии разъехалась между ролями"
+
+    # А сама выборка зависших при этом сужена по отделу.
+    with scoped_session(Scope.departments([DEPT_A])) as conn:
+        rows = metrics.stuck_deals(conn, 18)
+    assert all(row["deal_id"] != DEAL_B for row in rows)
+
+
+def test_stage_norm_view_carries_no_identifying_data():
+    """Единственное несуженное представление не должно ничего опознавать.
+
+    Если в него попадут идентификаторы, названия, суммы или ответственные,
+    оно превратится из отраслевого ориентира в дыру.
+    """
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parent.parent
+              / "src" / "analytics" / "scope.py").read_text(encoding="utf-8")
+    view = source[source.index("CREATE TEMP VIEW v_stage_norm"):]
+    view = view[:view.index('"""')]
+    for forbidden in ("entity_id", "title", "opportunity", "assigned_by_id", "deal_id"):
+        assert forbidden not in view, f"v_stage_norm раскрывает {forbidden}"
