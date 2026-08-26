@@ -973,17 +973,11 @@ def apply_derived_verdict(
 
     stage_id = _clean_str(record.get("STAGE_ID") or record.get("stage_id"))
 
-    if stage_id in profile.stages_without_temperature:
-        # По решению агентства на этих этапах клиента не квалифицируем:
-        # сделка уже идёт, «горячий/холодный» там ничего не решает и только
-        # шумит в разделе «теряем клиента».
-        level, why = "", "на этом этапе клиента не квалифицируем"
-    else:
-        level, why = compute_temperature(
-            state.get("signals", {}),
-            recoverable=bool(state.get("recoverable", True)),
-            profile=profile,
-        )
+    level, why = compute_temperature(
+        state.get("signals", {}),
+        recoverable=bool(state.get("recoverable", True)),
+        profile=profile,
+    )
     state["temperature"] = level
     state["temperature_reason"] = why
     envelope["temperature"] = level
@@ -1373,12 +1367,7 @@ def run_client_state(
         # итог из-за перекоса выборки, и каждый раз это приходилось
         # раскапывать. Пусть перекос будет виден сразу.
         "stages": {},
-        # not_qualified — этапы, на которых агентство решило клиента не
-        # оценивать. Считать их «неизвестно» значит выдать наше решение за
-        # неспособность разобраться.
-        "temperature": {
-            "hot": 0, "warm": 0, "cold": 0, "unknown": 0, "not_qualified": 0,
-        },
+        "temperature": {"hot": 0, "warm": 0, "cold": 0, "unknown": 0},
         "verdicts": {
             "good": 0, "tolerable": 0, "poor": 0,
             "too_early": 0, "out_of_qc": 0, "no_rules": 0,
@@ -1439,9 +1428,7 @@ def run_client_state(
                 # отчёт, значит должна попадать и в сводку. Иначе шапка
                 # покажет 4 тёплых из 20, пока в теле их пятнадцать.
                 cached = result.get("state") or {}
-                cached_level = (
-                    str(cached.get("temperature") or "") or "not_qualified"
-                )
+                cached_level = str(cached.get("temperature") or "unknown")
                 if cached_level in stats["temperature"]:
                     stats["temperature"][cached_level] += 1
                 cached_verdict = str(cached.get("verdict") or "")
@@ -1470,7 +1457,7 @@ def run_client_state(
             1 for c in contradictions
             if str(c.get("severity", "medium")).lower() in MINOR_SEVERITY
         )
-        level = str(state.get("temperature") or "") or "not_qualified"
+        level = str(state.get("temperature") or "unknown")
         if level in stats["temperature"]:
             stats["temperature"][level] += 1
         verdict = str(state.get("verdict") or "out_of_qc")

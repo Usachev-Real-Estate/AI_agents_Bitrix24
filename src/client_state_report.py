@@ -23,9 +23,6 @@ TEMPERATURE_RU: dict[str, str] = {
     "warm": "тёплый",
     "cold": "холодный",
     "unknown": "неизвестно",
-    # Не «не смогли определить», а «решили не определять». Разница в том,
-    # чья это недоработка.
-    "not_qualified": "без квалификации",
 }
 
 TEMPERATURE_ICON: dict[str, str] = {
@@ -33,7 +30,6 @@ TEMPERATURE_ICON: dict[str, str] = {
     "warm": "🌤",
     "cold": "❄️",
     "unknown": "❓",
-    "not_qualified": "➖",
 }
 
 RISK_RU: dict[str, str] = {
@@ -133,18 +129,13 @@ def format_card(
         lines.append(f"⏭ Не разбиралась: {REASON_RU.get(reason, reason)}")
         return "\n".join(lines)
 
-    level = str(state.get("temperature") or "")
+    level = str(state.get("temperature") or "unknown")
+    icon = TEMPERATURE_ICON.get(level, TEMPERATURE_ICON["unknown"])
     reason_text = str(state.get("temperature_reason") or "").strip()
-    if level:
-        icon = TEMPERATURE_ICON.get(level, TEMPERATURE_ICON["unknown"])
-        temperature = f"{icon} Температура: [B]{ru(level, TEMPERATURE_RU)}[/B]"
-        if reason_text:
-            temperature += f" — {reason_text}"
-        lines.append(temperature)
-    elif reason_text:
-        # Этап, на котором клиента не квалифицируют. Молча пропустить строку
-        # нельзя: пустое место читается как «забыли посчитать».
-        lines.append(f"➖ {reason_text}")
+    temperature = f"{icon} Температура: [B]{ru(level, TEMPERATURE_RU)}[/B]"
+    if reason_text:
+        temperature += f" — {reason_text}"
+    lines.append(temperature)
 
     verdict = str(state.get("verdict") or "")
     if verdict:
@@ -177,12 +168,7 @@ def format_card(
             f" (норма этапа {work.get('window_days')} дн.{quiet_text})",
         )
 
-    # На этапе без квалификации ни «неинформативна», ни список недостающих
-    # фактов не имеют смысла: там не требуют ни того, ни другого, а рядом с
-    # «хорошо — заполнено: ID объекта Афины» они прямо противоречат вердикту.
-    qualified = bool(str(state.get("temperature") or ""))
-
-    if qualified and state.get("recoverable") is False:
+    if state.get("recoverable") is False:
         lines.append("⚠️ Карточка неинформативна — картину клиента не восстановить")
 
     for item in state.get("contradictions") or []:
@@ -194,7 +180,7 @@ def format_card(
         lines.append(f"   в разговоре: «{humanize(item.get('in_call'))}»")
 
     missing = [str(m).strip() for m in (state.get("missing") or []) if str(m).strip()]
-    if missing and qualified:
+    if missing:
         lines.append("Не хватает: " + ", ".join(missing))
 
     if reason in CACHED_REASONS:
@@ -232,8 +218,7 @@ def format_summary(stats: dict[str, Any]) -> str:
         " | ".join(
             f"{TEMPERATURE_ICON[key]} {TEMPERATURE_RU[key]} "
             f"{int(temperature.get(key) or 0)}"
-            for key in ("hot", "warm", "cold", "unknown", "not_qualified")
-            if key != "not_qualified" or temperature.get(key)
+            for key in ("hot", "warm", "cold", "unknown")
         ),
         "Оценка карточек: " + " | ".join(
             f"{VERDICT_RU[key]} {int(verdicts.get(key) or 0)}"
@@ -320,15 +305,8 @@ def format_stage_mix(stages: dict[str, int]) -> str:
 
 # ── Два раздела: клиент уходит / брокер не дорабатывает ────────────────
 def _is_losing_client(state: dict[str, Any]) -> bool:
-    """Признаки, что клиента теряем: остыл, замолчал, картины нет.
-
-    На этапах без квалификации (пустая temperature) раздела «теряем клиента»
-    нет по определению: агентство решило там клиента не оценивать, и
-    затаскивать карточку в тревожный список через другую дверь нечестно.
-    """
-    if not str(state.get("temperature") or ""):
-        return False
-    if str(state.get("temperature")) == "cold":
+    """Признаки, что клиента теряем: остыл, замолчал, картины нет."""
+    if str(state.get("temperature") or "") == "cold":
         return True
     if state.get("recoverable") is False:
         return True
