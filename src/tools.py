@@ -2881,19 +2881,18 @@ def _fetch_user_calls_for_audit(
     return calls
 
 
-def fetch_source_names() -> dict[str, str]:
-    """Источник сделки: код → человеческое имя (crm.status.list SOURCE).
+def _fetch_status_names(entity_id: str) -> dict[str, str]:
+    """Справочник crm.status.list: код → человеческое имя.
 
-    Нужен отчёту: «источник 26» РОПу ничего не говорит, «Диспозл 5%» говорит
-    всё. Не получилось прочитать — работаем по кодам, это не повод падать.
+    Не получилось прочитать — работаем по кодам, это не повод падать.
     """
     try:
         raw = _bx_get_all_sync(
             "crm.status.list",
-            {"filter": {"ENTITY_ID": "SOURCE"}},
+            {"filter": {"ENTITY_ID": entity_id}},
         )
     except Exception:
-        logger.warning("Source name fetch failed — showing raw codes")
+        logger.warning("Status name fetch failed for %s — showing raw codes", entity_id)
         return {}
     names: dict[str, str] = {}
     for item in _as_list(raw):
@@ -2904,6 +2903,24 @@ def fetch_source_names() -> dict[str, str]:
         if sid and name:
             names[sid] = name
     return names
+
+
+def fetch_source_names() -> dict[str, str]:
+    """Источник сделки: код → человеческое имя.
+
+    Нужен отчёту: «источник 26» РОПу ничего не говорит, «Диспозл 5%» говорит
+    всё.
+    """
+    return _fetch_status_names("SOURCE")
+
+
+def fetch_contact_type_names() -> dict[str, str]:
+    """Тип контакта: код → имя («UC_2G0TD3» → «Собственник»).
+
+    Коды типов на портале самодельные, и угадывать, какой из них означает
+    агента, нельзя — имя приходится спрашивать у Битрикса.
+    """
+    return _fetch_status_names("CONTACT_TYPE")
 
 
 def _fetch_lead_status_names() -> dict[str, str]:

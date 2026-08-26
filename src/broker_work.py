@@ -27,6 +27,9 @@ from typing import Any
 from funnel_profiles import FunnelProfile
 
 CALL_ACTIVITY_TYPE_ID = 2
+# Битрикс отдаёт даты со смещением портала; «сегодня» для отчёта — это
+# московские сутки, а не UTC: иначе вечернее дело уезжает во вчера.
+PORTAL_TZ = timezone(timedelta(hours=3))
 
 # Чем подтверждена работа.
 PROVEN_BY_CALL = "call"
@@ -41,6 +44,11 @@ GAP_CLAIMED_NO_ANSWER = "claimed_no_answer_no_calls"
 GAP_EMPTY_COMMENT = "comment_says_nothing"
 GAP_NO_TRACE = "no_trace"
 GAP_OUT_OF_WINDOW = "window_not_started"
+# Дело, срок которого настал, а отписки о результате нет. Правило
+# агентства: запланировано дело на сегодня — сегодня в карточке должен
+# появиться комментарий о результате связи с клиентом. Дело без
+# результата — напоминание брокера самому себе, а не работа с клиентом.
+GAP_DUE_TASK_NO_RESULT = "due_task_no_result"
 
 PROVEN = frozenset({PROVEN_BY_CALL, PROVEN_BY_SCREENSHOT, PROVEN_BY_COMMENT})
 
@@ -57,6 +65,9 @@ REASON_RU: dict[str, str] = {
         "что с клиентом"
     ),
     GAP_NO_TRACE: "следов работы нет",
+    GAP_DUE_TASK_NO_RESULT: (
+        "срок дела наступил, а комментария о результате связи с клиентом нет"
+    ),
     GAP_OUT_OF_WINDOW: "срок ещё не наступил",
 }
 
@@ -133,6 +144,69 @@ def _has_call_attempt(events: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _day_start(moment: datetime) -> datetime:
+    """Начало суток по времени портала."""
+    return moment.astimezone(PORTAL_TZ).replace(
+        hour=0, minute=0, second=0, microsecond=0,
+    )
+
+
+def due_task_without_result(
+    events: list[dict[str, Any]],
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Дело, срок которого настал, а результата в карточке нет.
+
+    Правило агентства: если дело запланировано на сегодня, то сегодня должен
+    быть комментарий о результате связи с клиентом. Само дело результатом не
+    считается — это план; за результат идут комментарий, расшифровка или
+    закрытое дело (звонок состоялся и его отметили).
+
+    Срок считается наступившим, когда он уже прошёл по часам: обвинять
+    брокера в 10 утра за дело со сроком в 18:00 — то же самое, что судить о
+    несделанном до того, как настал срок делать. Результат ищется с начала
+    суток срока, а не с самой минуты: брокер, позвонивший в 11 и поставивший
+    дело на 12, работу сделал.
+
+    Возвращает {deadline, subject, days_overdue} или None.
+    """
+    now = now or datetime.now(timezone.utc)
+    due: datetime | None = None
+    subject = ""
+    for event in events:
+        if event.get("kind") != "activity":
+            continue
+        if str(event.get("completed") or "").upper() == "Y":
+            continue
+        deadline = _parse(event.get("deadline"))
+        if deadline is None or deadline > now:
+            continue
+        # Из нескольких просроченных берём самое старое: долг считается от
+        # первого несданного дела, а не от последнего.
+        if due is None or deadline < due:
+            due = deadline
+            subject = str(event.get("subject") or "").strip()
+    if due is None:
+        return None
+
+    since = _day_start(due)
+    for event in events:
+        if event.get("kind") == "activity":
+            # Незакрытое дело — это план, а не отчёт о результате.
+            if str(event.get("completed") or "").upper() != "Y":
+                continue
+        created = _parse(event.get("created"))
+        if created is not None and created >= since:
+            return None
+
+    overdue = int((_day_start(now) - since).total_seconds() // 86400)
+    return {
+        "deadline": since.date().isoformat(),
+        "subject": subject,
+        "days_overdue": max(0, overdue),
+    }
+
+
 def assess_broker_work(
     events: list[dict[str, Any]],
     *,
@@ -166,6 +240,19 @@ def assess_broker_work(
         round((now - last_seen).total_seconds() / 86400.0, 1)
         if last_seen else None
     )
+
+    # Наступивший срок дела проверяется раньше окна этапа и раньше звонка:
+    # обязательство брокер назначил себе сам, и оно не отменяется ни тем,
+    # что карточка молодая, ни звонком трёхдневной давности.
+    due = due_task_without_result(events, now)
+    if due is not None:
+        return {
+            "proven": False,
+            "reason": GAP_DUE_TASK_NO_RESULT,
+            "window_days": days,
+            "days_quiet": days_quiet,
+            "due_task": due,
+        }
 
     # Карточка младше собственного окна: спрашивать не с чего.
     if hours_on_stage is not None and hours_on_stage < days * 24:
@@ -223,9 +310,17 @@ def has_open_future_task(
     return False
 
 
-def _looks_like_a_date(text: str) -> bool:
-    """Конкретный срок против «на следующей неделе» и «в пятницу»."""
-    return _parse(text) is not None
+def _date_state(text: str, now: datetime) -> str:
+    """Срок: "future" / "past" / "" (не дата).
+
+    Прошедшая дата — не то же самое, что будущая. Совет «запланировать дело
+    на 19 августа», когда сегодня 26-е, читается как издёвка: срок уже
+    сорван, и планировать надо не его, а разговор о новом.
+    """
+    parsed = _parse(text)
+    if parsed is None:
+        return ""
+    return "future" if parsed > now else "past"
 
 
 def next_action(
@@ -241,6 +336,22 @@ def next_action(
     карточка выглядит брошенной, хотя брокер просто ждёт. Ждать можно, но
     с запланированным делом, иначе ожидание ничем не отличается от забытья.
     """
+    now = now or datetime.now(timezone.utc)
+
+    due = due_task_without_result(events, now)
+    if due is not None:
+        subject = str(due.get("subject") or "").strip()
+        tail = f" по делу «{subject}»" if subject else ""
+        if int(due.get("days_overdue") or 0) >= 1:
+            return (
+                f"Срок дела {due['deadline']} прошёл, результата в карточке нет — "
+                f"связаться с клиентом и написать результат{tail}"
+            )
+        return (
+            f"Дело стоит на сегодня ({due['deadline']}) — "
+            f"написать в карточке результат связи с клиентом{tail}"
+        )
+
     if has_open_future_task(events, now):
         # Дело уже стоит — советовать нечего.
         return ""
@@ -254,9 +365,16 @@ def next_action(
     if not what or what.lower() == "unknown":
         return "Запланировать дело: согласовать с клиентом следующий шаг и срок"
 
+    when_state = _date_state(when, now) if dated else ""
+
     if who == "client":
-        if dated and _looks_like_a_date(when):
+        if when_state == "future":
             return f"Запланировать дело на {when}: проверить, выполнил ли клиент — {what}"
+        if when_state == "past":
+            return (
+                f"Срок {when} прошёл, клиент не отчитался — связаться "
+                f"и назначить новый: {what}"
+            )
         if dated:
             return (
                 f"Запланировать дело: срок со слов клиента «{when}» — "
@@ -266,8 +384,10 @@ def next_action(
             f"Запланировать дело: связаться с клиентом и согласовать срок — {what}"
         )
 
-    if dated and _looks_like_a_date(when):
+    if when_state == "future":
         return f"Запланировать дело на {when}: {what}"
+    if when_state == "past":
+        return f"Срок {when} прошёл, дела нет — связаться и назначить новый: {what}"
     if dated:
         return f"Запланировать дело: уточнить дату («{when}») и поставить — {what}"
     return f"Запланировать дело с датой: {what}"

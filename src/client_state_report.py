@@ -153,6 +153,11 @@ def format_card(
         f"Риск: {ru(state.get('risk'), RISK_RU)} | "
         f"уверенность: {float(state.get('confidence') or 0.0):.2f}",
     )
+    party = state.get("counterparty") if isinstance(state.get("counterparty"), dict) else {}
+    if str(party.get("who") or "") == "agent":
+        why = str(party.get("why") or "").strip()
+        lines.append("👤 Контрагент: агент" + (f" — {why}" if why else ""))
+
     lines.append(f"Цель: {humanize(state.get('client_goal'))}")
     lines.append(f"Ситуация: {humanize(state.get('situation'))}")
     lines.append(f"Шаг: {format_next_step(state.get('next_step'))}")
@@ -166,10 +171,21 @@ def format_card(
             quiet_text = ", последний след сегодня"
         else:
             quiet_text = f", последний след {quiet:.0f} дн. назад"
+        due = work.get("due_task") if isinstance(work.get("due_task"), dict) else None
+        if due:
+            # У наступившего срока своя арифметика: норма этапа тут ни при
+            # чём, спрашивают за конкретное дело и конкретную дату.
+            overdue = int(due.get("days_overdue") or 0)
+            tail = (
+                f"срок {due.get('deadline')}, "
+                + (f"просрочено на {overdue} дн." if overdue else "срок сегодня")
+            )
+        else:
+            tail = f"норма этапа {work.get('window_days')} дн.{quiet_text}"
         lines.append(
             f"🔧 Работа не подтверждена: "
             f"{WORK_REASON_RU.get(str(work.get('reason')), work.get('reason'))}"
-            f" (норма этапа {work.get('window_days')} дн.{quiet_text})",
+            f" ({tail})",
         )
 
     if state.get("recoverable") is False:
@@ -241,6 +257,13 @@ def format_summary(stats: dict[str, Any]) -> str:
     parts.append(
         f"⚡ Расхождений с разговором: существенных {material}, мелких {minor}",
     )
+
+    agents = int(stats.get("agent_cards") or 0)
+    if agents:
+        # Агент — не клиент: он не остывает, и мерить его тем же, чем живого
+        # покупателя, нельзя. Строка нужна, чтобы видеть, сколько таких в
+        # выборке, и поправить разметку, если агентов узнали неверно.
+        parts.append(f"👤 Карточек с агентом, а не клиентом: {agents}")
 
     unrecoverable = int(stats.get("unrecoverable") or 0)
     if unrecoverable:
@@ -330,6 +353,13 @@ def _is_losing_client(state: dict[str, Any]) -> bool:
         return True
     if state.get("contradictions"):
         return True
+    work = state.get("work_evidence") or {}
+    if str(state.get("temperature") or "") == "hot" and not work.get("proven", True):
+        # Горячий клиент, которым не занимаются, — самое дорогое в отчёте.
+        # #16066: бюджет 130 млн, согласован шаг, восемь дней тишины при норме
+        # три. Такая карточка не должна лежать вторым пунктом среди восьми
+        # недоработок.
+        return True
     if str(state.get("verdict") or "") == "too_early":
         return False
     if state.get("recoverable") is not False:
@@ -339,7 +369,6 @@ def _is_losing_client(state: dict[str, Any]) -> bool:
     # клиента уходит. Если работа НЕ подтверждена, это недоработка, и звать её
     # ещё и потерей — писать один факт дважды. Прошлый прогон дал два
     # одинаковых списка по десять карточек, и разделение перестало разделять.
-    work = state.get("work_evidence") or {}
     return bool(work.get("proven", True))
 
 

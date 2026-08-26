@@ -483,3 +483,85 @@ def test_the_two_sections_stop_being_identical_lists():
     losing, neglect, _w, _f = split_sections(unworked)
     assert losing == []
     assert len(neglect) == 10
+
+
+def test_a_hot_client_nobody_works_is_a_loss():
+    """#16066: бюджет 130 млн, согласован шаг, 8 дней тишины при норме 3.
+
+    Такая карточка лежала вторым пунктом среди восьми недоработок.
+    """
+    from client_state_report import split_sections
+
+    hot = _res(16066, temperature="hot")
+    hot["state"]["work_evidence"] = _work(False)
+    losing, neglect, _w, _f = split_sections([hot])
+    assert [r["deal_id"] for r in losing] == [16066]
+    assert [r["deal_id"] for r in neglect] == [16066]
+
+
+def test_a_hot_client_being_worked_is_not_a_loss():
+    from client_state_report import split_sections
+
+    hot = _res(1, temperature="hot")
+    hot["state"]["work_evidence"] = _work(True, "call")
+    losing, _n, _w, fine = split_sections([hot])
+    assert losing == []
+    assert [r["deal_id"] for r in fine] == [1]
+
+
+def test_a_warm_client_unworked_stays_a_broker_matter():
+    """Правило добавлено только для горячих — иначе разделы снова сольются."""
+    from client_state_report import split_sections
+
+    warm = _res(2, temperature="warm")
+    warm["state"]["work_evidence"] = _work(False)
+    losing, neglect, _w, _f = split_sections([warm])
+    assert losing == []
+    assert [r["deal_id"] for r in neglect] == [2]
+
+
+def test_due_task_line_shows_the_deadline_not_the_stage_norm():
+    """У наступившего срока своя арифметика: спрашивают за конкретное дело."""
+    from broker_work import GAP_DUE_TASK_NO_RESULT
+    from client_state_report import format_card
+
+    res = _res(6)
+    res["state"]["work_evidence"] = {
+        "proven": False, "reason": GAP_DUE_TASK_NO_RESULT,
+        "window_days": 3, "days_quiet": 9.0,
+        "due_task": {"deadline": "2026-08-26", "subject": "Позвонить", "days_overdue": 0},
+    }
+    card = format_card(res, "ЖК «Will Towers»", WEBHOOK)
+    assert "срок 2026-08-26, срок сегодня" in card
+    assert "норма этапа" not in card
+
+
+def test_overdue_task_line_counts_the_days():
+    from broker_work import GAP_DUE_TASK_NO_RESULT
+    from client_state_report import format_card
+
+    res = _res(7)
+    res["state"]["work_evidence"] = {
+        "proven": False, "reason": GAP_DUE_TASK_NO_RESULT,
+        "window_days": 3, "days_quiet": 9.0,
+        "due_task": {"deadline": "2026-08-20", "subject": "", "days_overdue": 6},
+    }
+    assert "просрочено на 6 дн." in format_card(res, "ЖК «Will Towers»", WEBHOOK)
+
+
+def test_agent_card_is_marked():
+    from client_state_report import format_card
+
+    res = _res(8)
+    res["state"]["counterparty"] = {"who": "agent", "why": "тип контакта «Агент»"}
+    card = format_card(res, "Лариса агент", WEBHOOK)
+    assert "👤 Контрагент: агент — тип контакта «Агент»" in card
+
+
+def test_client_card_is_not_marked():
+    """Клиент — норма; строка на каждой карточке была бы шумом."""
+    from client_state_report import format_card
+
+    res = _res(9)
+    res["state"]["counterparty"] = {"who": "client", "why": ""}
+    assert "Контрагент" not in format_card(res, "ЖК «Will Towers»", WEBHOOK)

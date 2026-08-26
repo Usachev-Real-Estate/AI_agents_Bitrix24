@@ -137,3 +137,36 @@ def test_a_card_without_a_recommendation_stays_quiet():
         "Сделка", WEBHOOK,
     )
     assert "➡️" not in card
+
+
+# ── Прошедший срок ─────────────────────────────────────────────────────
+def test_a_past_client_date_is_not_offered_as_a_plan():
+    """«Запланировать дело на 19 августа», когда сегодня 26-е, — издёвка.
+
+    Три карточки прогона 26.08 получили ровно такой совет: #15408 (19.08),
+    #14370 (18.08), #15110 (06.08).
+    """
+    action = next_action(
+        _step("Вывезет мусор", when="2026-08-19", who="client"), [], NOW,
+    )
+    assert action.startswith("Срок 2026-08-19 прошёл")
+    assert "клиент не отчитался" in action
+    assert "назначить новый" in action
+
+
+def test_a_past_broker_date_says_the_deadline_was_missed():
+    action = next_action(_step("Связаться с клиентом", when="2026-08-06"), [], NOW)
+    assert action.startswith("Срок 2026-08-06 прошёл")
+    assert "дела нет" in action
+
+
+def test_a_future_date_is_still_planned_normally():
+    assert next_action(_step("Показ", when="2026-08-28"), [], NOW) == (
+        "Запланировать дело на 2026-08-28: Показ"
+    )
+
+
+def test_todays_date_counts_as_past_not_future():
+    """Срок «сегодня» без дела — уже просрочен к моменту прогона."""
+    action = next_action(_step("Созвон", when="2026-08-26"), [], NOW)
+    assert action.startswith("Срок 2026-08-26 прошёл")
