@@ -86,18 +86,32 @@ def test_no_step_at_all_asks_to_agree_one():
     assert action == "Запланировать дело: согласовать с клиентом следующий шаг и срок"
 
 
-# ── Уже запланированное дело снимает совет ─────────────────────────────
-def test_an_open_future_task_silences_the_advice():
-    """Дело стоит — советовать «запланируйте дело» бессмысленно."""
-    assert next_action(_step("Показ"), [_task(days=2)], NOW) == ""
+# ── Уже запланированное дело: вместо совета — состояние ────────────────
+def test_an_open_future_task_reports_the_state_instead_of_advice():
+    """Дело стоит — советовать «запланируйте дело» бессмысленно.
+
+    Но и молчать нельзя: пустая строка в тревожном разделе оставляла РОПа
+    с сигналом «теряем клиента» и без ответа, что делать.
+    """
+    action = next_action(_step("Показ"), [_task(days=2)], NOW)
+    assert action.startswith("Дело стоит на ")
+    assert action.endswith(" — ждём")
+    assert "Запланировать" not in action
+
+
+def test_the_state_line_names_the_nearest_deadline():
+    action = next_action(_step("Показ"), [_task(days=9), _task(days=3)], NOW)
+    assert (NOW + timedelta(days=3)).date().isoformat() in action
 
 
 def test_a_completed_task_does_not_count():
-    assert next_action(_step("Показ"), [_task(days=2, completed="Y")], NOW) != ""
+    action = next_action(_step("Показ"), [_task(days=2, completed="Y")], NOW)
+    assert action.startswith("Запланировать")
 
 
 def test_a_task_whose_deadline_has_passed_does_not_count():
-    assert next_action(_step("Показ"), [_task(days=-2)], NOW) != ""
+    action = next_action(_step("Показ"), [_task(days=-2)], NOW)
+    assert not action.startswith("Дело стоит на ")
 
 
 def test_has_open_future_task_ignores_comments():
