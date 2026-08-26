@@ -328,24 +328,42 @@ def _is_losing_client(state: dict[str, Any]) -> bool:
         return True
     if str(state.get("verdict") or "") == "too_early":
         return False
-    return state.get("recoverable") is False
+    if state.get("recoverable") is not False:
+        return False
+    # Пустая карточка — потеря только тогда, когда брокер работу подтвердил:
+    # значит с клиентом говорили, а в карточке этого не видно, и картина
+    # клиента уходит. Если работа НЕ подтверждена, это недоработка, и звать её
+    # ещё и потерей — писать один факт дважды. Прошлый прогон дал два
+    # одинаковых списка по десять карточек, и разделение перестало разделять.
+    work = state.get("work_evidence") or {}
+    return bool(work.get("proven", True))
 
 
 def split_sections(
     results: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Разложить карточки на «теряем клиента», «недоработка», «в работе».
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
+    """Разложить карточки: теряем / недоработка / рано судить / в работе.
 
     Разделение по зоне ответственности, а не по строгости. «Клиент остыл» —
     забрать себе и решать; «брокер не подтвердил работу» — спросить с брокера.
     Смешивать их в один список значит заставить РОПа сортировать вручную то,
     что уже известно.
 
-    Карточка может попасть в оба раздела: клиент остывает ИМЕННО потому, что
-    с ним не работают, и прятать одну половину этой связки нельзя.
+    Карточка может попасть и в теряем, и в недоработку: клиент остывает ИМЕННО
+    потому, что с ним не работают, и прятать одну половину этой связки нельзя.
+
+    «Рано судить» — отдельный список, а не «в работе». Карточка, заведённая
+    сутки назад и ещё пустая, — не повод для тревоги, но и галочку ✅ ей
+    ставить нельзя: работа по ней не началась.
     """
     losing: list[dict[str, Any]] = []
     neglected: list[dict[str, Any]] = []
+    waiting: list[dict[str, Any]] = []
     fine: list[dict[str, Any]] = []
     for result in results:
         state = result.get("state") or {}
@@ -358,9 +376,13 @@ def split_sections(
             losing.append(result)
         if is_neglected:
             neglected.append(result)
-        if not is_losing and not is_neglected:
+        if is_losing or is_neglected:
+            continue
+        if str(state.get("verdict") or "") == "too_early":
+            waiting.append(result)
+        else:
             fine.append(result)
-    return losing, neglected, fine
+    return losing, neglected, waiting, fine
 
 
 def format_sections(
@@ -369,7 +391,7 @@ def format_sections(
     webhook_url: str,
 ) -> str:
     """Тело отчёта: сначала где теряем клиента, потом где не дорабатывают."""
-    losing, neglected, fine = split_sections(results)
+    losing, neglected, waiting, fine = split_sections(results)
     blocks: list[str] = []
     printed: set[int] = set()
 
@@ -401,13 +423,17 @@ def format_sections(
         f"🔧 НЕДОРАБОТКА БРОКЕРА — {len(neglected)}", neglected,
         "Работа подтверждена по всем карточкам.",
     )
-    if fine:
-        # Карточки без претензий сжимаются в строку: клиент, температура и
-        # следующий шаг. Полный разбор по ним у РОПа не спрашивают, а четыре
-        # экрана текста про здоровые сделки топят те две, ради которых
-        # отчёт открывали.
-        blocks.append(f"[B]✅ В РАБОТЕ — {len(fine)}[/B]")
-        for row in fine:
+
+    def _one_liners(header: str, rows: list[dict[str, Any]]) -> None:
+        """Карточки без претензий — строкой: клиент, температура, шаг.
+
+        Полный разбор по ним у РОПа не спрашивают, а четыре экрана текста
+        про здоровые сделки топят те две, ради которых отчёт открывали.
+        """
+        if not rows:
+            return
+        blocks.append(f"[B]{header} — {len(rows)}[/B]")
+        for row in rows:
             deal_id = int(row.get("deal_id") or 0)
             state = row.get("state") or {}
             icon = TEMPERATURE_ICON.get(
@@ -418,6 +444,9 @@ def format_sections(
                 f"{icon} #{deal_id} {titles.get(deal_id, '')} — {step}".strip(),
             )
         blocks.append("")
+
+    _one_liners("⏳ РАНО СУДИТЬ", waiting)
+    _one_liners("✅ В РАБОТЕ", fine)
     return "\n".join(blocks).strip()
 
 
