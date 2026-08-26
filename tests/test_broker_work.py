@@ -16,6 +16,7 @@ if str(_SRC) not in sys.path:
 from broker_work import (  # noqa: E402
     GAP_CLAIMED_MESSAGE,
     GAP_CLAIMED_NO_ANSWER,
+    GAP_DUE_TASK_NO_RESULT,
     GAP_EMPTY_COMMENT,
     GAP_NO_TRACE,
     GAP_OUT_OF_WINDOW,
@@ -23,6 +24,7 @@ from broker_work import (  # noqa: E402
     PROVEN_BY_COMMENT,
     PROVEN_BY_SCREENSHOT,
     assess_broker_work,
+    next_action,
     work_window_days,
 )
 from funnel_profiles import BUYER_PROFILE, SELLER_PROFILE  # noqa: E402
@@ -253,3 +255,84 @@ def test_days_quiet_is_rounded_not_raw_float():
     quiet = result["days_quiet"]
     assert quiet == round(quiet, 1)
     assert len(str(quiet).split(".")[-1]) <= 1
+
+
+# --- Дело, срок которого настал -------------------------------------------
+# Правило агентства: запланировано дело на сегодня — сегодня в карточке
+# должен быть комментарий о результате связи с клиентом.
+
+def _task(created_h: float, deadline: str, completed: str = "N") -> dict:
+    return {
+        "kind": "activity", "created": _ago(created_h), "type_id": 2,
+        "completed": completed, "deadline": deadline, "subject": "Позвонить",
+        "text": "Позвонить",
+    }
+
+
+def test_task_due_today_without_result_is_a_gap() -> None:
+    """Дело на сегодня, срок прошёл по часам, отписки нет."""
+    events = [_comment(72.0), _task(72.0, _ago(2.0))]
+    result = _assess(events)
+    assert result["proven"] is False
+    assert result["reason"] == GAP_DUE_TASK_NO_RESULT
+    assert result["due_task"]["days_overdue"] == 0
+
+
+def test_task_due_today_with_comment_today_is_fine() -> None:
+    """Отписался — спрашивать не с чего."""
+    events = [_task(72.0, _ago(2.0)), _comment(1.0, "дозвонился, ждёт подборку")]
+    assert _assess(events)["reason"] != GAP_DUE_TASK_NO_RESULT
+
+
+def test_task_deadline_later_today_is_not_yet_owed() -> None:
+    """Срок в 18:00, сейчас полдень — судить рано."""
+    events = [_comment(72.0), _task(72.0, (NOW + timedelta(hours=6)).isoformat())]
+    assert _assess(events)["reason"] != GAP_DUE_TASK_NO_RESULT
+
+
+def test_completed_task_is_not_owed() -> None:
+    events = [_comment(72.0), _task(72.0, _ago(2.0), completed="Y")]
+    assert _assess(events)["reason"] != GAP_DUE_TASK_NO_RESULT
+
+
+def test_overdue_task_counts_days() -> None:
+    events = [_comment(200.0), _task(200.0, _ago(72.0))]
+    result = _assess(events)
+    assert result["reason"] == GAP_DUE_TASK_NO_RESULT
+    assert result["due_task"]["days_overdue"] == 3
+
+
+def test_call_before_deadline_day_does_not_close_the_task() -> None:
+    """Звонок трёхдневной давности не отчёт по делу со сроком вчера."""
+    events = [_call(72.0), _task(72.0, _ago(30.0))]
+    result = _assess(events)
+    assert result["reason"] == GAP_DUE_TASK_NO_RESULT
+
+
+def test_due_task_outranks_young_card_grace() -> None:
+    """Обязательство брокер назначил себе сам — возраст карточки его не снимает."""
+    events = [_comment(20.0), _task(20.0, _ago(2.0))]
+    result = _assess(events, hours_on_stage=20.0)
+    assert result["reason"] == GAP_DUE_TASK_NO_RESULT
+
+
+def test_due_task_advice_names_the_deadline() -> None:
+    events = [_comment(72.0), _task(72.0, _ago(2.0))]
+    advice = next_action({}, events, NOW)
+    assert "результат" in advice.lower()
+    assert "Позвонить" in advice
+
+
+def test_future_task_still_suppresses_advice() -> None:
+    events = [_comment(2.0), _task(2.0, (NOW + timedelta(days=2)).isoformat())]
+    assert next_action({"next_step": {"what": "показ", "who": "broker"}}, events, NOW) == ""
+
+
+def test_due_task_advice_beats_a_second_future_task() -> None:
+    """Дело на завтра не закрывает долг по делу со вчера."""
+    events = [
+        _comment(72.0),
+        _task(72.0, _ago(30.0)),
+        _task(2.0, (NOW + timedelta(days=1)).isoformat()),
+    ]
+    assert "результат" in next_action({}, events, NOW).lower()

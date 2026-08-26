@@ -166,10 +166,21 @@ def format_card(
             quiet_text = ", последний след сегодня"
         else:
             quiet_text = f", последний след {quiet:.0f} дн. назад"
+        due = work.get("due_task") if isinstance(work.get("due_task"), dict) else None
+        if due:
+            # У наступившего срока своя арифметика: норма этапа тут ни при
+            # чём, спрашивают за конкретное дело и конкретную дату.
+            overdue = int(due.get("days_overdue") or 0)
+            tail = (
+                f"срок {due.get('deadline')}, "
+                + (f"просрочено на {overdue} дн." if overdue else "срок сегодня")
+            )
+        else:
+            tail = f"норма этапа {work.get('window_days')} дн.{quiet_text}"
         lines.append(
             f"🔧 Работа не подтверждена: "
             f"{WORK_REASON_RU.get(str(work.get('reason')), work.get('reason'))}"
-            f" (норма этапа {work.get('window_days')} дн.{quiet_text})",
+            f" ({tail})",
         )
 
     if state.get("recoverable") is False:
