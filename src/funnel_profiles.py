@@ -184,8 +184,16 @@ def seller_temperature(signals: dict[str, Any]) -> tuple[str, str]:
     """Seller readiness.
 
     hot  — согласованный шаг с датой + названа цена
-    cold — собственник не отвечает либо не обсуждает цену
+    cold — собственник не выходит на связь
     warm — всё остальное
+
+    «Цена не обсуждалась» холодной карточку больше не делает. Это отсутствие
+    темы, а не событие остывания: карточка на пятом часу жизни и карточка,
+    которую ведут месяц, получали одинаковый ярлык, из-за чего ярлык переставал
+    что-либо значить. #17002 — собственник подтвердил, что продажа актуальна, и
+    попросил написать в WhatsApp, а карточка возрастом 5 часов уехала в раздел
+    «теряем клиента». Пробел никуда не делся: он виден в причине «не названа
+    цена» и в списке «не хватает».
 
     Мотивация («срочно / не срочно / просто интерес») из правила убрана по
     решению агентства: заинтересованность видно по разговору, а не по тому,
@@ -195,8 +203,6 @@ def seller_temperature(signals: dict[str, Any]) -> tuple[str, str]:
     """
     if not _flag(signals, "owner_responsive", True):
         return "cold", "собственник не выходит на связь"
-    if not _flag(signals, "price_discussed"):
-        return "cold", "цена с собственником не обсуждалась"
 
     agreed = _flag(signals, "next_step_agreed") and _dated(signals)
     priced = _flag(signals, "price_named")
@@ -476,6 +482,10 @@ class FunnelProfile:
     # основного аудита: две нормы на одно и то же не должны расходиться.
     # Ключ ``_default`` — для этапов вне таблицы.
     work_window_days: dict[str, int] = field(default_factory=lambda: {"_default": 7})
+    # По ту сторону сделки бывает агент, а не сам клиент. У продавцов такого
+    # не бывает: продаёт собственник, и «агент» в карточке продавца означал бы
+    # либо ошибку разметки, либо нашего же сотрудника.
+    counterparty_can_be_agent: bool = True
 
 
 BUYER_PROFILE = FunnelProfile(
@@ -503,6 +513,7 @@ SELLER_PROFILE = FunnelProfile(
     grace_hours=SELLER_GRACE_HOURS,
     stages_out_of_qc=SELLER_STAGES_OUT_OF_QC,
     work_window_days=SELLER_WORK_WINDOW_DAYS,
+    counterparty_can_be_agent=False,
 )
 
 PROFILES = {p.key: p for p in (BUYER_PROFILE, SELLER_PROFILE)}

@@ -83,3 +83,11 @@ def test_module_cache_is_used_when_no_table_passed():
         assert got["who"] == WHO_AGENT
     finally:
         set_contact_type_names({})
+
+
+def test_sellers_never_get_an_agent_counterparty():
+    """У продавцов агента быть не может: продаёт собственник."""
+    from funnel_profiles import BUYER_PROFILE, SELLER_PROFILE
+
+    assert BUYER_PROFILE.counterparty_can_be_agent is True
+    assert SELLER_PROFILE.counterparty_can_be_agent is False

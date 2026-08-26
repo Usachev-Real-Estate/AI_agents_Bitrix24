@@ -49,7 +49,7 @@ def test_waiting_on_the_client_with_a_date_asks_to_check_on_it():
         _step("Вывезет мусор", when="2026-09-03", who="client"), [], NOW,
     )
     assert action == (
-        "Запланировать дело на 2026-09-03: проверить, выполнил ли клиент — "
+        "Запланировать дело на 2026-09-03: связаться и проверить, выполнено ли — "
         "Вывезет мусор"
     )
 
@@ -150,7 +150,7 @@ def test_a_past_client_date_is_not_offered_as_a_plan():
         _step("Вывезет мусор", when="2026-08-19", who="client"), [], NOW,
     )
     assert action.startswith("Срок 2026-08-19 прошёл")
-    assert "клиент не отчитался" in action
+    assert "ответа нет" in action
     assert "назначить новый" in action
 
 

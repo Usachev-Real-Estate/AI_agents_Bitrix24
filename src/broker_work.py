@@ -35,6 +35,11 @@ PORTAL_TZ = timezone(timedelta(hours=3))
 PROVEN_BY_CALL = "call"
 PROVEN_BY_SCREENSHOT = "screenshot"
 PROVEN_BY_COMMENT = "comment"
+# Ход за контрагентом: он сам назвал, когда вернётся. Тишина брокера тут
+# не бездействие, а ожидание, и предъявлять за неё нельзя. Но ждать можно
+# только с делом на контроле — иначе ожидание ничем не отличается от
+# забытья, и именно так теряются агенты, обещавшие приехать «в сентябре».
+PROVEN_BY_WAITING = "waiting_on_client"
 # Чем не подтверждена.
 # GAP_EMPTY_COMMENT — это и есть «неотработанная карточка» в терминах
 # агентства: контакт передали, звонка нет, а в карточке одна отметка
@@ -43,6 +48,15 @@ GAP_CLAIMED_MESSAGE = "claimed_message_no_proof"
 GAP_CLAIMED_NO_ANSWER = "claimed_no_answer_no_calls"
 GAP_EMPTY_COMMENT = "comment_says_nothing"
 GAP_NO_TRACE = "no_trace"
+# Не то же самое, что GAP_NO_TRACE. Незакрытое дело «позвонить клиенту» —
+# план брокера, а не работа с клиентом, и засчитывать его как работу
+# нельзя. Но и говорить «следов работы нет» про карточку, где дело
+# поставлено вчера, тоже нельзя: строка «следов работы нет (последний
+# след 1 дн. назад)» противоречит сама себе в тех же скобках.
+GAP_ONLY_PLANS = "only_plans"
+# Не обвинение, а напоминание: ход за контрагентом, но вернуться к
+# разговору нечем.
+GAP_WAITING_NO_TASK = "waiting_without_task"
 GAP_OUT_OF_WINDOW = "window_not_started"
 # Дело, срок которого настал, а отписки о результате нет. Правило
 # агентства: запланировано дело на сегодня — сегодня в карточке должен
@@ -50,12 +64,20 @@ GAP_OUT_OF_WINDOW = "window_not_started"
 # результата — напоминание брокера самому себе, а не работа с клиентом.
 GAP_DUE_TASK_NO_RESULT = "due_task_no_result"
 
-PROVEN = frozenset({PROVEN_BY_CALL, PROVEN_BY_SCREENSHOT, PROVEN_BY_COMMENT})
+PROVEN = frozenset({
+    PROVEN_BY_CALL, PROVEN_BY_SCREENSHOT, PROVEN_BY_COMMENT, PROVEN_BY_WAITING,
+})
+# Разрывы, за которые не предъявляют, а напоминают.
+REMINDERS = frozenset({GAP_WAITING_NO_TASK})
 
 REASON_RU: dict[str, str] = {
     PROVEN_BY_CALL: "есть звонок с клиентом",
     PROVEN_BY_SCREENSHOT: "написал клиенту, приложен скриншот переписки",
     PROVEN_BY_COMMENT: "есть развёрнутый комментарий",
+    PROVEN_BY_WAITING: "ход за клиентом, дело на контроле стоит",
+    GAP_WAITING_NO_TASK: (
+        "ход за клиентом, но дела на возврат к разговору нет — так теряют контакт"
+    ),
     GAP_CLAIMED_MESSAGE: "брокер пишет, что написал клиенту, но скриншота переписки нет",
     GAP_CLAIMED_NO_ANSWER: (
         "брокер пишет, что клиент не отвечает, но попыток звонка в таймлайне нет"
@@ -65,6 +87,9 @@ REASON_RU: dict[str, str] = {
         "что с клиентом"
     ),
     GAP_NO_TRACE: "следов работы нет",
+    GAP_ONLY_PLANS: (
+        "в карточке только запланированное дело — ни звонка, ни комментария"
+    ),
     GAP_DUE_TASK_NO_RESULT: (
         "срок дела наступил, а комментария о результате связи с клиентом нет"
     ),
@@ -78,6 +103,20 @@ def work_window_days(profile: FunnelProfile, stage_id: str) -> int:
     if stage_id in table:
         return int(table[stage_id])
     return int(table.get("_default", 7))
+
+
+def judgement_starts_after(profile: FunnelProfile, stage_id: str) -> float:
+    """С какого возраста карточки вообще можно судить о работе, в часах.
+
+    Двум часам на одной карточке расходиться нельзя. На «Подборе» отсрочка
+    полноты — 72 часа, окно работы — 2 дня, и карточка возрастом 53 часа
+    получала обе строки разом: «рано судить» и «работа не подтверждена».
+    Отсрочка — это решение агентства о том, когда с брокера вообще начинают
+    спрашивать, и она старше окна: берём наибольшее из двух.
+    """
+    grace = profile.grace_hours
+    hours = int(grace.get(stage_id, grace.get("_default", 24)))
+    return max(float(hours), work_window_days(profile, stage_id) * 24.0)
 
 
 def _parse(value: Any) -> datetime | None:
@@ -207,6 +246,19 @@ def due_task_without_result(
     }
 
 
+def _ball_is_theirs(who: str, when: str, now: datetime) -> bool:
+    """Ход за контрагентом, и названный им срок ещё не прошёл.
+
+    Неразбираемый срок («в начале сентября») считается ненаступившим: не
+    сумели прочитать дату — это наша слепота, а не просрочка брокера. Как
+    только срок прошёл по календарю, ожидание кончилось и карточка снова
+    судится обычными правилами.
+    """
+    if str(who or "").strip().lower() != "client":
+        return False
+    return _date_state(str(when or ""), now) != "past"
+
+
 def assess_broker_work(
     events: list[dict[str, Any]],
     *,
@@ -216,6 +268,8 @@ def assess_broker_work(
     claims_messaged: bool,
     comment_informative: bool,
     claims_no_answer: bool = False,
+    next_step_who: str = "",
+    next_step_when: str = "",
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Подтверждена ли работа брокера за последнее окно по этапу.
@@ -254,11 +308,31 @@ def assess_broker_work(
             "due_task": due,
         }
 
-    # Карточка младше собственного окна: спрашивать не с чего.
-    if hours_on_stage is not None and hours_on_stage < days * 24:
+    # Карточка младше отсрочки этапа: спрашивать не с чего.
+    if hours_on_stage is not None and hours_on_stage < judgement_starts_after(
+        profile, stage_id,
+    ):
         return {
             "proven": True,
             "reason": GAP_OUT_OF_WINDOW,
+            "window_days": days,
+            "days_quiet": days_quiet,
+        }
+
+    # Ход за контрагентом: он сам назвал, когда вернётся к разговору. Молчание
+    # брокера тут не бездействие. #16798: агент сказал, что наберёт в начале
+    # сентября и приедет с покупателем, — а карточка ушла в «недоработку» за
+    # пять дней тишины. Ждать можно, но только с делом на контроле: без него
+    # ожидание ничем не отличается от забытья, и это не обвинение, а повод
+    # напомнить.
+    if _ball_is_theirs(next_step_who, next_step_when, now):
+        return {
+            "proven": has_open_future_task(events, now),
+            "reason": (
+                PROVEN_BY_WAITING
+                if has_open_future_task(events, now)
+                else GAP_WAITING_NO_TASK
+            ),
             "window_days": days,
             "days_quiet": days_quiet,
         }
@@ -270,7 +344,8 @@ def assess_broker_work(
     if _has_call(window):
         reason = PROVEN_BY_CALL
     elif not comments:
-        reason = GAP_NO_TRACE
+        # Пусто вовсе или одни планы — разные претензии и разные слова.
+        reason = GAP_NO_TRACE if not window else GAP_ONLY_PLANS
     elif claims_no_answer and not _has_call_attempt(window):
         # «Не дозвонился» проверяется первым: это объяснение бездействия, и
         # оно должно стоить дороже остальных. Есть попытки — брокер работал,
@@ -368,20 +443,33 @@ def next_action(
     when_state = _date_state(when, now) if dated else ""
 
     if who == "client":
+        # Агента называем агентом. «Проверить, выполнил ли клиент» про
+        # регионального агента, который обещал приехать с покупателем, звучит
+        # мимо, а терять такой контакт дороже всего: он приводит сделку.
+        party = state.get("counterparty") if isinstance(
+            state.get("counterparty"), dict
+        ) else {}
+        agent = str(party.get("who") or "") == "agent"
+        noun = "агентом" if agent else "клиентом"
+        loss = " — иначе контакт потеряется" if agent else ""
         if when_state == "future":
-            return f"Запланировать дело на {when}: проверить, выполнил ли клиент — {what}"
+            return (
+                f"Запланировать дело на {when}: связаться и проверить, "
+                f"выполнено ли — {what}"
+            )
         if when_state == "past":
             return (
-                f"Срок {when} прошёл, клиент не отчитался — связаться "
+                f"Срок {when} прошёл, ответа нет — связаться с {noun} "
                 f"и назначить новый: {what}"
             )
         if dated:
             return (
-                f"Запланировать дело: срок со слов клиента «{when}» — "
-                f"связаться и подтвердить точную дату ({what})"
+                f"Запланировать дело: срок назван как «{when}» — поставить дело "
+                f"на связь с {noun} и подтвердить точную дату ({what}){loss}"
             )
         return (
-            f"Запланировать дело: связаться с клиентом и согласовать срок — {what}"
+            f"Запланировать дело: связаться с {noun} и согласовать срок — "
+            f"{what}{loss}"
         )
 
     if when_state == "future":
