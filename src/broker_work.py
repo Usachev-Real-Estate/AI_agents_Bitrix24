@@ -33,6 +33,9 @@ PROVEN_BY_CALL = "call"
 PROVEN_BY_SCREENSHOT = "screenshot"
 PROVEN_BY_COMMENT = "comment"
 # Чем не подтверждена.
+# GAP_EMPTY_COMMENT — это и есть «неотработанная карточка» в терминах
+# агентства: контакт передали, звонка нет, а в карточке одна отметка
+# «в работе». Такой контакт стоил денег и не отработан.
 GAP_CLAIMED_MESSAGE = "claimed_message_no_proof"
 GAP_CLAIMED_NO_ANSWER = "claimed_no_answer_no_calls"
 GAP_EMPTY_COMMENT = "comment_says_nothing"
@@ -49,7 +52,10 @@ REASON_RU: dict[str, str] = {
     GAP_CLAIMED_NO_ANSWER: (
         "брокер пишет, что клиент не отвечает, но попыток звонка в таймлайне нет"
     ),
-    GAP_EMPTY_COMMENT: "комментарии есть, но по ним не понять, что с клиентом",
+    GAP_EMPTY_COMMENT: (
+        "карточка не отработана: звонка нет, а из комментария не понять, "
+        "что с клиентом"
+    ),
     GAP_NO_TRACE: "следов работы нет",
     GAP_OUT_OF_WINDOW: "срок ещё не наступил",
 }

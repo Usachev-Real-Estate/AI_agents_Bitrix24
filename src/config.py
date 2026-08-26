@@ -67,16 +67,6 @@ class Settings(BaseSettings):
     llm_price_cache_read: float = Field(
         default=4.04, validation_alias="LLM_PRICE_CACHE_READ",
     )
-    # Источники «холодной базы» — сделки из выгрузки/реестра, где контакта с
-    # собственником ещё не было. Терять там нечего: клиента не было.
-    # По умолчанию ПУСТО и ни одна карточка не помечается. Коды подставляет
-    # агентство: «Диспозл» на эту роль не подошёл — это обычный канал прихода
-    # контактов, а не выгрузка. Какие источники есть на портале, видно в
-    # строке «Источники выборки» в отчёте.
-    cold_base_source_ids: str = Field(
-        default="",
-        validation_alias="COLD_BASE_SOURCE_IDS",
-    )
     llm_v3_model: str = Field(
         default="google/gemini-3.7-flash",
         validation_alias=AliasChoices("LLM_V3_MODEL", "DEEPSEEK_V3_MODEL"),
@@ -303,14 +293,6 @@ class Settings(BaseSettings):
         default=1.0,
         validation_alias="CLIENT_STATE_TRANSCRIPT_RETRY_HOURS",
     )
-
-    @property
-    def cold_base_sources(self) -> frozenset[str]:
-        """Коды источников холодной базы, разобранные из настройки."""
-        return frozenset(
-            code.strip() for code in self.cold_base_source_ids.split(",")
-            if code.strip()
-        )
 
     @property
     def broker_rating_weights(self) -> dict[str, Any]:

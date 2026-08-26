@@ -157,13 +157,6 @@ def format_card(
     lines.append(f"Ситуация: {humanize(state.get('situation'))}")
     lines.append(f"Шаг: {format_next_step(state.get('next_step'))}")
 
-    if state.get("cold_base"):
-        source = str(state.get("source_id") or "")
-        label = source_name(source) if source else ""
-        lines.append(
-            "🧊 Холодная база" + (f" — источник «{label}»" if label else ""),
-        )
-
     work = state.get("work_evidence") or {}
     if work and not work.get("proven"):
         quiet = work.get("days_quiet")
@@ -267,9 +260,7 @@ def format_summary(stats: dict[str, Any]) -> str:
     if stage_line:
         parts.append(stage_line)
 
-    source_line = format_source_mix(
-        stats.get("sources") or {}, int(stats.get("cold_base") or 0),
-    )
+    source_line = format_source_mix(stats.get("sources") or {})
     if source_line:
         parts.append(source_line)
 
@@ -336,12 +327,6 @@ def _is_losing_client(state: dict[str, Any]) -> bool:
     if state.get("contradictions"):
         return True
     if str(state.get("verdict") or "") == "too_early":
-        return False
-    if state.get("cold_base"):
-        # Выгрузка из реестра: контакта с собственником ещё не было, значит и
-        # терять пока некого. Пустота такой карточки — это её нормальное
-        # состояние до первого звонка, а не признак ухода клиента. Проверка
-        # работы брокера по ней остаётся: взял в работу — позвони.
         return False
     return state.get("recoverable") is False
 
@@ -454,15 +439,15 @@ def source_name(code: str) -> str:
     return SOURCE_NAMES.get(code, code)
 
 
-def format_source_mix(sources: dict[str, int], cold_base: int) -> str:
+def format_source_mix(sources: dict[str, int]) -> str:
     """Состав выборки по источникам.
 
-    Единственный способ проверить, что коды холодной базы настроены верно:
-    если «Диспозл» в списке есть, а cold_base=0 — настройка мимо.
+    Контакт, пришедший по платному каналу и не отработанный, стоит агентству
+    денег дважды. Строка показывает, из какого канала пришло то, что лежит
+    в отчёте.
     """
     if not sources:
         return ""
     ranked = sorted(sources.items(), key=lambda kv: (-kv[1], kv[0]))
     listed = ", ".join(f"{source_name(code)} {count}" for code, count in ranked)
-    tail = f" · из них холодная база: {cold_base}" if cold_base else ""
-    return f"Источники выборки: {listed}{tail}"
+    return f"Источники выборки: {listed}"

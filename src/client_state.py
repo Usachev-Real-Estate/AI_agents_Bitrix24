@@ -1014,10 +1014,9 @@ def apply_derived_verdict(
     state["verdict_reason"] = verdict_reason
     envelope["verdict"] = verdict
 
-    source_id = _clean_str(record.get("SOURCE_ID") or record.get("source_id"))
-    state["source_id"] = source_id
-    state["cold_base"] = source_id in (settings or get_settings()).cold_base_sources
-    envelope["cold_base"] = state["cold_base"]
+    state["source_id"] = _clean_str(
+        record.get("SOURCE_ID") or record.get("source_id"),
+    )
 
     # Подтверждение работы брокера считается по живой карточке на каждом
     # прогоне: скриншот могли приложить уже после разбора, а обвинение по
@@ -1379,10 +1378,9 @@ def run_client_state(
         # итог из-за перекоса выборки, и каждый раз это приходилось
         # раскапывать. Пусть перекос будет виден сразу.
         "stages": {},
-        # Состав выборки по источникам и сколько из них — холодная база.
-        # Без этой строки нельзя проверить, что коды источников настроены верно.
+        # Состав выборки по источникам: РОПу важно, из какого канала пришли
+        # карточки, которые не отработали.
         "sources": {},
-        "cold_base": 0,
         "temperature": {"hot": 0, "warm": 0, "cold": 0, "unknown": 0},
         "verdicts": {
             "good": 0, "tolerable": 0, "poor": 0,
@@ -1417,8 +1415,6 @@ def run_client_state(
         source_code = _clean_str(deal.get("SOURCE_ID") or deal.get("source_id"))
         source_key = source_code or "(без источника)"
         stats["sources"][source_key] = stats["sources"].get(source_key, 0) + 1
-        if result.get("cold_base"):
-            stats["cold_base"] += 1
         stats["results"].append(result)
         # Токены считаем и по упавшим карточкам: запрос к модели уже оплачен,
         # даже если ответ не разобрался.
