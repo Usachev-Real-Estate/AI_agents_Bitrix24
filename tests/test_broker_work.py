@@ -560,3 +560,64 @@ def test_a_due_task_outranks_an_explained_pause() -> None:
         pause_until=(NOW + timedelta(days=8)).date().isoformat(),
     )
     assert result["reason"] == GAP_DUE_TASK_NO_RESULT
+
+
+def test_bitrix_no_deadline_sentinel_is_not_a_plan() -> None:
+    """#16212: «Дело стоит на 9999-12-31 — ждём».
+
+    Битрикс ставит делам без срока 9999-12-31. Приняв его за план, мы
+    снимали совет с карточки, по которой ничего не запланировано.
+    """
+    from broker_work import has_open_future_task, open_future_deadline
+
+    events = [_task(1.0, "9999-12-31T23:59:59+03:00")]
+    assert open_future_deadline(events, NOW) is None
+    assert has_open_future_task(events, NOW) is False
+    assert "9999" not in next_action({"next_step": {"what": "показ"}}, events, NOW)
+
+
+def test_a_real_deadline_still_counts_next_to_the_sentinel() -> None:
+    events = [
+        _task(1.0, "9999-12-31T23:59:59+03:00"),
+        _task(1.0, (NOW + timedelta(days=3)).isoformat()),
+    ]
+    action = next_action({"next_step": {"what": "показ"}}, events, NOW)
+    assert (NOW + timedelta(days=3)).date().isoformat() in action
+
+
+def test_a_record_gap_is_answered_by_a_record_not_by_waiting() -> None:
+    """#16210 и #13636: «из комментария не понять» — и «дело стоит, ждём»."""
+    events = [_comment(2.0), _task(2.0, (NOW + timedelta(days=1)).isoformat())]
+    state = {
+        "next_step": {"what": "показ", "who": "broker"},
+        "work_evidence": {"proven": False, "reason": GAP_EMPTY_COMMENT},
+    }
+    action = next_action(state, events, NOW)
+    assert "Написать в карточке" in action
+    assert "ждём" not in action
+
+
+def test_a_missing_screenshot_asks_for_the_screenshot() -> None:
+    events = [_comment(2.0, files=False), _task(2.0, (NOW + timedelta(days=1)).isoformat())]
+    state = {
+        "next_step": {"what": "показ", "who": "broker"},
+        "work_evidence": {"proven": False, "reason": GAP_CLAIMED_MESSAGE},
+    }
+    assert "скриншот" in next_action(state, events, NOW)
+
+
+def test_unproven_no_answer_asks_for_call_attempts() -> None:
+    state = {
+        "next_step": {"what": "показ", "who": "broker"},
+        "work_evidence": {"proven": False, "reason": GAP_CLAIMED_NO_ANSWER},
+    }
+    assert "попытки дозвона" in next_action(state, [], NOW)
+
+
+def test_a_timing_gap_still_gets_the_usual_advice() -> None:
+    """Правило про запись не должно перехватывать претензии к срокам."""
+    state = {
+        "next_step": {"what": "показ", "when": "2026-08-28", "who": "broker"},
+        "work_evidence": {"proven": False, "reason": GAP_NO_TRACE_IN_WINDOW},
+    }
+    assert next_action(state, [], NOW) == "Запланировать дело на 2026-08-28: показ"

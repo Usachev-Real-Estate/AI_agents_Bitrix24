@@ -14,6 +14,7 @@ from broker_work import PROVEN_BY_PAUSE
 from broker_work import REMINDERS as WORK_REMINDERS
 from buyer_commission_reminder import deal_url
 from client_state import MATERIAL_SEVERITY
+from funnel_profiles import fact_name_table
 from tools import (
     BUYERS_STAGE_NAMES,
     SELLERS_PAID_SOURCE_NAMES,
@@ -216,7 +217,14 @@ def format_card(
         lines.append(f"   в карточке: «{humanize(item.get('in_card'))}»")
         lines.append(f"   в разговоре: «{humanize(item.get('in_call'))}»")
 
-    missing = [str(m).strip() for m in (state.get("missing") or []) if str(m).strip()]
+    facts = fact_name_table()
+    missing = [
+        # Модель иногда возвращает ключ факта вместо имени: «budget, district,
+        # timeline». Имя у нас есть — подставляем, а незнакомое оставляем как
+        # есть: своя догадка хуже чужого текста.
+        facts.get(str(m).strip(), str(m).strip())
+        for m in (state.get("missing") or []) if str(m).strip()
+    ]
     if missing:
         lines.append("Не хватает: " + ", ".join(missing))
 
@@ -519,8 +527,17 @@ def format_sections(
                     else ""
                 )
             )
+            # ✅ на карточке, которую тот же отчёт двумя разделами выше
+            # назвал «плохо», читается как одобрение. Раздел говорит о работе
+            # брокера, вердикт — о заполнении карточки; смешивать их в одну
+            # галочку нельзя. #15342: шага нет, цели нет, оценка «плохо».
+            poor = (
+                " · карточка заполнена плохо"
+                if str(state.get("verdict") or "") == "poor" else ""
+            )
             blocks.append(
-                f"{icon} #{deal_id} {titles.get(deal_id, '')} — {step}{pause}".strip(),
+                f"{icon} #{deal_id} {titles.get(deal_id, '')} — "
+                f"{step}{pause}{poor}".strip(),
             )
         blocks.append("")
 

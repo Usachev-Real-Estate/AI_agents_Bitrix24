@@ -443,6 +443,26 @@ SELLER_OPTIONAL_FACTS: dict[str, tuple[tuple[str, str], ...]] = {
 }
 
 
+def fact_name_table() -> dict[str, str]:
+    """Все ключи фактов обеих воронок → русское имя.
+
+    Модель иногда возвращает в missing сам ключ, а не человеческое имя:
+    «Не хватает: budget, district, timeline» (#13340), «property_address,
+    listing_price, documents_ready» (#14912). Русский отчёт с английскими
+    кодами полей читать нельзя, а имена у нас уже есть — здесь они собраны
+    в один словарь.
+    """
+    table: dict[str, str] = {}
+    for source in (
+        BUYER_STAGE_REQUIREMENTS, SELLER_STAGE_REQUIREMENTS,
+        BUYER_OPTIONAL_FACTS, SELLER_OPTIONAL_FACTS,
+    ):
+        for fields in source.values():
+            for key, name in fields:
+                table.setdefault(key, name)
+    return table
+
+
 def all_facts_for_stage(profile_key: str, stage_id: str) -> list[tuple[str, str, bool]]:
     """Все факты для этапа: (ключ, имя, обязательно?).
 
