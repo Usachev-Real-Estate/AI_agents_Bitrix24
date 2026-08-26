@@ -187,6 +187,10 @@ def format_card(
     if missing:
         lines.append("Не хватает: " + ", ".join(missing))
 
+    action = str(state.get("next_action") or "").strip()
+    if action:
+        lines.append(f"➡️ {action}")
+
     if reason in CACHED_REASONS:
         lines.append(f"↻ {REASON_RU[reason]}")
 

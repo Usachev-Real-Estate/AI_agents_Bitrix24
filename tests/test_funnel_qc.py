@@ -93,19 +93,32 @@ def test_buyer_far_horizon_is_cold():
 
 # ── Температура продавца ───────────────────────────────────────────────
 SELLER_HOT = {
-    "price_named": True, "price_discussed": True, "motivation": "срочно",
+    "price_named": True, "price_discussed": True,
     "next_step_agreed": True, "next_step_date": "2026-08-24", "owner_responsive": True,
 }
 
 
-def test_seller_hot_needs_step_price_and_motivation():
+def test_seller_hot_needs_step_and_price():
     level, _ = compute_temperature(SELLER_HOT, profile=SELLER_PROFILE)
     assert level == "hot"
 
 
-def test_seller_just_asking_is_cold():
+def test_motivation_no_longer_decides_the_temperature():
+    """Убрано по решению агентства: заинтересованность видно по разговору,
+    а не по тому, как её пересказал брокер в комментарии."""
     signals = dict(SELLER_HOT, motivation="просто интерес")
-    assert compute_temperature(signals, profile=SELLER_PROFILE)[0] == "cold"
+    assert compute_temperature(signals, profile=SELLER_PROFILE)[0] == "hot"
+
+
+def test_the_word_motivation_is_gone_from_the_seller_rule():
+    from funnel_profiles import SELLER_PROMPT, _normalize_seller_signals
+
+    assert "motivation" not in SELLER_PROMPT
+    assert "motivation" not in _normalize_seller_signals({}, int)
+    _level, why = compute_temperature(
+        dict(SELLER_HOT, price_named=False), profile=SELLER_PROFILE,
+    )
+    assert "мотивац" not in why
 
 
 def test_seller_price_never_discussed_is_cold():

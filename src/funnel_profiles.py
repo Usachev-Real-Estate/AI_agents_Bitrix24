@@ -2,7 +2,7 @@
 
 Buyers and sellers are audited by different rules. A buyer is judged by
 readiness to purchase — budget, timing, an agreed viewing. A seller is judged
-by readiness to sell — asking price, exclusivity, documents, motivation.
+by readiness to sell — asking price, exclusivity, documents.
 Merging them into one prompt would average both into something that fits
 neither, so the funnel is a parameter: shared pipeline, own prompt, own
 signals, own temperature rule.
@@ -130,7 +130,6 @@ SELLER_PROMPT = (
     "exclusive_discussed": false,
     "exclusive_agreed": false,
     "documents_ready": false,
-    "motivation": "срочно|не срочно|просто интерес|unknown",
     "next_step_agreed": false,
     "next_step_date": "YYYY-MM-DD or unknown",
     "owner_responsive": true,
@@ -182,34 +181,33 @@ def buyer_temperature(signals: dict[str, Any]) -> tuple[str, str]:
 
 
 def seller_temperature(signals: dict[str, Any]) -> tuple[str, str]:
-    """Seller readiness. Mirrors the buyer rule, but on selling readiness.
+    """Seller readiness.
 
-    Предложено по аналогии с правилом для покупателей и ждёт подтверждения:
-    hot  — согласованный шаг с датой + названа цена + продаёт не «просто так»
-    cold — собственник не отвечает, «просто интерес», либо не обсуждает цену
+    hot  — согласованный шаг с датой + названа цена
+    cold — собственник не отвечает либо не обсуждает цену
     warm — всё остальное
+
+    Мотивация («срочно / не срочно / просто интерес») из правила убрана по
+    решению агентства: заинтересованность видно по разговору, а не по тому,
+    как её пересказал брокер в комментарии. Модель по-прежнему читает и
+    цитирует ситуацию клиента — просто не подменяет её ярлыком, из-за
+    которого карточка получала «холодный» на пересказе.
     """
     if not _flag(signals, "owner_responsive", True):
         return "cold", "собственник не выходит на связь"
-    motivation = _text(signals, "motivation")
-    if motivation == "просто интерес":
-        return "cold", "собственник просто узнаёт цену, продавать не готов"
     if not _flag(signals, "price_discussed"):
         return "cold", "цена с собственником не обсуждалась"
 
     agreed = _flag(signals, "next_step_agreed") and _dated(signals)
     priced = _flag(signals, "price_named")
-    motivated = motivation in ("срочно", "не срочно")
-    if agreed and priced and motivated:
-        return "hot", "есть согласованный шаг с датой, названа цена и мотивация"
+    if agreed and priced:
+        return "hot", "есть согласованный шаг с датой и названа цена"
 
     gaps = []
     if not agreed:
         gaps.append("нет согласованного шага с датой")
     if not priced:
         gaps.append("не названа цена")
-    if not motivated:
-        gaps.append("не ясна мотивация продажи")
     return "warm", "; ".join(gaps)
 
 
@@ -232,9 +230,6 @@ def _normalize_buyer_signals(data: dict[str, Any], num: Callable[[Any], int]) ->
 
 
 def _normalize_seller_signals(data: dict[str, Any], num: Callable[[Any], int]) -> dict[str, Any]:
-    motivation = str(data.get("motivation") or "unknown").strip().lower()
-    if motivation not in SELLER_MOTIVATIONS:
-        motivation = "unknown"
     return {
         "price_named": _flag(data, "price_named"),
         "price_value": _text(data, "price_value") or "unknown",
@@ -243,7 +238,6 @@ def _normalize_seller_signals(data: dict[str, Any], num: Callable[[Any], int]) -
         "exclusive_discussed": _flag(data, "exclusive_discussed"),
         "exclusive_agreed": _flag(data, "exclusive_agreed"),
         "documents_ready": _flag(data, "documents_ready"),
-        "motivation": motivation,
         "next_step_agreed": _flag(data, "next_step_agreed"),
         "next_step_date": _text(data, "next_step_date") or "unknown",
         "owner_responsive": _flag(data, "owner_responsive", True),
@@ -251,8 +245,6 @@ def _normalize_seller_signals(data: dict[str, Any], num: Callable[[Any], int]) -
 
 
 BUYER_HORIZONS = frozenset({"до месяца", "1-3 месяца", "более 3 месяцев", "unknown"})
-SELLER_MOTIVATIONS = frozenset({"срочно", "не срочно", "просто интерес", "unknown"})
-
 # Текстовые поля сигналов, которые надо разворачивать обратно для людей.
 BUYER_TEXT_SIGNALS = ("budget_value",)
 SELLER_TEXT_SIGNALS = ("price_value",)
