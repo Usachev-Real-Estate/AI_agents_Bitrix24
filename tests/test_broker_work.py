@@ -621,3 +621,18 @@ def test_a_timing_gap_still_gets_the_usual_advice() -> None:
         "work_evidence": {"proven": False, "reason": GAP_NO_TRACE_IN_WINDOW},
     }
     assert next_action(state, [], NOW) == "Запланировать дело на 2026-08-28: показ"
+
+
+def test_a_task_due_today_says_today() -> None:
+    """«Дело стоит на 2026-08-26 — ждём» в отчёте от 26-го заставляет сверять."""
+    events = [_task(2.0, (NOW + timedelta(hours=5)).isoformat())]
+    action = next_action({"next_step": {"what": "показ"}}, events, NOW)
+    assert "на сегодня" in action
+    assert "ждать результата" in action
+
+
+def test_a_task_due_later_keeps_the_plain_wording() -> None:
+    events = [_task(2.0, (NOW + timedelta(days=3)).isoformat())]
+    action = next_action({"next_step": {"what": "показ"}}, events, NOW)
+    assert action.endswith(" — ждём")
+    assert "сегодня" not in action

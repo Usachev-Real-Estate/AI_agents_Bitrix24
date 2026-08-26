@@ -1078,7 +1078,16 @@ def apply_derived_verdict(
         claims_no_answer=_claimed(
             "claims_no_answer", "claims_no_answer_quote", "клиент не отвечает",
         ),
-        comment_informative=bool(work.get("comment_informative", True)),
+        # «Из комментария не понять, что с клиентом» засчитывается только
+        # тогда, когда модель и сама признала, что картину не восстановила.
+        # #16192: она написала три предложения про собственника, дизайн-проект
+        # и ожидание оценки — и тем же ответом заявила, что комментарий ни о
+        # чём. Обвинять брокера на основании ответа, который спорит сам с
+        # собой, нельзя.
+        comment_informative=(
+            bool(work.get("comment_informative", True))
+            or state.get("recoverable") is not False
+        ),
         # Ход за контрагентом снимает претензию за тишину: он сам назвал срок.
         next_step_who=str(_step.get("who") or ""),
         next_step_when=str(_step.get("when") or ""),

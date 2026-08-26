@@ -12,6 +12,7 @@ from typing import Any
 from broker_work import REASON_RU as WORK_REASON_RU
 from broker_work import PROVEN_BY_PAUSE
 from broker_work import REMINDERS as WORK_REMINDERS
+from broker_work import TIMELESS_GAPS
 from buyer_commission_reminder import deal_url
 from client_state import MATERIAL_SEVERITY
 from funnel_profiles import fact_name_table
@@ -194,13 +195,16 @@ def format_card(
         else:
             tail = f"норма {work.get('window_days')} дн.{quiet_text}"
         reason_code = str(work.get("reason") or "")
+        if reason_code in TIMELESS_GAPS:
+            # Цифры приводим только там, где они и есть довод.
+            tail = ""
         # Напоминание и претензия не должны выглядеть одинаково: «работа не
         # подтверждена» про карточку, где клиент сам уехал до сентября, —
         # выговор за чужой отпуск.
         head = "🔔 Напоминание" if reason_code in WORK_REMINDERS else (
             "🔧 Работа не подтверждена"
         )
-        tail = "" if reason_code in WORK_REMINDERS else f" ({tail})"
+        tail = "" if reason_code in WORK_REMINDERS or not tail else f" ({tail})"
         lines.append(
             f"{head}: "
             f"{WORK_REASON_RU.get(reason_code, reason_code)}{tail}",
@@ -208,6 +212,16 @@ def format_card(
 
     if state.get("recoverable") is False:
         lines.append("⚠️ Карточка неинформативна — картину клиента не восстановить")
+        if (state.get("work_evidence") or {}).get("proven", True):
+            # #16886 стояла в «теряем клиента» без единой строки о том, почему.
+            # Температура «неизвестно», претензий к работе нет — и раздел
+            # выглядит ошибкой. Причина есть, и её надо назвать: клиент теряется
+            # не потому, что с ним не работают, а потому, что работа нигде не
+            # записана и подхватить сделку не сможет никто.
+            lines.append(
+                "🚨 Работу видно, а клиента — нет: по такой карточке "
+                "сделку не подхватить, так и теряют молча",
+            )
 
     for item in state.get("contradictions") or []:
         if not isinstance(item, dict):
