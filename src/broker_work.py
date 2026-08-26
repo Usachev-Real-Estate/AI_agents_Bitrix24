@@ -43,6 +43,12 @@ GAP_CLAIMED_MESSAGE = "claimed_message_no_proof"
 GAP_CLAIMED_NO_ANSWER = "claimed_no_answer_no_calls"
 GAP_EMPTY_COMMENT = "comment_says_nothing"
 GAP_NO_TRACE = "no_trace"
+# Не то же самое, что GAP_NO_TRACE. Незакрытое дело «позвонить клиенту» —
+# план брокера, а не работа с клиентом, и засчитывать его как работу
+# нельзя. Но и говорить «следов работы нет» про карточку, где дело
+# поставлено вчера, тоже нельзя: строка «следов работы нет (последний
+# след 1 дн. назад)» противоречит сама себе в тех же скобках.
+GAP_ONLY_PLANS = "only_plans"
 GAP_OUT_OF_WINDOW = "window_not_started"
 # Дело, срок которого настал, а отписки о результате нет. Правило
 # агентства: запланировано дело на сегодня — сегодня в карточке должен
@@ -65,6 +71,9 @@ REASON_RU: dict[str, str] = {
         "что с клиентом"
     ),
     GAP_NO_TRACE: "следов работы нет",
+    GAP_ONLY_PLANS: (
+        "в карточке только запланированное дело — ни звонка, ни комментария"
+    ),
     GAP_DUE_TASK_NO_RESULT: (
         "срок дела наступил, а комментария о результате связи с клиентом нет"
     ),
@@ -78,6 +87,20 @@ def work_window_days(profile: FunnelProfile, stage_id: str) -> int:
     if stage_id in table:
         return int(table[stage_id])
     return int(table.get("_default", 7))
+
+
+def judgement_starts_after(profile: FunnelProfile, stage_id: str) -> float:
+    """С какого возраста карточки вообще можно судить о работе, в часах.
+
+    Двум часам на одной карточке расходиться нельзя. На «Подборе» отсрочка
+    полноты — 72 часа, окно работы — 2 дня, и карточка возрастом 53 часа
+    получала обе строки разом: «рано судить» и «работа не подтверждена».
+    Отсрочка — это решение агентства о том, когда с брокера вообще начинают
+    спрашивать, и она старше окна: берём наибольшее из двух.
+    """
+    grace = profile.grace_hours
+    hours = int(grace.get(stage_id, grace.get("_default", 24)))
+    return max(float(hours), work_window_days(profile, stage_id) * 24.0)
 
 
 def _parse(value: Any) -> datetime | None:
@@ -254,8 +277,10 @@ def assess_broker_work(
             "due_task": due,
         }
 
-    # Карточка младше собственного окна: спрашивать не с чего.
-    if hours_on_stage is not None and hours_on_stage < days * 24:
+    # Карточка младше отсрочки этапа: спрашивать не с чего.
+    if hours_on_stage is not None and hours_on_stage < judgement_starts_after(
+        profile, stage_id,
+    ):
         return {
             "proven": True,
             "reason": GAP_OUT_OF_WINDOW,
@@ -270,7 +295,8 @@ def assess_broker_work(
     if _has_call(window):
         reason = PROVEN_BY_CALL
     elif not comments:
-        reason = GAP_NO_TRACE
+        # Пусто вовсе или одни планы — разные претензии и разные слова.
+        reason = GAP_NO_TRACE if not window else GAP_ONLY_PLANS
     elif claims_no_answer and not _has_call_attempt(window):
         # «Не дозвонился» проверяется первым: это объяснение бездействия, и
         # оно должно стоить дороже остальных. Есть попытки — брокер работал,

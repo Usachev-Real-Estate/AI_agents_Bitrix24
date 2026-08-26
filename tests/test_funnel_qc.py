@@ -121,9 +121,22 @@ def test_the_word_motivation_is_gone_from_the_seller_rule():
     assert "мотивац" not in why
 
 
-def test_seller_price_never_discussed_is_cold():
+def test_seller_price_never_discussed_is_not_cold():
+    """Не обсуждённая цена — пробел, а не остывание.
+
+    #17002: карточке пять часов, собственник подтвердил, что продажа
+    актуальна, — и она уехала в «теряем клиента». Одинаковый ярлык на пятом
+    часу жизни и на тридцатом дне обесценивает сам ярлык.
+    """
     signals = dict(SELLER_HOT, price_discussed=False)
-    assert compute_temperature(signals, profile=SELLER_PROFILE)[0] == "cold"
+    assert compute_temperature(signals, profile=SELLER_PROFILE)[0] != "cold"
+
+
+def test_seller_who_stopped_answering_is_still_cold():
+    """Молчание собственника — событие, и оно остаётся холодом."""
+    signals = dict(SELLER_HOT, owner_responsive=False)
+    level, why = compute_temperature(signals, profile=SELLER_PROFILE)
+    assert level == "cold" and "не выходит на связь" in why
 
 
 def test_seller_without_price_is_warm():
@@ -140,7 +153,7 @@ def test_unrecoverable_card_has_no_temperature():
 def test_buyer_signals_do_not_make_a_seller_hot():
     """Сигналы покупателя не должны случайно удовлетворить правило продавца."""
     level, _ = compute_temperature(BUYER_HOT, profile=SELLER_PROFILE)
-    assert level == "cold"
+    assert level != "hot"
 
 
 def test_profile_lookup():
