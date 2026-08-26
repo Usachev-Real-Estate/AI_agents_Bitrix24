@@ -167,7 +167,9 @@ def format_card(
     if work and not work.get("proven"):
         quiet = work.get("days_quiet")
         if not isinstance(quiet, (int, float)):
-            quiet_text = ", следов нет вовсе"
+            # Причина уже сказала «следов работы нет вовсе» — повторять
+            # в скобках нечего.
+            quiet_text = ""
         elif quiet < 1:
             quiet_text = ", последний след сегодня"
         else:
@@ -182,7 +184,7 @@ def format_card(
                 + (f"просрочено на {overdue} дн." if overdue else "срок сегодня")
             )
         else:
-            tail = f"норма этапа {work.get('window_days')} дн.{quiet_text}"
+            tail = f"норма {work.get('window_days')} дн.{quiet_text}"
         reason_code = str(work.get("reason") or "")
         # Напоминание и претензия не должны выглядеть одинаково: «работа не
         # подтверждена» про карточку, где клиент сам уехал до сентября, —

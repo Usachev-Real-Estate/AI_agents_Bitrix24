@@ -314,7 +314,7 @@ def test_unproven_work_is_spelled_out_on_the_card():
     card = format_card(result, "ЖК «Will Towers»", WEBHOOK)
     assert "Работа не подтверждена" in card
     assert "скриншота переписки нет" in card
-    assert "норма этапа 3 дн." in card
+    assert "норма 3 дн." in card
     assert "claimed_message_no_proof" not in card
 
 
@@ -533,7 +533,7 @@ def test_due_task_line_shows_the_deadline_not_the_stage_norm():
     }
     card = format_card(res, "ЖК «Will Towers»", WEBHOOK)
     assert "срок 2026-08-26, срок сегодня" in card
-    assert "норма этапа" not in card
+    assert "норма" not in card
 
 
 def test_overdue_task_line_counts_the_days():
@@ -585,4 +585,4 @@ def test_a_waiting_card_is_a_reminder_not_an_accusation():
     card = format_card(res, "ЖК «Hide»", WEBHOOK)
     assert "🔔 Напоминание" in card
     assert "Работа не подтверждена" not in card
-    assert "норма этапа" not in card
+    assert "норма" not in card

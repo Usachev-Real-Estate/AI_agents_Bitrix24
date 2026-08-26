@@ -19,6 +19,7 @@ from broker_work import (  # noqa: E402
     GAP_DUE_TASK_NO_RESULT,
     GAP_EMPTY_COMMENT,
     GAP_NO_TRACE,
+    GAP_NO_TRACE_IN_WINDOW,
     GAP_ONLY_PLANS,
     GAP_OUT_OF_WINDOW,
     GAP_WAITING_NO_TASK,
@@ -143,7 +144,7 @@ def test_a_screenshot_outside_the_window_does_not_count():
         claims_messaged=True,
     )
     assert result["proven"] is False
-    assert result["reason"] == GAP_NO_TRACE
+    assert result["reason"] == GAP_NO_TRACE_IN_WINDOW
 
 
 # ── Тишина ─────────────────────────────────────────────────────────────
@@ -155,8 +156,13 @@ def test_no_trace_at_all_is_the_worst_case():
 
 
 def test_days_quiet_counts_from_the_last_trace():
+    """Работа была, но раньше нормы — это опоздание, а не бездействие.
+
+    #16218: брокер звонил и слал СМС четыре дня назад при норме два, а
+    карточка говорила «следов работы нет».
+    """
     result = _assess([_comment(hours=24 * 12)])
-    assert result["reason"] == GAP_NO_TRACE
+    assert result["reason"] == GAP_NO_TRACE_IN_WINDOW
     assert result["days_quiet"] == pytest.approx(12.0, abs=0.01)
 
 
@@ -436,3 +442,19 @@ def test_advice_for_a_client_does_not_call_them_an_agent() -> None:
     }
     advice = next_action(state, [], NOW)
     assert "клиентом" in advice and "агент" not in advice
+
+
+def test_three_kinds_of_silence_are_named_differently():
+    """Пусто вовсе, одни планы и опоздание — разные разговоры с брокером."""
+    from broker_work import REASON_RU
+
+    never = _assess([])
+    late = _assess([_comment(24 * 12)])
+    plans = _assess([_task(1.0, (NOW + timedelta(days=5)).isoformat())])
+    assert never["reason"] == GAP_NO_TRACE
+    assert late["reason"] == GAP_NO_TRACE_IN_WINDOW
+    assert plans["reason"] == GAP_ONLY_PLANS
+    assert len({REASON_RU[r["reason"]] for r in (never, late, plans)}) == 3
+    # #16218: карточка со звонками четырёхдневной давности не должна
+    # утверждать, что следов нет.
+    assert "нет вовсе" not in REASON_RU[late["reason"]]
