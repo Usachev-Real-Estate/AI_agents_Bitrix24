@@ -108,15 +108,25 @@ def test_live_names_from_bitrix_win_over_the_fallback():
     assert source_name("99") == "Выгрузка реестра"
 
 
-def test_the_default_cold_sources_are_the_disposal_ones():
-    """Значение по умолчанию должно совпадать с кодами «Диспозл»."""
-    from config import get_settings
-    from tools import SELLERS_PAID_SOURCE_NAMES
+def test_the_mechanism_ships_switched_off():
+    """Пока агентство не назвало коды, ни одна карточка не помечается.
 
-    cold = get_settings().cold_base_sources
-    assert cold == {"25", "26"}
-    for code in cold:
-        assert "Диспозл" in SELLERS_PAID_SOURCE_NAMES[code]
+    «Диспозл» на эту роль не подошёл: это обычный канал прихода контактов,
+    а не выгрузка из реестра. Догадка оказалась неверной, и повторять её
+    значением по умолчанию нельзя — молча снятая с контроля карточка хуже,
+    чем лишняя строка в отчёте.
+    """
+    from config import get_settings
+
+    assert get_settings().cold_base_sources == frozenset()
+
+
+def test_codes_from_the_environment_switch_it_on(monkeypatch):
+    from config import get_settings
+
+    monkeypatch.setenv("COLD_BASE_SOURCE_IDS", "44, 45 ,")
+    get_settings.cache_clear()
+    assert get_settings().cold_base_sources == {"44", "45"}
 
 
 def test_a_deal_without_a_source_is_labelled_not_left_blank():

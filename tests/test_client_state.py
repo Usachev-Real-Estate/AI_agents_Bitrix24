@@ -1410,6 +1410,8 @@ def test_deal_selection_asks_for_the_source(monkeypatch):
 def test_cold_base_flag_follows_the_configured_sources(monkeypatch):
     import client_state as cs
 
+    monkeypatch.setenv("COLD_BASE_SOURCE_IDS", "26")
+    cs.get_settings.cache_clear()
     settings = cs.get_settings()
     record = {"ID": 1, "STAGE_ID": "NEW", "SOURCE_ID": "26"}
     state = cs._normalize_state({}, cs.SELLER_PROFILE)
