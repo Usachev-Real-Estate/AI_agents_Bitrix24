@@ -223,3 +223,16 @@ def test_a_funnel_entirely_out_of_qc_yields_an_empty_sample(pilot, monkeypatch):
         {"ID": str(i), "STAGE_ID": "UC_KEOOG8"} for i in range(1, 6)
     ])
     assert pilot.pick_deals(SELLER_PROFILE, 0, 5) == []
+
+
+def test_closed_sale_takes_no_slot_in_the_sample(pilot, monkeypatch):
+    """Раньше две такие карточки занимали места и разбирались моделью."""
+    from funnel_profiles import SELLER_PROFILE
+
+    monkeypatch.setattr(pilot, "_bx_get_all_sync", lambda m, p: [
+        {"ID": "15862", "STAGE_ID": "UC_A94BGF"},
+        {"ID": "12712", "STAGE_ID": "UC_A94BGF"},
+        {"ID": "16484", "STAGE_ID": "NEW"},
+    ])
+    picked = pilot.pick_deals(SELLER_PROFILE, 0, 10)
+    assert [d["ID"] for d in picked] == ["16484"]

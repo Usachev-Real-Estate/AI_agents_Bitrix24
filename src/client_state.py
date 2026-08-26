@@ -973,17 +973,11 @@ def apply_derived_verdict(
 
     stage_id = _clean_str(record.get("STAGE_ID") or record.get("stage_id"))
 
-    if stage_id in profile.stages_without_temperature:
-        # По решению агентства на этих этапах клиента не квалифицируем:
-        # сделка уже идёт, «горячий/холодный» там ничего не решает и только
-        # шумит в разделе «теряем клиента».
-        level, why = "", "на этом этапе клиента не квалифицируем"
-    else:
-        level, why = compute_temperature(
-            state.get("signals", {}),
-            recoverable=bool(state.get("recoverable", True)),
-            profile=profile,
-        )
+    level, why = compute_temperature(
+        state.get("signals", {}),
+        recoverable=bool(state.get("recoverable", True)),
+        profile=profile,
+    )
     state["temperature"] = level
     state["temperature_reason"] = why
     envelope["temperature"] = level

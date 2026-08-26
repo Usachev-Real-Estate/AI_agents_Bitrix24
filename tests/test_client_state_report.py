@@ -247,6 +247,7 @@ def test_stage_mix_reaches_the_summary():
 # ── Два раздела по зоне ответственности ────────────────────────────────
 def _res(deal_id: int, **state_over: Any) -> dict[str, Any]:
     state = _state(**state_over)
+    state.setdefault("temperature", "warm")
     return {"deal_id": deal_id, "skipped": False, "reason": "", "state": state}
 
 
@@ -397,33 +398,3 @@ def test_a_trace_from_today_is_not_called_zero_days_ago():
 
 
 # ── Этап без квалификации клиента ──────────────────────────────────────
-def test_a_stage_without_temperature_says_so_rather_than_showing_nothing():
-    result = _res(13, temperature="", temperature_reason="на этом этапе клиента не квалифицируем")
-    card = format_card(result, "Закрытая продажа", WEBHOOK)
-    assert "на этом этапе клиента не квалифицируем" in card
-    assert "Температура:" not in card
-    assert "неизвестно" not in card
-
-
-def test_a_stage_without_temperature_never_enters_the_loss_section():
-    """Агентство решило там клиента не оценивать — тащить его в тревожный
-    список через recoverable нечестно."""
-    from client_state_report import split_sections
-
-    quiet = _res(14, temperature="", recoverable=False)
-    quiet["state"]["work_evidence"] = _work(True, "call")
-    losing, neglect, fine = split_sections([quiet])
-    assert losing == []
-    assert neglect == []
-    assert [r["deal_id"] for r in fine] == [14]
-
-
-def test_such_a_stage_is_still_checked_for_broker_work():
-    """Квалификации нет, но звонок или комментарий там всё равно нужен."""
-    from client_state_report import split_sections
-
-    silent = _res(15, temperature="")
-    silent["state"]["work_evidence"] = _work(False)
-    losing, neglect, _fine = split_sections([silent])
-    assert losing == []
-    assert [r["deal_id"] for r in neglect] == [15]

@@ -129,18 +129,13 @@ def format_card(
         lines.append(f"⏭ Не разбиралась: {REASON_RU.get(reason, reason)}")
         return "\n".join(lines)
 
-    level = str(state.get("temperature") or "")
+    level = str(state.get("temperature") or "unknown")
+    icon = TEMPERATURE_ICON.get(level, TEMPERATURE_ICON["unknown"])
     reason_text = str(state.get("temperature_reason") or "").strip()
-    if level:
-        icon = TEMPERATURE_ICON.get(level, TEMPERATURE_ICON["unknown"])
-        temperature = f"{icon} Температура: [B]{ru(level, TEMPERATURE_RU)}[/B]"
-        if reason_text:
-            temperature += f" — {reason_text}"
-        lines.append(temperature)
-    elif reason_text:
-        # Этап, на котором клиента не квалифицируют. Молча пропустить строку
-        # нельзя: пустое место читается как «забыли посчитать».
-        lines.append(f"➖ {reason_text}")
+    temperature = f"{icon} Температура: [B]{ru(level, TEMPERATURE_RU)}[/B]"
+    if reason_text:
+        temperature += f" — {reason_text}"
+    lines.append(temperature)
 
     verdict = str(state.get("verdict") or "")
     if verdict:
@@ -310,15 +305,8 @@ def format_stage_mix(stages: dict[str, int]) -> str:
 
 # ── Два раздела: клиент уходит / брокер не дорабатывает ────────────────
 def _is_losing_client(state: dict[str, Any]) -> bool:
-    """Признаки, что клиента теряем: остыл, замолчал, картины нет.
-
-    На этапах без квалификации (пустая temperature) раздела «теряем клиента»
-    нет по определению: агентство решило там клиента не оценивать, и
-    затаскивать карточку в тревожный список через другую дверь нечестно.
-    """
-    if not str(state.get("temperature") or ""):
-        return False
-    if str(state.get("temperature")) == "cold":
+    """Признаки, что клиента теряем: остыл, замолчал, картины нет."""
+    if str(state.get("temperature") or "") == "cold":
         return True
     if state.get("recoverable") is False:
         return True

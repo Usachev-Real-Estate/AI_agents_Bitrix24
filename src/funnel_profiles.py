@@ -46,9 +46,15 @@ _COMMON_RULES = """\
    * comment_informative=true, если по последним комментариям брокера понятно,
      что происходит с клиентом и что дальше. «Созвонился», «ок», «ждём» —
      это false: такой комментарий не заменяет разговора.
-   * claims_no_answer=true, если брокер утверждает, что клиент или собственник
-     не отвечает, не берёт трубку, сбрасывает, недоступен. Обязательно приведи
-     цитату в claims_no_answer_quote. Не нашёл — false.
+   * claims_no_answer=true ТОЛЬКО если брокер объясняет отсутствие продвижения
+     тем, что до клиента не получается достучаться: не берёт трубку,
+     сбрасывает, не отвечает на звонки, номер недоступен. Обязательно приведи
+     цитату в claims_no_answer_quote.
+     Это НЕ тот случай, когда у клиента есть понятная и названная причина
+     паузы: отпуск, командировка, разъезды, лечение, «вернётся после 30.08»,
+     «сейчас в другом городе». Отсутствие с объяснением и сроком — это
+     состояние клиента, а не отговорка брокера; там ставь false.
+     Флаг ведёт к претензии в адрес брокера, поэтому сомневаешься — false.
 10. Уровни расхождения (severity в contradictions):
    * low — мелкое: сдвиг дат, разница по цифрам до 30 %, уточнение
      формулировок. Не влияет на итоговый вердикт.
@@ -371,20 +377,19 @@ SELLER_STAGE_REQUIREMENTS: dict[str, tuple[tuple[str, str], ...]] = {
 }
 
 
-# «Закрытая продажа (На сайт)» — по решению агентства проверяем только, что
-# заполнен ID объекта Афины. Ни фактов этапа, ни температуры: сделка уже идёт,
-# квалифицировать собственника нечем и незачем.
 SELLER_STAGE_CLOSED_SALE = "UC_A94BGF"
-SELLER_DIRECT_FIELD_CHECKS: dict[str, tuple[tuple[str, str], ...]] = {
-    SELLER_STAGE_CLOSED_SALE: (("UF_CRM_1780911079", "ID объекта Афины"),),
-}
-SELLER_STAGES_NO_TEMPERATURE = frozenset({SELLER_STAGE_CLOSED_SALE})
 
 
 SELLER_STAGES_OUT_OF_QC = frozenset({
     "UC_KEOOG8",       # Переговоры — у руководства
     "UC_FADPBF",       # Поиск клиента — вне аудита
     "WON",             # Договор закрыт
+    # «Закрытая продажа (На сайт)» — клиента здесь не квалифицируем, значит и
+    # разбирать нечего. Единственное требование этапа — заполненный ID объекта
+    # Афины, и его уже проверяет основной аудит (SELLERS_AFINA_REQUIRED_STAGES,
+    # нарушение seller_afina_id_missing). Дублировать проверку в QC значит
+    # получать два разных сообщения об одном и том же.
+    SELLER_STAGE_CLOSED_SALE,
 })
 
 
@@ -463,17 +468,11 @@ class FunnelProfile:
     # — этапы вне контроля качества (ведёт руководство).
     grace_hours: dict[str, int]
     stages_out_of_qc: frozenset[str]
-    # Поля карточки, которые проверяются напрямую в CRM: это НЕ задача LLM.
-    # Значение — коды UF, которые надо подставить в crm.deal.get.
-    # Заполнить реальными кодами перед включением проверки.
     # Прямые проверки полей CRM по этапам: {этап: ((код UF, имя), ...)}.
     # Это НЕ задача модели — поле либо заполнено, либо нет.
     direct_field_checks: dict[str, tuple[tuple[str, str], ...]] = field(
         default_factory=dict,
     )
-    # Этапы, на которых клиента не квалифицируем. «Закрытая продажа» — сделка
-    # уже идёт, температура там ничего не решает и только шумит в отчёте.
-    stages_without_temperature: frozenset[str] = frozenset()
 
     @property
     def qualification_fields(self) -> tuple[tuple[str, str], ...]:
@@ -517,8 +516,6 @@ SELLER_PROFILE = FunnelProfile(
     grace_hours=SELLER_GRACE_HOURS,
     stages_out_of_qc=SELLER_STAGES_OUT_OF_QC,
     work_window_days=SELLER_WORK_WINDOW_DAYS,
-    direct_field_checks=SELLER_DIRECT_FIELD_CHECKS,
-    stages_without_temperature=SELLER_STAGES_NO_TEMPERATURE,
 )
 
 PROFILES = {p.key: p for p in (BUYER_PROFILE, SELLER_PROFILE)}

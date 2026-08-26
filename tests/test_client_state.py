@@ -1374,3 +1374,21 @@ def test_cache_hit_still_costs_nothing(tmp_path, monkeypatch):
     cs.analyze_deal(dict(card), profile=cs.BUYER_PROFILE, settings=settings)
     cs.analyze_deal(dict(card), profile=cs.BUYER_PROFILE, settings=settings)
     assert calls == [1]
+
+
+def test_closed_sale_never_reaches_the_model(monkeypatch):
+    """«Закрытая продажа» снята с QC целиком — ни выборки, ни разбора."""
+    import client_state as cs
+
+    def _boom(*args, **kwargs):  # pragma: no cover
+        raise AssertionError("этап снят с контроля качества")
+
+    monkeypatch.setattr(cs, "prepare_deal_record", _boom)
+    monkeypatch.setattr(cs, "make_llm", _boom)
+
+    result = cs.analyze_deal(
+        {"ID": 15862, "STAGE_ID": "UC_A94BGF"}, profile=cs.SELLER_PROFILE,
+    )
+    assert result["skipped"] is True
+    assert result["reason"] == "stage_out_of_qc"
+    assert result["verdict"] == "out_of_qc"

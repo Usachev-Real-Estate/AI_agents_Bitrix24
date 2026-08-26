@@ -415,63 +415,47 @@ def test_an_excluded_stage_still_says_out_of_qc():
 
 
 def test_every_known_seller_stage_is_now_covered():
-    """Пробел, в который ушли 4 из 10 карточек, закрыт «Закрытой продажей»."""
-    from funnel_profiles import (
-        SELLER_DIRECT_FIELD_CHECKS,
-        SELLER_STAGE_REQUIREMENTS,
-        SELLER_STAGES_OUT_OF_QC,
-    )
+    """Ни один этап продавцов не должен висеть без правила."""
+    from funnel_profiles import SELLER_STAGE_REQUIREMENTS, SELLER_STAGES_OUT_OF_QC
     from tools import SELLERS_STAGE_NAMES
 
     for stage in SELLERS_STAGE_NAMES:
         assert (
             stage in SELLER_STAGE_REQUIREMENTS
             or stage in SELLER_STAGES_OUT_OF_QC
-            or stage in SELLER_DIRECT_FIELD_CHECKS
         ), f"{stage} не покрыт ни одним правилом"
 
 
-# ── «Закрытая продажа»: только ID Афины, без квалификации клиента ──────
-def test_closed_sale_is_good_when_the_afina_id_is_filled():
+# ── «Закрытая продажа»: вне QC целиком ─────────────────────────────────
+def test_closed_sale_is_out_of_the_qc_agent():
+    """Клиента там не квалифицируют, значит и разбирать нечего."""
+    from funnel_profiles import SELLER_STAGE_CLOSED_SALE, SELLER_STAGES_OUT_OF_QC
+
+    assert SELLER_STAGE_CLOSED_SALE in SELLER_STAGES_OUT_OF_QC
     level, why = compute_completeness_verdict(
-        "UC_A94BGF", _state(), SELLER_PROFILE,
-        hours_on_stage=1000, qualification_ok=True,
+        SELLER_STAGE_CLOSED_SALE, _state(), SELLER_PROFILE, hours_on_stage=1000,
     )
-    assert level == "good"
-    assert "ID объекта Афины" in why
+    assert level == "out_of_qc"
 
 
-def test_closed_sale_is_poor_when_the_afina_id_is_empty():
-    level, why = compute_completeness_verdict(
-        "UC_A94BGF", _state(), SELLER_PROFILE,
-        hours_on_stage=1000, qualification_ok=False,
-    )
-    assert level == "poor"
-    assert "не заполнено: ID объекта Афины" in why
+def test_the_afina_check_is_not_duplicated_in_the_qc_agent():
+    """Основной аудит уже ловит это правилом seller_afina_id_missing.
+
+    Две проверки одного и того же дают РОПу два разных сообщения про одну
+    карточку.
+    """
+    from funnel_profiles import SELLER_PROFILE as sellers
+    from tools import SELLERS_AFINA_REQUIRED_STAGES, SELLERS_AFINA_UF
+
+    assert "UC_A94BGF" in SELLERS_AFINA_REQUIRED_STAGES
+    assert SELLERS_AFINA_UF == "UF_CRM_1780911079"
+    assert sellers.direct_field_checks == {}
+    assert sellers.fields_for_stage("UC_A94BGF") == ()
 
 
-def test_closed_sale_needs_no_text_facts():
-    """Пустая карточка на этом этапе — не «плохо», если поле заполнено."""
-    level, _ = compute_completeness_verdict(
-        "UC_A94BGF", _state(stage_facts={}), SELLER_PROFILE,
-        hours_on_stage=1000, qualification_ok=True,
-    )
-    assert level == "good"
+def test_buyer_field_checks_survive_the_removal():
+    """Убрали дубль у продавцов — проверка «Подбора» трогаться не должна."""
+    from funnel_profiles import BUYER_PROFILE as buyers
 
-
-def test_an_unchecked_field_is_not_reported_as_good():
-    """Ставить «хорошо» по непроверенному полю — выдать пробел за результат."""
-    level, why = compute_completeness_verdict(
-        "UC_A94BGF", _state(), SELLER_PROFILE,
-        hours_on_stage=1000, qualification_ok=None,
-    )
-    assert level == "no_rules"
-    assert "не проверены" in why
-
-
-def test_the_afina_field_is_the_one_the_agency_named():
-    from funnel_profiles import SELLER_DIRECT_FIELD_CHECKS
-
-    assert SELLER_DIRECT_FIELD_CHECKS["UC_A94BGF"] == (
-        ("UF_CRM_1780911079", "ID объекта Афины"),
-    )
+    codes = [code for code, _name in buyers.fields_for_stage("C18:NEW")]
+    assert "UF_CRM_1774363333518" in codes
