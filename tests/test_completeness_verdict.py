@@ -459,3 +459,39 @@ def test_buyer_field_checks_survive_the_removal():
 
     codes = [code for code, _name in buyers.fields_for_stage("C18:NEW")]
     assert "UF_CRM_1774363333518" in codes
+
+
+# ── Этапы, где обсуждение идёт в чате ──────────────────────────────────
+@pytest.mark.parametrize("stage", ["C18:UC_8Z3SP6", "C18:UC_RUCRAH", "C18:UC_8X12HI"])
+def test_chat_stages_are_out_of_qc(stage):
+    """Регламент разрешает вести обсуждение в чате, а чаты агент не читает.
+
+    Проверять такой этап значит наказывать брокера за то, что он работал
+    ровно как предписано — просто не там, где мы смотрим.
+    """
+    level, _ = compute_completeness_verdict(
+        stage, _state(), BUYER_PROFILE, hours_on_stage=1000,
+    )
+    assert level == "out_of_qc"
+
+
+def test_offer_stage_asks_for_no_facts_and_no_work():
+    """Ни фактов, ни окна работы — иначе претензия просочится другой дверью."""
+    from funnel_profiles import (
+        BUYER_STAGE_REQUIREMENTS,
+        BUYER_WORK_WINDOW_DAYS,
+        all_facts_for_stage,
+    )
+
+    assert "C18:UC_8Z3SP6" not in BUYER_STAGE_REQUIREMENTS
+    assert "C18:UC_8Z3SP6" not in BUYER_WORK_WINDOW_DAYS
+    assert all_facts_for_stage("buyers", "C18:UC_8Z3SP6") == []
+
+
+def test_the_stages_the_agency_still_wants_are_untouched():
+    """Снятие «Офера» не должно задеть соседние этапы."""
+    from funnel_profiles import BUYER_STAGE_REQUIREMENTS
+
+    for stage in ("C18:NEW", "C18:UC_UFPFKK", "C18:UC_DVW1P9"):
+        assert stage in BUYER_STAGE_REQUIREMENTS
+        assert stage not in BUYER_PROFILE.stages_out_of_qc

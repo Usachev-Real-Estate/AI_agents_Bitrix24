@@ -204,3 +204,70 @@ def assess_broker_work(
         "window_days": days,
         "days_quiet": days_quiet,
     }
+
+
+def has_open_future_task(
+    events: list[dict[str, Any]],
+    now: datetime | None = None,
+) -> bool:
+    """Есть ли по карточке незакрытое дело со сроком в будущем."""
+    now = now or datetime.now(timezone.utc)
+    for event in events:
+        if event.get("kind") != "activity":
+            continue
+        if str(event.get("completed") or "").upper() == "Y":
+            continue
+        deadline = _parse(event.get("deadline"))
+        if deadline is not None and deadline > now:
+            return True
+    return False
+
+
+def _looks_like_a_date(text: str) -> bool:
+    """Конкретный срок против «на следующей неделе» и «в пятницу»."""
+    return _parse(text) is not None
+
+
+def next_action(
+    state: dict[str, Any],
+    events: list[dict[str, Any]],
+    now: datetime | None = None,
+) -> str:
+    """Что брокеру сделать по карточке прямо сейчас, или "" если нечего.
+
+    Отчёт, который сообщает «не хватает следующего шага с датой», ставит
+    диагноз. РОПу нужен рецепт: дело в Битриксе, с датой. Особенно когда
+    ход за клиентом — «собственник вывезет мусор, потом фотосессия» — такая
+    карточка выглядит брошенной, хотя брокер просто ждёт. Ждать можно, но
+    с запланированным делом, иначе ожидание ничем не отличается от забытья.
+    """
+    if has_open_future_task(events, now):
+        # Дело уже стоит — советовать нечего.
+        return ""
+
+    step = state.get("next_step") if isinstance(state.get("next_step"), dict) else {}
+    what = str(step.get("what") or "").strip()
+    when = str(step.get("when") or "").strip()
+    who = str(step.get("who") or "").strip().lower()
+    dated = bool(when) and when.lower() != "unknown"
+
+    if not what or what.lower() == "unknown":
+        return "Запланировать дело: согласовать с клиентом следующий шаг и срок"
+
+    if who == "client":
+        if dated and _looks_like_a_date(when):
+            return f"Запланировать дело на {when}: проверить, выполнил ли клиент — {what}"
+        if dated:
+            return (
+                f"Запланировать дело: срок со слов клиента «{when}» — "
+                f"связаться и подтвердить точную дату ({what})"
+            )
+        return (
+            f"Запланировать дело: связаться с клиентом и согласовать срок — {what}"
+        )
+
+    if dated and _looks_like_a_date(when):
+        return f"Запланировать дело на {when}: {what}"
+    if dated:
+        return f"Запланировать дело: уточнить дату («{when}») и поставить — {what}"
+    return f"Запланировать дело с датой: {what}"

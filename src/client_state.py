@@ -15,7 +15,7 @@ from config import Settings, get_settings
 from db import get_client_state, init_db, save_client_state
 from lead_quality_audit import _message_content_to_str
 from funnel_profiles import BUYER_PROFILE, SELLER_PROFILE, FunnelProfile
-from broker_work import assess_broker_work
+from broker_work import assess_broker_work, next_action
 from llm import estimate_cost, make_llm
 from masking import MaskMap, apply_mask, build_mask_map, unmask
 from tools import (
@@ -143,6 +143,9 @@ def _normalize_activity_item(item: dict[str, Any]) -> dict[str, Any]:
         "description": _clean_str(item.get("DESCRIPTION") or item.get("description")),
         "completed": _clean_str(item.get("COMPLETED") or item.get("completed")),
         "type_id": _coerce_int(item.get("TYPE_ID") or item.get("type_id")),
+        # Срок дела нужен рекомендации: если по карточке уже стоит живое дело
+        # на будущее, советовать «запланируйте дело» бессмысленно.
+        "deadline": _clean_str(item.get("DEADLINE") or item.get("deadline")),
     }
 
 
@@ -1058,6 +1061,10 @@ def apply_derived_verdict(
         comment_informative=bool(work.get("comment_informative", True)),
     )
     envelope["work_proven"] = state["work_evidence"]["proven"]
+
+    # Рецепт, а не только диагноз. Считается заново на каждом прогоне: дело
+    # могли поставить уже после разбора, и тогда совет надо снять.
+    state["next_action"] = next_action(state, events or [])
     return state
 
 
