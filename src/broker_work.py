@@ -40,6 +40,11 @@ PROVEN_BY_COMMENT = "comment"
 # только с делом на контроле — иначе ожидание ничем не отличается от
 # забытья, и именно так теряются агенты, обещавшие приехать «в сентябре».
 PROVEN_BY_WAITING = "waiting_on_client"
+# Пауза с названной причиной: клиент в отпуске, ждём документы, ждём
+# продажи его квартиры. #14776: клиент в отпуске до сентября, шаг назначен
+# на 2 сентября, дело стоит — а карточка восемь дней числилась в
+# недоработке. Формально ход был за брокером, по сути — за клиентом.
+PROVEN_BY_PAUSE = "pause_explained"
 # Чем не подтверждена.
 # GAP_EMPTY_COMMENT — это и есть «неотработанная карточка» в терминах
 # агентства: контакт передали, звонка нет, а в карточке одна отметка
@@ -48,6 +53,10 @@ GAP_CLAIMED_MESSAGE = "claimed_message_no_proof"
 GAP_CLAIMED_NO_ANSWER = "claimed_no_answer_no_calls"
 GAP_EMPTY_COMMENT = "comment_says_nothing"
 GAP_NO_TRACE = "no_trace"
+# Работа была, но раньше нормы этапа. Отдельно от GAP_NO_TRACE: карточка,
+# где брокер звонил четыре дня назад при норме два, и карточка, где не
+# было ничего никогда, — разные разговоры с брокером.
+GAP_NO_TRACE_IN_WINDOW = "no_trace_in_window"
 # Не то же самое, что GAP_NO_TRACE. Незакрытое дело «позвонить клиенту» —
 # план брокера, а не работа с клиентом, и засчитывать его как работу
 # нельзя. Но и говорить «следов работы нет» про карточку, где дело
@@ -66,6 +75,7 @@ GAP_DUE_TASK_NO_RESULT = "due_task_no_result"
 
 PROVEN = frozenset({
     PROVEN_BY_CALL, PROVEN_BY_SCREENSHOT, PROVEN_BY_COMMENT, PROVEN_BY_WAITING,
+    PROVEN_BY_PAUSE,
 })
 # Разрывы, за которые не предъявляют, а напоминают.
 REMINDERS = frozenset({GAP_WAITING_NO_TASK})
@@ -75,6 +85,7 @@ REASON_RU: dict[str, str] = {
     PROVEN_BY_SCREENSHOT: "написал клиенту, приложен скриншот переписки",
     PROVEN_BY_COMMENT: "есть развёрнутый комментарий",
     PROVEN_BY_WAITING: "ход за клиентом, дело на контроле стоит",
+    PROVEN_BY_PAUSE: "пауза на стороне клиента объяснена, дело на контроле стоит",
     GAP_WAITING_NO_TASK: (
         "ход за клиентом, но дела на возврат к разговору нет — так теряют контакт"
     ),
@@ -86,7 +97,12 @@ REASON_RU: dict[str, str] = {
         "карточка не отработана: звонка нет, а из комментария не понять, "
         "что с клиентом"
     ),
-    GAP_NO_TRACE: "следов работы нет",
+    # Две разные вещи, которые до сих пор назывались одним словом. #16218:
+    # «следов работы нет (последний след 4 дн. назад)» — брокер звонил и
+    # слал СМС, просто раньше нормы. Это опоздание, а не бездействие, и
+    # обвинение должно звучать по факту.
+    GAP_NO_TRACE: "следов работы нет вовсе",
+    GAP_NO_TRACE_IN_WINDOW: "за норму этапа ни звонка, ни комментария",
     GAP_ONLY_PLANS: (
         "в карточке только запланированное дело — ни звонка, ни комментария"
     ),
@@ -246,6 +262,32 @@ def due_task_without_result(
     }
 
 
+def _pause_covers_the_task(
+    pause_until: str,
+    deadline: datetime,
+    now: datetime,
+    window_days: int,
+) -> bool:
+    """Названная причина объясняет именно этот срок, а не любой.
+
+    Без этой проверки правило вырождается: достаточно поставить дело на три
+    месяца вперёд, приписать «клиент в отпуске» — и брокер чист навсегда.
+    Поэтому срок дела должен укладываться в названную паузу плюс норму этапа
+    на то, чтобы после неё выйти на связь.
+
+    Срок паузы не назван («до сентября», «когда вернётся») — проверять нечем;
+    тогда правило держится на остальном: причина названа дословно в карточке,
+    и дело по карточке стоит.
+    """
+    ends = _parse(pause_until)
+    if ends is None:
+        return True
+    if ends <= now:
+        # Пауза кончилась — ожидание больше не оправдание.
+        return False
+    return deadline <= ends + timedelta(days=window_days)
+
+
 def _ball_is_theirs(who: str, when: str, now: datetime) -> bool:
     """Ход за контрагентом, и названный им срок ещё не прошёл.
 
@@ -270,6 +312,8 @@ def assess_broker_work(
     claims_no_answer: bool = False,
     next_step_who: str = "",
     next_step_when: str = "",
+    pause_explained: bool = False,
+    pause_until: str = "",
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Подтверждена ли работа брокера за последнее окно по этапу.
@@ -319,6 +363,29 @@ def assess_broker_work(
             "days_quiet": days_quiet,
         }
 
+    # Пауза с названной причиной: клиент в отпуске, ждёт документы, продаёт
+    # свою квартиру. Ход при этом может числиться за брокером — выйти на связь
+    # после паузы всё равно ему, — но спрашивать с него за тишину, причину
+    # которой он же и записал в карточку, значит наказывать за аккуратность.
+    # Ждать можно только с делом: без него это не пауза, а забытьё.
+    if pause_explained:
+        deadline = open_future_deadline(events, now)
+        if deadline is None:
+            return {
+                "proven": False,
+                "reason": GAP_WAITING_NO_TASK,
+                "window_days": days,
+                "days_quiet": days_quiet,
+            }
+        if _pause_covers_the_task(pause_until, deadline, now, days):
+            return {
+                "proven": True,
+                "reason": PROVEN_BY_PAUSE,
+                "window_days": days,
+                "days_quiet": days_quiet,
+                "pause_until": pause_until or "unknown",
+            }
+
     # Ход за контрагентом: он сам назвал, когда вернётся к разговору. Молчание
     # брокера тут не бездействие. #16798: агент сказал, что наберёт в начале
     # сентября и приедет с покупателем, — а карточка ушла в «недоработку» за
@@ -344,8 +411,14 @@ def assess_broker_work(
     if _has_call(window):
         reason = PROVEN_BY_CALL
     elif not comments:
-        # Пусто вовсе или одни планы — разные претензии и разные слова.
-        reason = GAP_NO_TRACE if not window else GAP_ONLY_PLANS
+        # Три разных упрёка, которые раньше звучали одинаково: пусто вовсе,
+        # одни планы, и работа была — но раньше нормы этапа.
+        if window:
+            reason = GAP_ONLY_PLANS
+        elif last_seen is None:
+            reason = GAP_NO_TRACE
+        else:
+            reason = GAP_NO_TRACE_IN_WINDOW
     elif claims_no_answer and not _has_call_attempt(window):
         # «Не дозвонился» проверяется первым: это объяснение бездействия, и
         # оно должно стоить дороже остальных. Есть попытки — брокер работал,
@@ -368,21 +441,32 @@ def assess_broker_work(
     }
 
 
-def has_open_future_task(
+def open_future_deadline(
     events: list[dict[str, Any]],
     now: datetime | None = None,
-) -> bool:
-    """Есть ли по карточке незакрытое дело со сроком в будущем."""
+) -> datetime | None:
+    """Ближайший срок незакрытого дела в будущем, или None."""
     now = now or datetime.now(timezone.utc)
+    nearest: datetime | None = None
     for event in events:
         if event.get("kind") != "activity":
             continue
         if str(event.get("completed") or "").upper() == "Y":
             continue
         deadline = _parse(event.get("deadline"))
-        if deadline is not None and deadline > now:
-            return True
-    return False
+        if deadline is None or deadline <= now:
+            continue
+        if nearest is None or deadline < nearest:
+            nearest = deadline
+    return nearest
+
+
+def has_open_future_task(
+    events: list[dict[str, Any]],
+    now: datetime | None = None,
+) -> bool:
+    """Есть ли по карточке незакрытое дело со сроком в будущем."""
+    return open_future_deadline(events, now) is not None
 
 
 def _date_state(text: str, now: datetime) -> str:

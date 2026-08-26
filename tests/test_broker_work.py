@@ -19,11 +19,13 @@ from broker_work import (  # noqa: E402
     GAP_DUE_TASK_NO_RESULT,
     GAP_EMPTY_COMMENT,
     GAP_NO_TRACE,
+    GAP_NO_TRACE_IN_WINDOW,
     GAP_ONLY_PLANS,
     GAP_OUT_OF_WINDOW,
     GAP_WAITING_NO_TASK,
     PROVEN_BY_CALL,
     PROVEN_BY_COMMENT,
+    PROVEN_BY_PAUSE,
     PROVEN_BY_SCREENSHOT,
     PROVEN_BY_WAITING,
     REMINDERS,
@@ -143,7 +145,7 @@ def test_a_screenshot_outside_the_window_does_not_count():
         claims_messaged=True,
     )
     assert result["proven"] is False
-    assert result["reason"] == GAP_NO_TRACE
+    assert result["reason"] == GAP_NO_TRACE_IN_WINDOW
 
 
 # ── Тишина ─────────────────────────────────────────────────────────────
@@ -155,8 +157,13 @@ def test_no_trace_at_all_is_the_worst_case():
 
 
 def test_days_quiet_counts_from_the_last_trace():
+    """Работа была, но раньше нормы — это опоздание, а не бездействие.
+
+    #16218: брокер звонил и слал СМС четыре дня назад при норме два, а
+    карточка говорила «следов работы нет».
+    """
     result = _assess([_comment(hours=24 * 12)])
-    assert result["reason"] == GAP_NO_TRACE
+    assert result["reason"] == GAP_NO_TRACE_IN_WINDOW
     assert result["days_quiet"] == pytest.approx(12.0, abs=0.01)
 
 
@@ -436,3 +443,119 @@ def test_advice_for_a_client_does_not_call_them_an_agent() -> None:
     }
     advice = next_action(state, [], NOW)
     assert "клиентом" in advice and "агент" not in advice
+
+
+def test_three_kinds_of_silence_are_named_differently():
+    """Пусто вовсе, одни планы и опоздание — разные разговоры с брокером."""
+    from broker_work import REASON_RU
+
+    never = _assess([])
+    late = _assess([_comment(24 * 12)])
+    plans = _assess([_task(1.0, (NOW + timedelta(days=5)).isoformat())])
+    assert never["reason"] == GAP_NO_TRACE
+    assert late["reason"] == GAP_NO_TRACE_IN_WINDOW
+    assert plans["reason"] == GAP_ONLY_PLANS
+    assert len({REASON_RU[r["reason"]] for r in (never, late, plans)}) == 3
+    # #16218: карточка со звонками четырёхдневной давности не должна
+    # утверждать, что следов нет.
+    assert "нет вовсе" not in REASON_RU[late["reason"]]
+
+
+# --- Названная причина паузы ----------------------------------------------
+# #14776: клиент в отпуске до сентября, шаг на 02.09, дело стоит — а карточка
+# восемь дней числилась в недоработке брокера.
+
+def test_explained_pause_with_a_task_is_not_neglect() -> None:
+    events = [
+        _comment(24 * 8, "клиент в отпуске до сентября, после выйдем на показы"),
+        _task(24 * 8, (NOW + timedelta(days=9)).isoformat()),
+    ]
+    result = _assess(
+        events, pause_explained=True,
+        pause_until=(NOW + timedelta(days=8)).date().isoformat(),
+    )
+    assert result["proven"] is True
+    assert result["reason"] == PROVEN_BY_PAUSE
+
+
+def test_explained_pause_without_a_task_is_a_reminder() -> None:
+    """Причина есть, дела нет — это не пауза, а забытьё."""
+    events = [_comment(24 * 8, "клиент в отпуске до сентября")]
+    result = _assess(
+        events, pause_explained=True,
+        pause_until=(NOW + timedelta(days=8)).date().isoformat(),
+    )
+    assert result["proven"] is False
+    assert result["reason"] == GAP_WAITING_NO_TASK
+
+
+def test_a_task_parked_far_beyond_the_pause_does_not_count() -> None:
+    """«Отпуск до сентября» не оправдывает дело на декабрь."""
+    events = [
+        _comment(24 * 8, "клиент в отпуске до сентября"),
+        _task(24 * 8, (NOW + timedelta(days=100)).isoformat()),
+    ]
+    result = _assess(
+        events, pause_explained=True,
+        pause_until=(NOW + timedelta(days=8)).date().isoformat(),
+    )
+    assert result["reason"] != PROVEN_BY_PAUSE
+
+
+def test_a_task_just_after_the_pause_counts() -> None:
+    """Норма этапа на то, чтобы выйти на связь после паузы, остаётся."""
+    events = [
+        _comment(24 * 8, "клиент в отпуске до сентября"),
+        _task(24 * 8, (NOW + timedelta(days=10)).isoformat()),
+    ]
+    result = _assess(
+        events, pause_explained=True,
+        pause_until=(NOW + timedelta(days=8)).date().isoformat(),
+    )
+    assert result["reason"] == PROVEN_BY_PAUSE
+
+
+def test_a_pause_that_already_ended_is_no_excuse() -> None:
+    events = [
+        _comment(24 * 8, "клиент в отпуске до 20 августа"),
+        _task(24 * 8, (NOW + timedelta(days=9)).isoformat()),
+    ]
+    result = _assess(events, pause_explained=True, pause_until="2026-08-20")
+    assert result["reason"] != PROVEN_BY_PAUSE
+
+
+def test_an_undated_pause_still_needs_a_task() -> None:
+    """Срок паузы не назван — правило держится на причине и деле."""
+    events = [
+        _comment(24 * 8, "ждём, пока клиент вывезет вещи"),
+        _task(24 * 8, (NOW + timedelta(days=5)).isoformat()),
+    ]
+    assert _assess(events, pause_explained=True, pause_until="unknown")["reason"] == (
+        PROVEN_BY_PAUSE
+    )
+    assert _assess(
+        [_comment(24 * 8, "ждём, пока клиент вывезет вещи")],
+        pause_explained=True, pause_until="unknown",
+    )["reason"] == GAP_WAITING_NO_TASK
+
+
+def test_without_the_flag_nothing_changes() -> None:
+    """Молчание модели не должно оправдывать брокера само по себе."""
+    events = [
+        _comment(24 * 8, "клиент в отпуске"),
+        _task(24 * 8, (NOW + timedelta(days=9)).isoformat()),
+    ]
+    assert _assess(events)["reason"] != PROVEN_BY_PAUSE
+
+
+def test_a_due_task_outranks_an_explained_pause() -> None:
+    """Своё дело с наступившим сроком не отменяется отпуском клиента."""
+    events = [
+        _comment(24 * 8, "клиент в отпуске до сентября"),
+        _task(24 * 8, _ago(30.0)),
+    ]
+    result = _assess(
+        events, pause_explained=True,
+        pause_until=(NOW + timedelta(days=8)).date().isoformat(),
+    )
+    assert result["reason"] == GAP_DUE_TASK_NO_RESULT
