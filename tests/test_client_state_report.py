@@ -722,3 +722,16 @@ def test_zero_contradictions_says_whether_there_was_anything_to_compare():
     seeing = format_summary({**base, "cards_with_transcript": 7,
                              "transcripts_pending": 0})
     assert "разговор читается у 7 из 10 карточек)" in seeing
+
+
+def test_a_failed_fetch_is_not_reported_as_a_bitrix_delay():
+    from client_state_report import format_summary
+
+    text = format_summary({
+        "funnel": "buyers", "funnel_label": "Покупатели", "total": 10,
+        "analyzed": 8, "cost_rub": 1.0, "cost_rub_per_card": 0.1,
+        "contradictions_material": 0, "contradictions_minor": 0,
+        "cards_with_transcript": 2, "transcripts_pending": 10,
+        "transcripts_failed": 3,
+    })
+    assert "ещё 10 расшифровок не готово, 3 не загрузилось)" in text
