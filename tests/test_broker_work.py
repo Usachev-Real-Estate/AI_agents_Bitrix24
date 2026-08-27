@@ -22,6 +22,7 @@ from broker_work import (  # noqa: E402
     GAP_NO_TRACE_IN_WINDOW,
     GAP_ONLY_PLANS,
     GAP_OUT_OF_WINDOW,
+    GAP_PAUSE_NO_TASK,
     GAP_WAITING_NO_TASK,
     PROVEN_BY_CALL,
     PROVEN_BY_COMMENT,
@@ -487,7 +488,7 @@ def test_explained_pause_without_a_task_is_a_reminder() -> None:
         pause_until=(NOW + timedelta(days=8)).date().isoformat(),
     )
     assert result["proven"] is False
-    assert result["reason"] == GAP_WAITING_NO_TASK
+    assert result["reason"] == GAP_PAUSE_NO_TASK
 
 
 def test_a_task_parked_far_beyond_the_pause_does_not_count() -> None:
@@ -537,7 +538,7 @@ def test_an_undated_pause_still_needs_a_task() -> None:
     assert _assess(
         [_comment(24 * 8, "ждём, пока клиент вывезет вещи")],
         pause_explained=True, pause_until="unknown",
-    )["reason"] == GAP_WAITING_NO_TASK
+    )["reason"] == GAP_PAUSE_NO_TASK
 
 
 def test_without_the_flag_nothing_changes() -> None:
@@ -636,3 +637,17 @@ def test_a_task_due_later_keeps_the_plain_wording() -> None:
     action = next_action({"next_step": {"what": "показ"}}, events, NOW)
     assert action.endswith(" — ждём")
     assert "сегодня" not in action
+
+
+def test_the_pause_reminder_does_not_claim_the_ball_is_with_the_client() -> None:
+    """#8716: шаг за брокером, а строка говорила «ход за клиентом»."""
+    from broker_work import REASON_RU
+
+    events = [_comment(24 * 8, "клиент поставил продажу на паузу до осени")]
+    result = _assess(
+        events, next_step_who="broker",
+        pause_explained=True, pause_until="unknown",
+    )
+    assert result["reason"] == GAP_PAUSE_NO_TASK
+    assert "ход за клиентом" not in REASON_RU[result["reason"]]
+    assert "пауза объяснена" in REASON_RU[result["reason"]]

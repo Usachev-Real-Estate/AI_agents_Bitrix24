@@ -80,3 +80,20 @@ def test_has_outgoing_call_ignores_tasks_and_comments():
     assert has_outgoing_call([_comment(1.0)]) is False
     assert has_outgoing_call([{"kind": "activity", "type_id": 1, "direction": 2}]) is False
     assert has_outgoing_call([_call(1.0, direction=2)]) is True
+
+
+def test_the_mark_is_silent_inside_the_stage_grace():
+    """#16976 стояла в «рано судить» — и тут же получала пометку."""
+    events = [_comment(2.0)]
+    assert comment_without_outgoing_call(
+        events, profile=BUYER_PROFILE, stage_id=STAGE,
+        comment_informative=True, hours_on_stage=10.0, now=NOW,
+    ) is False
+
+
+def test_after_the_grace_the_same_card_is_marked():
+    events = [_comment(2.0)]
+    assert comment_without_outgoing_call(
+        events, profile=BUYER_PROFILE, stage_id=STAGE,
+        comment_informative=True, hours_on_stage=500.0, now=NOW,
+    ) is True
