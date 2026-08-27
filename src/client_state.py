@@ -975,6 +975,7 @@ def apply_derived_verdict(
         profile=profile,
         stage_id=stage_id,
         comment_informative=state["work_claims"]["comment_informative"],
+        hours_on_stage=hours_on_stage,
     )
     state["work_evidence"] = assess_broker_work(
         events or [],

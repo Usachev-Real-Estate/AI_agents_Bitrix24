@@ -73,6 +73,11 @@ GAP_ONLY_PLANS = "only_plans"
 # Не обвинение, а напоминание: ход за контрагентом, но вернуться к
 # разговору нечем.
 GAP_WAITING_NO_TASK = "waiting_without_task"
+# То же самое, но повод другой: не ход за контрагентом, а объяснённая
+# пауза. #8716: «клиент поставил продажу на паузу, вернётся осенью», шаг
+# за брокером — а строка говорила «ход за клиентом». Один текст на два
+# разных случая называл один из них неверно.
+GAP_PAUSE_NO_TASK = "pause_without_task"
 GAP_OUT_OF_WINDOW = "window_not_started"
 # Дело, срок которого настал, а отписки о результате нет. Правило
 # агентства: запланировано дело на сегодня — сегодня в карточке должен
@@ -85,7 +90,7 @@ PROVEN = frozenset({
     PROVEN_BY_PAUSE,
 })
 # Разрывы, за которые не предъявляют, а напоминают.
-REMINDERS = frozenset({GAP_WAITING_NO_TASK})
+REMINDERS = frozenset({GAP_WAITING_NO_TASK, GAP_PAUSE_NO_TASK})
 
 # Разрывы, к которым норма этапа отношения не имеет. #15624: «в карточке
 # только запланированное дело (норма 3 дн., последний след 2.3 дн.
@@ -121,6 +126,9 @@ REASON_RU: dict[str, str] = {
     PROVEN_BY_PAUSE: "пауза на стороне клиента объяснена, дело на контроле стоит",
     GAP_WAITING_NO_TASK: (
         "ход за клиентом, но дела на возврат к разговору нет — так теряют контакт"
+    ),
+    GAP_PAUSE_NO_TASK: (
+        "пауза объяснена, но дела на возврат к разговору нет — так теряют контакт"
     ),
     GAP_CLAIMED_MESSAGE: "брокер пишет, что написал клиенту, но скриншота переписки нет",
     GAP_CLAIMED_NO_ANSWER: (
@@ -357,6 +365,7 @@ def comment_without_outgoing_call(
     profile: FunnelProfile,
     stage_id: str,
     comment_informative: bool,
+    hours_on_stage: float | None = None,
     now: datetime | None = None,
 ) -> bool:
     """Работа описана комментарием, а исходящего звонка в таймлайне нет.
@@ -367,6 +376,14 @@ def comment_without_outgoing_call(
     на то, что видно всегда: звонил ли брокер клиенту вообще.
     """
     now = now or datetime.now(timezone.utc)
+    if hours_on_stage is not None and hours_on_stage < judgement_starts_after(
+        profile, stage_id,
+    ):
+        # #16976 стояла в «рано судить» — и тут же получала пометку. Отсрочка
+        # этапа — это решение о том, когда с брокера вообще начинают
+        # спрашивать; молчать она должна для всех строк отчёта, а не только
+        # для оценки работы.
+        return False
     window = events_in_window(events, now, work_window_days(profile, stage_id))
     if not comment_informative:
         # Про пустой комментарий уже сказано отдельной строкой.
@@ -448,7 +465,7 @@ def assess_broker_work(
         if deadline is None:
             return {
                 "proven": False,
-                "reason": GAP_WAITING_NO_TASK,
+                "reason": GAP_PAUSE_NO_TASK,
                 "window_days": days,
                 "days_quiet": days_quiet,
             }
