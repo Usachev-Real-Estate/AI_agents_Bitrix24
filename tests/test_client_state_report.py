@@ -314,8 +314,20 @@ def test_unproven_work_is_spelled_out_on_the_card():
     card = format_card(result, "ЖК «Will Towers»", WEBHOOK)
     assert "Работа не подтверждена" in card
     assert "скриншота переписки нет" in card
-    assert "норма 3 дн." in card
     assert "claimed_message_no_proof" not in card
+    # Норма этапа к отсутствию скриншота отношения не имеет: цифры
+    # приводим только там, где они и есть довод.
+    assert "норма" not in card
+
+
+def test_a_timing_gap_still_shows_the_norm():
+    result = _res(70)
+    result["state"]["work_evidence"] = {
+        "proven": False, "reason": "no_trace_in_window",
+        "window_days": 3, "days_quiet": 9.0,
+    }
+    card = format_card(result, "ЖК «Will Towers»", WEBHOOK)
+    assert "норма 3 дн., последний след 9 дн. назад" in card
 
 
 def test_proven_work_adds_no_noise():
@@ -389,7 +401,7 @@ def test_summary_stays_quiet_when_every_stage_has_rules():
 def test_a_trace_from_today_is_not_called_zero_days_ago():
     result = _res(12)
     result["state"]["work_evidence"] = {
-        "proven": False, "reason": "comment_says_nothing",
+        "proven": False, "reason": "no_trace_in_window",
         "window_days": 1, "days_quiet": 0.3,
     }
     card = format_card(result, "диспозл excel", WEBHOOK)
@@ -647,3 +659,46 @@ def test_a_poor_card_in_the_fine_list_says_so():
     body = format_sections([res], {15: "Виктори парк"}, WEBHOOK)
     assert "✅ В РАБОТЕ" in body
     assert "карточка заполнена плохо" in body
+
+
+def test_an_unrecoverable_card_says_why_it_is_losing():
+    """#16886 стояла в «теряем клиента» без единой строки о причине."""
+    from client_state_report import format_card, split_sections
+
+    res = _res(16, recoverable=False)
+    res["state"]["work_evidence"] = {"proven": True, "reason": "call"}
+    losing, _n, _rem, _w, _f = split_sections([res])
+    assert [r["deal_id"] for r in losing] == [16]
+    assert "так и теряют молча" in format_card(res, "Пентхаус", WEBHOOK)
+
+
+def test_an_unproven_card_does_not_repeat_the_note():
+    """Там, где есть 🔧, причина уже названа."""
+    from client_state_report import format_card
+
+    res = _res(17, recoverable=False)
+    res["state"]["work_evidence"] = {
+        "proven": False, "reason": "no_trace_in_window",
+        "window_days": 3, "days_quiet": 9.0,
+    }
+    assert "так и теряют молча" not in format_card(res, "Пентхаус", WEBHOOK)
+
+
+def test_the_summary_shows_what_the_bill_is_made_of():
+    """Обе цифры лежали только в JSON прогона."""
+    from client_state_report import format_summary
+
+    text = format_summary({
+        "funnel": "buyers", "funnel_label": "Покупатели", "total": 10,
+        "analyzed": 8, "cost_rub": 3.92, "cost_rub_per_card": 0.49,
+        "usage": {"input_tokens": 23489, "output_tokens": 14734,
+                  "cached_tokens": 0, "reasoning_tokens": 8960},
+    })
+    assert "размышления 8960 из 14734 ток. ответа (61 %)" in text
+    assert "кэш входа 0 %" in text
+
+
+def test_a_run_without_llm_calls_has_no_breakdown():
+    from client_state_report import cost_breakdown
+
+    assert cost_breakdown({"usage": {}}) == ""

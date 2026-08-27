@@ -73,3 +73,36 @@ def test_an_empty_quote_does_not_count():
     state = _state("")
     apply_derived_verdict(state, _record(), BUYER_PROFILE, {}, _events(QUOTE))
     assert state["work_evidence"]["reason"] == GAP_NO_TRACE_IN_WINDOW
+
+
+def test_an_informative_situation_defends_the_broker():
+    """#16192: модель описала клиента тремя предложениями и тем же ответом
+    заявила, что комментарий ни о чём. Ответ спорит сам с собой."""
+    from broker_work import GAP_EMPTY_COMMENT
+
+    state = {
+        "recoverable": True,
+        "situation": "Собственник готов к продаже, пришлёт дизайн-проект",
+        "next_step": {"what": "получить дизайн-проект", "who": "broker"},
+        "broker_work": {"comment_informative": False},
+    }
+    events = [{"kind": "comment", "created": (NOW - timedelta(days=1)).isoformat(),
+               "text": "созвонился, пришлёт дизайн-проект"}]
+    apply_derived_verdict(state, _record(), BUYER_PROFILE, {}, events)
+    assert state["work_evidence"]["reason"] != GAP_EMPTY_COMMENT
+
+
+def test_an_unrecoverable_card_still_counts_as_unworked():
+    """Модель сама признала, что картины нет, — претензия остаётся."""
+    from broker_work import GAP_EMPTY_COMMENT
+
+    state = {
+        "recoverable": False,
+        "situation": "не указано",
+        "next_step": {"what": "unknown", "who": "unknown"},
+        "broker_work": {"comment_informative": False},
+    }
+    events = [{"kind": "comment", "created": (NOW - timedelta(days=1)).isoformat(),
+               "text": "в работе"}]
+    apply_derived_verdict(state, _record(), BUYER_PROFILE, {}, events)
+    assert state["work_evidence"]["reason"] == GAP_EMPTY_COMMENT
