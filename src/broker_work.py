@@ -28,8 +28,6 @@ from typing import Any
 from funnel_profiles import FunnelProfile
 
 CALL_ACTIVITY_TYPE_ID = 2
-# DIRECTION у Битрикса: 1 — входящий, 2 — исходящий.
-OUTGOING_DIRECTION = 2
 # Битрикс отдаёт даты со смещением портала; «сегодня» для отчёта — это
 # московские сутки, а не UTC: иначе вечернее дело уезжает во вчера.
 PORTAL_TZ = timezone(timedelta(hours=3))
@@ -349,24 +347,25 @@ def _ball_is_theirs(who: str, when: str, now: datetime) -> bool:
     return _date_state(str(when or ""), now) != "past"
 
 
-def has_outgoing_call(events: list[dict[str, Any]]) -> bool:
-    """Был ли исходящий звонок клиенту.
+def has_any_call(events: list[dict[str, Any]]) -> bool:
+    """Был ли звонок — неважно, исходящий или входящий.
 
-    Входящий звонок — тоже контакт, но инициатива в нём не брокера. Работа с
-    клиентом, которого ведут, начинается со звонка ему, а не с ожидания
-    звонка от него.
+    Направление агентство решило не различать: разговор состоялся, и слова
+    брокера в комментарии им подкреплены. Входящий звонок — тоже контакт, и
+    ставить брокеру в упрёк, что позвонил клиент, а не он, значит требовать
+    инициативы там, где важен сам факт разговора.
     """
     for event in events:
+        if event.get("kind") == "transcript":
+            return True
         if event.get("kind") != "activity":
             continue
-        if int(event.get("type_id") or 0) != CALL_ACTIVITY_TYPE_ID:
-            continue
-        if int(event.get("direction") or 0) == OUTGOING_DIRECTION:
+        if int(event.get("type_id") or 0) == CALL_ACTIVITY_TYPE_ID:
             return True
     return False
 
 
-def comment_without_outgoing_call(
+def comment_without_a_call(
     events: list[dict[str, Any]],
     *,
     profile: FunnelProfile,
@@ -375,12 +374,12 @@ def comment_without_outgoing_call(
     hours_on_stage: float | None = None,
     now: datetime | None = None,
 ) -> bool:
-    """Работа описана комментарием, а исходящего звонка в таймлайне нет.
+    """Работа описана комментарием, а звонка в таймлайне нет.
 
     Не обвинение, а пометка: комментарий брокера — это его же слова о своей
-    работе, и подтвердить их нечем. Расшифровку разговора для сверки взять
-    негде — на портале она есть у одной карточки из семи, — поэтому смотрим
-    на то, что видно всегда: звонил ли брокер клиенту вообще.
+    работе, и подтвердить их нечем. Сверять пересказ с расшифровкой мы
+    перестали, поэтому смотрим на то, что видно всегда: был ли по карточке
+    разговор — исходящий или входящий, всё равно.
     """
     now = now or datetime.now(timezone.utc)
     if hours_on_stage is not None and hours_on_stage < judgement_starts_after(
@@ -397,7 +396,7 @@ def comment_without_outgoing_call(
         return False
     if not any(e.get("kind") == "comment" for e in window):
         return False
-    return not has_outgoing_call(window)
+    return not has_any_call(window)
 
 
 def assess_broker_work(

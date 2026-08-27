@@ -112,3 +112,27 @@ def test_profile_lookup():
     assert profile_for("SELLERS") is SELLER_PROFILE
     with pytest.raises(ValueError):
         profile_for("прочее")
+
+
+# ── Агент не остывает по горизонту ─────────────────────────────────────
+def test_an_agents_horizon_does_not_make_the_card_cold():
+    """#11954: «Лариса (Клекова) агент» уехала в «теряем клиента».
+
+    Горизонт там принадлежит клиентам агента, а не самому агенту.
+    """
+    signals = dict(BUYER_HOT, timeline_horizon="более 3 месяцев")
+    client, _ = compute_temperature(signals, profile=BUYER_PROFILE)
+    agent, _ = compute_temperature(
+        signals, profile=BUYER_PROFILE, counterparty="agent",
+    )
+    assert client == "cold"
+    assert agent != "cold"
+
+
+def test_a_silent_agent_is_still_cold():
+    """Не выходит на связь — контакт теряем, кто бы он ни был."""
+    signals = dict(BUYER_HOT, client_responsive=False)
+    level, why = compute_temperature(
+        signals, profile=BUYER_PROFILE, counterparty="agent",
+    )
+    assert level == "cold" and "не выходит на связь" in why

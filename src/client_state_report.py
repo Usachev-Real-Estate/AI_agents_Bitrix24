@@ -237,12 +237,12 @@ def format_card(
             ),
         )
 
-    if state.get("no_outgoing_call"):
+    if state.get("no_call"):
         # Пометка, а не претензия: подтвердить слова брокера нечем, и это
-        # видно. Расшифровку для сверки взять негде, поэтому смотрим на то,
-        # что видно всегда: звонил ли брокер клиенту.
+        # видно. Направление звонка агентство решило не различать — важен
+        # сам факт разговора.
         lines.append(
-            "📵 Работа описана комментарием, исходящего звонка в таймлайне нет",
+            "📵 Работа описана комментарием, звонка в таймлайне нет",
         )
 
     if state.get("recoverable") is False:
@@ -326,10 +326,10 @@ def format_summary(stats: dict[str, Any]) -> str:
             line += " (" + ", ".join(tails) + ")"
         parts.append(line)
 
-    silent = int(stats.get("cards_without_outgoing_call") or 0)
+    silent = int(stats.get("cards_without_a_call") or 0)
     if silent:
         parts.append(
-            f"📵 Работа только на словах брокера (нет исходящего звонка): {silent}",
+            f"📵 Работа только на словах брокера (звонка в таймлайне нет): {silent}",
         )
 
     agents = int(stats.get("agent_cards") or 0)
@@ -635,9 +635,7 @@ def format_sections(
                 " · карточка заполнена плохо"
                 if str(state.get("verdict") or "") == "poor" else ""
             )
-            silent = " · 📵 без исходящего звонка" if state.get(
-                "no_outgoing_call"
-            ) else ""
+            silent = " · 📵 без звонка" if state.get("no_call") else ""
             blocks.append(
                 f"{icon} #{deal_id} {card_title(titles.get(deal_id))} — "
                 f"{step}{pause}{silent}{poor}".strip(),
@@ -667,6 +665,28 @@ def source_name(code: str) -> str:
     return SOURCE_NAMES.get(code, code)
 
 
+def merge_source_names(sources: dict[str, int]) -> dict[str, int]:
+    """Свести источники, различающиеся только регистром, в один.
+
+    На портале «усачев» и «Усачев» — два разных кода с одинаковым по сути
+    именем. Отчёт показывал их порознь, и один канал делился на два: шесть
+    карточек и одна вместо семи. Побеждает то написание, которым источник
+    заводили чаще; при равенстве — с заглавной буквы, чтобы строка не
+    менялась от прогона к прогону.
+    """
+    groups: dict[str, dict[str, int]] = {}
+    for code, count in sources.items():
+        name = source_name(code)
+        groups.setdefault(name.casefold(), {})[name] = (
+            groups.setdefault(name.casefold(), {}).get(name, 0) + int(count)
+        )
+    merged: dict[str, int] = {}
+    for variants in groups.values():
+        winner = sorted(variants.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+        merged[winner] = sum(variants.values())
+    return merged
+
+
 def format_source_mix(sources: dict[str, int]) -> str:
     """Состав выборки по источникам.
 
@@ -676,6 +696,7 @@ def format_source_mix(sources: dict[str, int]) -> str:
     """
     if not sources:
         return ""
-    ranked = sorted(sources.items(), key=lambda kv: (-kv[1], kv[0]))
-    listed = ", ".join(f"{source_name(code)} {count}" for code, count in ranked)
+    merged = merge_source_names(sources)
+    ranked = sorted(merged.items(), key=lambda kv: (-kv[1], kv[0]))
+    listed = ", ".join(f"{name} {count}" for name, count in ranked)
     return f"Источники выборки: {listed}"

@@ -712,27 +712,27 @@ def test_the_marker_shows_on_the_card_and_in_the_short_list():
     from client_state_report import format_card, format_sections
 
     res = _res(30, temperature="warm")
-    res["state"]["no_outgoing_call"] = True
+    res["state"]["no_call"] = True
     res["state"]["work_evidence"] = {"proven": False, "reason": "comment"}
     assert "📵 Работа описана комментарием" in format_card(res, "х", WEBHOOK)
 
     fine = _res(31, temperature="warm")
-    fine["state"]["no_outgoing_call"] = True
+    fine["state"]["no_call"] = True
     fine["state"]["work_evidence"] = {"proven": True, "reason": "comment"}
     body = format_sections([fine], {31: "х"}, WEBHOOK)
     assert "✅ В РАБОТЕ" in body
-    assert "📵 без исходящего звонка" in body
+    assert "📵 без звонка" in body
 
 
-def test_the_summary_counts_cards_without_an_outgoing_call():
+def test_the_summary_counts_cards_without_a_call():
     from client_state_report import format_summary
 
     text = format_summary({
         "funnel": "buyers", "funnel_label": "Покупатели", "total": 10,
         "analyzed": 8, "cost_rub": 1.0, "cost_rub_per_card": 0.1,
-        "cards_without_outgoing_call": 6,
+        "cards_without_a_call": 6,
     })
-    assert "нет исходящего звонка): 6" in text
+    assert "звонка в таймлайне нет): 6" in text
 
 
 def test_a_multiline_title_is_flattened():
@@ -796,3 +796,31 @@ def test_the_abandoned_section_is_hidden_when_empty():
 
     body = format_sections([_res(3, temperature="warm")], {3: "х"}, WEBHOOK)
     assert "БРОШЕНЫ" not in body
+
+
+def test_sources_differing_only_by_case_are_merged():
+    """На портале «усачев» и «Усачев» — два кода, а канал один."""
+    from client_state_report import format_source_mix, set_source_names
+
+    set_source_names({"1": "усачев", "2": "Усачев", "3": "Циан"})
+    try:
+        line = format_source_mix({"1": 6, "2": 1, "3": 2})
+        assert "усачев 7" in line
+        assert "Усачев" not in line
+        assert "Циан 2" in line
+    finally:
+        set_source_names({})
+
+
+def test_the_winning_spelling_is_the_more_common_one():
+    from client_state_report import merge_source_names, set_source_names
+
+    set_source_names({"1": "усачев", "2": "Усачев"})
+    try:
+        assert merge_source_names({"1": 1, "2": 9}) == {"Усачев": 10}
+        assert merge_source_names({"1": 9, "2": 1}) == {"усачев": 10}
+        # При равенстве — с заглавной, чтобы строка не плясала от прогона
+        # к прогону.
+        assert merge_source_names({"1": 5, "2": 5}) == {"Усачев": 10}
+    finally:
+        set_source_names({})
