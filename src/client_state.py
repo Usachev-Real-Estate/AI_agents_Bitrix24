@@ -124,6 +124,9 @@ def _normalize_transcript_item(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+COMMENT_FILE_ONLY = "Вложение без текста"
+
+
 def _activity_without_text(activity: dict[str, Any]) -> str:
     """Чем является дело без темы и описания — или "" если ничем.
 
@@ -160,7 +163,17 @@ def build_evidence_events(
         if not isinstance(item, dict):
             continue
         normalized = _normalize_timeline_item(item)
+        # Комментарий из одних пробелов — это пустой комментарий: он ничего
+        # не рассказывает, но раньше проходил как след работы.
+        normalized["text"] = normalized["text"].strip()
         if not normalized["text"]:
+            # Комментарий без текста, но с вложением — это и есть скриншот
+            # переписки. Выбрасывая его, мы теряли единственное подтверждение
+            # «написал клиенту» и упрекали брокера в том, что он приложил.
+            if not normalized["has_files"]:
+                continue
+            normalized["text"] = COMMENT_FILE_ONLY
+            events.append(normalized)
             continue
         normalized["text"] = apply_mask(normalized["text"], mask_map)
         events.append(normalized)
@@ -872,20 +885,34 @@ def analyze_with_llm(
     return _normalize_state(parsed, profile)
 
 
-def fetch_deal_contacts(deal: dict[str, Any]) -> list[dict[str, Any]]:
-    """Load contacts linked to a deal for masking."""
+def fetch_deal_contacts(deal: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+    """Контакты сделки для маскировки и признак «прочитали не всё».
+
+    Возвращает (контакты, failed). Раньше сбойный crm.contact.get просто
+    пропускался, и карточка с непрочитанным контактом выглядела как карточка
+    без контактов: маска пустая, маскировать нечего — и имя с телефоном из
+    комментариев уезжали в модель открытым текстом. Пустой список контактов
+    и несостоявшееся чтение контактов — разные вещи, и различить их может
+    только вызывающий код.
+    """
     if isinstance(deal.get("contacts"), list):
-        return [c for c in deal["contacts"] if isinstance(c, dict)]
+        return [c for c in deal["contacts"] if isinstance(c, dict)], False
+    failed = False
     contact_ids: list[int] = []
     main_id = _coerce_int(deal.get("CONTACT_ID") or deal.get("contact_id"))
     if main_id > 0:
         contact_ids.append(main_id)
     deal_id = _coerce_int(deal.get("ID") or deal.get("id"))
     if deal_id > 0:
-        raw = _bx_get_all_sync(
-            "crm.deal.contact.items.get",
-            {"id": deal_id},
-        )
+        try:
+            raw = _bx_get_all_sync(
+                "crm.deal.contact.items.get",
+                {"id": deal_id},
+            )
+        except Exception:
+            logger.warning("Deal contacts fetch failed for deal id=%s", deal_id)
+            raw = []
+            failed = True
         for row in _as_list(raw):
             if isinstance(row, dict):
                 cid = _coerce_int(row.get("CONTACT_ID") or row.get("contact_id"))
@@ -901,10 +928,11 @@ def fetch_deal_contacts(deal: dict[str, Any]) -> list[dict[str, Any]]:
             row = _bx_get_all_sync("crm.contact.get", {"id": cid})
         except Exception:
             logger.warning("Contact fetch failed for deal contact id=%s", cid)
+            failed = True
             continue
         if isinstance(row, dict):
             contacts.append(row)
-    return contacts
+    return contacts, failed
 
 
 def prepare_deal_record(deal: dict[str, Any], settings: Settings | None = None) -> dict[str, Any]:
@@ -916,8 +944,11 @@ def prepare_deal_record(deal: dict[str, Any], settings: Settings | None = None) 
     record = dict(deal)
     record["timeline"] = timeline
     record["activities"] = activities
-    record["evidence_incomplete"] = timeline_failed or activities_failed
-    record["contacts"] = fetch_deal_contacts(deal)
+    contacts, contacts_failed = fetch_deal_contacts(deal)
+    record["contacts"] = contacts
+    record["evidence_incomplete"] = (
+        timeline_failed or activities_failed or contacts_failed
+    )
     if not record["evidence_incomplete"]:
         record["transcripts"] = fetch_and_cache(deal_id, settings=settings)
     else:
