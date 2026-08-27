@@ -1382,17 +1382,24 @@ def analyze_deal(
 
 
 def _transcript_counts(events: list[dict[str, Any]]) -> dict[str, int]:
-    """Сколько расшифровок по карточке читается, а сколько ещё не готово."""
-    ready = 0
-    pending = 0
+    """Расшифровки карточки: читается / ещё не готова / не загрузилась.
+
+    «Не готова» и «не загрузилась» — разные вещи, и складывать их нельзя.
+    Первое означает, что Битрикс ещё не расшифровал разговор, и ждать имеет
+    смысл. Второе — что запрос не прошёл, и это уже наша сторона. Одна цифра
+    на двоих превращала бы нашу ошибку в чужую задержку.
+    """
+    counts = {"ready": 0, "pending": 0, "failed": 0}
     for event in events:
         if event.get("kind") != "transcript":
             continue
         if str(event.get("text") or "").strip():
-            ready += 1
+            counts["ready"] += 1
+        elif str(event.get("status") or "") == STATUS_NOT_READY:
+            counts["pending"] += 1
         else:
-            pending += 1
-    return {"ready": ready, "pending": pending}
+            counts["failed"] += 1
+    return counts
 
 
 def card_digest(result: dict[str, Any]) -> dict[str, Any]:
@@ -1521,6 +1528,7 @@ def run_client_state(
         # «расхождений 0» неотличимо от «сравнивать было не с чем».
         "cards_with_transcript": 0,
         "transcripts_pending": 0,
+        "transcripts_failed": 0,
         "usage": {key: 0 for key in USAGE_KEYS},
         "llm_calls": 0,
         "cost_rub": 0.0,
@@ -1577,6 +1585,7 @@ def run_client_state(
         if int(counts.get("ready") or 0) > 0:
             stats["cards_with_transcript"] += 1
         stats["transcripts_pending"] += int(counts.get("pending") or 0)
+        stats["transcripts_failed"] += int(counts.get("failed") or 0)
         # Токены считаем и по упавшим карточкам: запрос к модели уже оплачен,
         # даже если ответ не разобрался.
         call_usage = result.get("usage")

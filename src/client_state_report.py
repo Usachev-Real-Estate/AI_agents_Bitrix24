@@ -302,7 +302,14 @@ def format_summary(stats: dict[str, Any]) -> str:
     if total:
         line += f" (разговор читается у {with_calls} из {total} карточек"
         pending = int(stats.get("transcripts_pending") or 0)
-        line += f", ещё {pending} расшифровок не готово)" if pending else ")"
+        tails = []
+        if pending:
+            tails.append(f"ещё {pending} расшифровок не готово")
+        failed = int(stats.get("transcripts_failed") or 0)
+        if failed:
+            # Наша ошибка не должна выглядеть как задержка Битрикса.
+            tails.append(f"{failed} не загрузилось")
+        line += (", " + ", ".join(tails) + ")") if tails else ")"
     parts.append(line)
 
     agents = int(stats.get("agent_cards") or 0)
