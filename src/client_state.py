@@ -1182,6 +1182,12 @@ def analyze_deal(
     )
     content_hash = compute_content_hash(events)
     envelope["content_hash"] = content_hash
+    # Расхождение между пересказом и разговором можно найти только там, где
+    # разговор есть. Пока не видно, у скольких карточек расшифровка вообще
+    # читается, «расхождений 0» ничего не значит: это может быть и чистая
+    # база, и полное отсутствие первоисточника. Считается до кэша — событий
+    # это не меняет, а цифра нужна и по карточкам из кэша.
+    envelope["transcripts"] = _transcript_counts(events)
 
     # Кэш читается и в DRY_RUN: чтение ничего не меняет, а без него тестовый
     # прогон заново гоняет модель по всем карточкам. Повторный разбор — по force.
@@ -1375,6 +1381,20 @@ def analyze_deal(
     return envelope
 
 
+def _transcript_counts(events: list[dict[str, Any]]) -> dict[str, int]:
+    """Сколько расшифровок по карточке читается, а сколько ещё не готово."""
+    ready = 0
+    pending = 0
+    for event in events:
+        if event.get("kind") != "transcript":
+            continue
+        if str(event.get("text") or "").strip():
+            ready += 1
+        else:
+            pending += 1
+    return {"ready": ready, "pending": pending}
+
+
 def card_digest(result: dict[str, Any]) -> dict[str, Any]:
     """Карточка прогона в машиночитаемом виде: только коды и числа.
 
@@ -1431,6 +1451,7 @@ def card_digest(result: dict[str, Any]) -> dict[str, Any]:
         "comment_informative": bool(raw.get("comment_informative", True)),
         "pause_until": _clean_str(raw.get("pause_until")),
         "has_next_action": bool(str(state.get("next_action") or "").strip()),
+        "transcripts": dict(result.get("transcripts") or {}),
     }
 
 
@@ -1496,6 +1517,10 @@ def run_client_state(
         "contradictions_minor": 0,
         "contradictions_material": 0,
         "contradictions_dropped": 0,
+        # Карточек, по которым разговор вообще можно прочитать. Без этого
+        # «расхождений 0» неотличимо от «сравнивать было не с чем».
+        "cards_with_transcript": 0,
+        "transcripts_pending": 0,
         "usage": {key: 0 for key in USAGE_KEYS},
         "llm_calls": 0,
         "cost_rub": 0.0,
@@ -1547,6 +1572,11 @@ def run_client_state(
         source_key = source_code or "(без источника)"
         stats["sources"][source_key] = stats["sources"].get(source_key, 0) + 1
         stats["results"].append(result)
+        # Считаем и по карточкам из кэша: расшифровка от разбора не зависит.
+        counts = result.get("transcripts") or {}
+        if int(counts.get("ready") or 0) > 0:
+            stats["cards_with_transcript"] += 1
+        stats["transcripts_pending"] += int(counts.get("pending") or 0)
         # Токены считаем и по упавшим карточкам: запрос к модели уже оплачен,
         # даже если ответ не разобрался.
         call_usage = result.get("usage")

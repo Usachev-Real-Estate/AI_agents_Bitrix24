@@ -293,9 +293,17 @@ def format_summary(stats: dict[str, Any]) -> str:
 
     material = int(stats.get("contradictions_material") or 0)
     minor = int(stats.get("contradictions_minor") or 0)
-    parts.append(
-        f"⚡ Расхождений с разговором: существенных {material}, мелких {minor}",
-    )
+    line = f"⚡ Расхождений с разговором: существенных {material}, мелких {minor}"
+    # Расхождение находится только там, где есть с чем сравнивать. Без этой
+    # приписки «расхождений 0» читается как «в базе всё честно», хотя может
+    # значить «разговоров у нас нет вовсе».
+    with_calls = int(stats.get("cards_with_transcript") or 0)
+    total = int(stats.get("total") or 0)
+    if total:
+        line += f" (разговор читается у {with_calls} из {total} карточек"
+        pending = int(stats.get("transcripts_pending") or 0)
+        line += f", ещё {pending} расшифровок не готово)" if pending else ")"
+    parts.append(line)
 
     agents = int(stats.get("agent_cards") or 0)
     if agents:

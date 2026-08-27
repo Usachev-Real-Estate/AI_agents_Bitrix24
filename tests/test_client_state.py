@@ -1466,3 +1466,16 @@ def test_card_digest_counts_facts_and_contradictions():
     assert (digest["facts_present"], digest["facts_needed"]) == (1, 2)
     assert (digest["contradictions"], digest["contradictions_material"]) == (2, 1)
     assert digest["missing"] == 2
+
+
+def test_transcript_counts_separate_ready_from_pending():
+    """Не готовая расшифровка — не то же, что её отсутствие."""
+    from client_state import _transcript_counts
+
+    events = [
+        {"kind": "transcript", "text": "алло, добрый день"},
+        {"kind": "transcript", "text": "", "note": "расшифровка не готова"},
+        {"kind": "comment", "text": "в работе"},
+    ]
+    assert _transcript_counts(events) == {"ready": 1, "pending": 1}
+    assert _transcript_counts([]) == {"ready": 0, "pending": 0}
