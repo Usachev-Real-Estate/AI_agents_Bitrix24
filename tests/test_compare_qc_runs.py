@@ -35,8 +35,7 @@ def _card(deal_id: int, **over: Any) -> dict[str, Any]:
 def _run(cards: list[dict[str, Any]], **funnel: Any) -> dict[str, Any]:
     base = {
         "cost_rub": 10.0, "llm_calls": len(cards), "evidence_dropped": 0,
-        "errors": 0, "unrecoverable": 0, "contradictions_found": 0,
-        "contradictions_dropped": 0, "agent_cards": 0,
+        "errors": 0, "unrecoverable": 0, "agent_cards": 0,
         "usage": {"input_tokens": 100, "output_tokens": 200,
                   "reasoning_tokens": 120},
     }

@@ -28,6 +28,8 @@ from typing import Any
 from funnel_profiles import FunnelProfile
 
 CALL_ACTIVITY_TYPE_ID = 2
+# DIRECTION у Битрикса: 1 — входящий, 2 — исходящий.
+OUTGOING_DIRECTION = 2
 # Битрикс отдаёт даты со смещением портала; «сегодня» для отчёта — это
 # московские сутки, а не UTC: иначе вечернее дело уезжает во вчера.
 PORTAL_TZ = timezone(timedelta(hours=3))
@@ -330,6 +332,48 @@ def _ball_is_theirs(who: str, when: str, now: datetime) -> bool:
     if str(who or "").strip().lower() != "client":
         return False
     return _date_state(str(when or ""), now) != "past"
+
+
+def has_outgoing_call(events: list[dict[str, Any]]) -> bool:
+    """Был ли исходящий звонок клиенту.
+
+    Входящий звонок — тоже контакт, но инициатива в нём не брокера. Работа с
+    клиентом, которого ведут, начинается со звонка ему, а не с ожидания
+    звонка от него.
+    """
+    for event in events:
+        if event.get("kind") != "activity":
+            continue
+        if int(event.get("type_id") or 0) != CALL_ACTIVITY_TYPE_ID:
+            continue
+        if int(event.get("direction") or 0) == OUTGOING_DIRECTION:
+            return True
+    return False
+
+
+def comment_without_outgoing_call(
+    events: list[dict[str, Any]],
+    *,
+    profile: FunnelProfile,
+    stage_id: str,
+    comment_informative: bool,
+    now: datetime | None = None,
+) -> bool:
+    """Работа описана комментарием, а исходящего звонка в таймлайне нет.
+
+    Не обвинение, а пометка: комментарий брокера — это его же слова о своей
+    работе, и подтвердить их нечем. Расшифровку разговора для сверки взять
+    негде — на портале она есть у одной карточки из семи, — поэтому смотрим
+    на то, что видно всегда: звонил ли брокер клиенту вообще.
+    """
+    now = now or datetime.now(timezone.utc)
+    window = events_in_window(events, now, work_window_days(profile, stage_id))
+    if not comment_informative:
+        # Про пустой комментарий уже сказано отдельной строкой.
+        return False
+    if not any(e.get("kind") == "comment" for e in window):
+        return False
+    return not has_outgoing_call(window)
 
 
 def assess_broker_work(

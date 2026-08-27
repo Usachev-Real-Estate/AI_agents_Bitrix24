@@ -11,8 +11,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from client_state import (  # noqa: E402
-    MATERIAL_SEVERITY,
-    MINOR_SEVERITY,
     compute_completeness_verdict,
     grace_period_for,
     _normalize_state,
@@ -25,7 +23,6 @@ from funnel_profiles import (  # noqa: E402
 def _state(**over):
     base = {
         "recoverable": True,
-        "contradictions": [],
         "stage_facts": {},
         "signals": {},
     }
@@ -45,7 +42,9 @@ def _facts(*present_keys, stage="C18:NEW", profile="buyers"):
 
 
 # ── Основной путь ──────────────────────────────────────────────────────
-def test_good_when_all_required_present_and_no_contradictions():
+
+
+def test_good_when_all_required_facts_are_present():
     facts = _facts(
         "property_type", "budget", "district", "timeline", "next_step",
     )
@@ -75,28 +74,6 @@ def test_tolerable_when_one_required_missing():
     assert "next_step" not in why
 
 
-def test_tolerable_when_only_minor_contradictions():
-    state = _state(
-        stage_facts=_facts("property_type", "budget", "district", "timeline", "next_step"),
-        contradictions=[{"what": "дата", "in_card": "x", "in_call": "y", "severity": "low"}],
-    )
-    level, _ = compute_completeness_verdict(
-        "C18:NEW", state, BUYER_PROFILE, hours_on_stage=100,
-    )
-    assert level == "tolerable"
-
-
-def test_poor_when_material_contradiction():
-    state = _state(
-        stage_facts=_facts("property_type", "budget", "district", "timeline", "next_step"),
-        contradictions=[{"what": "позиция", "in_card": "x", "in_call": "y", "severity": "high"}],
-    )
-    level, _ = compute_completeness_verdict(
-        "C18:NEW", state, BUYER_PROFILE, hours_on_stage=100,
-    )
-    assert level == "poor"
-
-
 def test_poor_when_unrecoverable():
     level, _ = compute_completeness_verdict(
         "C18:NEW", _state(recoverable=False), BUYER_PROFILE, hours_on_stage=100,
@@ -105,6 +82,8 @@ def test_poor_when_unrecoverable():
 
 
 # ── Отсрочка ───────────────────────────────────────────────────────────
+
+
 def test_too_early_before_grace_period():
     state = _state()
     level, why = compute_completeness_verdict(
@@ -161,13 +140,9 @@ def test_stage_without_requirements_is_out_of_qc():
     assert level == "out_of_qc"
 
 
-# ── Разделение расхождений на minor / material ─────────────────────────
-def test_severity_classification_is_consistent():
-    assert MINOR_SEVERITY == {"low"}
-    assert MATERIAL_SEVERITY == {"medium", "high"}
-
-
 # ── Стадии продавцов ───────────────────────────────────────────────────
+
+
 def test_seller_meeting_needs_address_type_timeline_step():
     facts = _facts(
         "property_address", "property_type", "selling_timeline", "next_step",
@@ -195,6 +170,8 @@ def test_seller_preparation_photo_and_documents_are_optional():
 
 
 # ── Нормализация stage_facts ───────────────────────────────────────────
+
+
 def test_stage_facts_are_normalized_from_llm_output():
     raw = {
         "stage_facts": {
@@ -217,6 +194,8 @@ def test_stage_facts_empty_by_default():
 
 
 # ── Прямая проверка UF-полей карточки ──────────────────────────────────
+
+
 def _facts_all_present():
     """Все обязательные для Подбора факты присутствуют."""
     return _facts("property_type", "budget", "district", "timeline", "next_step")
@@ -312,6 +291,8 @@ def test_verdict_reason_never_leaks_service_keys():
 
 
 # ── Отсрочка: свежая карточка пуста не по вине брокера ─────────────────
+
+
 def test_fresh_empty_card_is_too_early_not_poor():
     """Лид пришёл час назад — он пуст по определению, брокер ещё не звонил."""
     level, why = compute_completeness_verdict(
@@ -328,18 +309,6 @@ def test_stale_empty_card_is_still_poor():
     assert level == "poor"
 
 
-def test_contradiction_outranks_the_grace_period():
-    """Расхождение с разговором — про достоверность, а не про срок."""
-    state = _state(contradictions=[{
-        "what": "бюджет", "in_card": "до 30 млн", "in_call": "максимум 20 млн",
-        "severity": "high",
-    }])
-    level, _ = compute_completeness_verdict(
-        "C18:NEW", state, BUYER_PROFILE, hours_on_stage=1,
-    )
-    assert level == "poor"
-
-
 def test_unknown_stage_age_does_not_grant_an_endless_grace():
     """Неизвестен возраст — судим как старую: иначе отсрочка станет лазейкой."""
     level, _ = compute_completeness_verdict(
@@ -349,6 +318,8 @@ def test_unknown_stage_age_does_not_grant_an_endless_grace():
 
 
 # ── «Плохо» должно быть сортируемым, иначе им нельзя пользоваться ──────
+
+
 def test_poor_verdict_says_how_many_facts_are_present():
     """Карточка с 5 фактами из 7 и пустая — оба «плохо», но не одно и то же."""
     almost = _state(stage_facts=_facts(
@@ -427,6 +398,8 @@ def test_every_known_seller_stage_is_now_covered():
 
 
 # ── «Закрытая продажа»: вне QC целиком ─────────────────────────────────
+
+
 def test_closed_sale_is_out_of_the_qc_agent():
     """Клиента там не квалифицируют, значит и разбирать нечего."""
     from funnel_profiles import SELLER_STAGE_CLOSED_SALE, SELLER_STAGES_OUT_OF_QC
@@ -495,3 +468,36 @@ def test_the_stages_the_agency_still_wants_are_untouched():
     for stage in ("C18:NEW", "C18:UC_UFPFKK", "C18:UC_DVW1P9"):
         assert stage in BUYER_STAGE_REQUIREMENTS
         assert stage not in BUYER_PROFILE.stages_out_of_qc
+
+
+def test_a_scheduled_task_counts_as_the_next_step():
+    """Дело в Битриксе — тот же следующий шаг, только доказанный CRM."""
+    all_but_step = [
+        key for key, _n, _r in all_facts_for_stage("buyers", "C18:NEW")
+        if key != "next_step"
+    ]
+    state = _state(stage_facts=_facts(*all_but_step))
+    without = compute_completeness_verdict(
+        "C18:NEW", state, BUYER_PROFILE, hours_on_stage=500.0,
+    )
+    with_task = compute_completeness_verdict(
+        "C18:NEW", state, BUYER_PROFILE, hours_on_stage=500.0,
+        task_scheduled=True,
+    )
+    assert "следующий шаг" in without[1]
+    assert with_task[0] == "good"
+
+
+def test_a_scheduled_task_closes_only_the_next_step():
+    """Дело не заменяет бюджет и сроки — только шаг."""
+    keep = [
+        key for key, _n, _r in all_facts_for_stage("buyers", "C18:NEW")
+        if key not in ("next_step", "budget")
+    ]
+    state = _state(stage_facts=_facts(*keep))
+    verdict, reason = compute_completeness_verdict(
+        "C18:NEW", state, BUYER_PROFILE, hours_on_stage=500.0,
+        task_scheduled=True,
+    )
+    assert "бюджет" in reason
+    assert "следующий шаг" not in reason
