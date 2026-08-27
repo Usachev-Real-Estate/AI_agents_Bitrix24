@@ -682,3 +682,23 @@ def test_an_unproven_card_does_not_repeat_the_note():
         "window_days": 3, "days_quiet": 9.0,
     }
     assert "так и теряют молча" not in format_card(res, "Пентхаус", WEBHOOK)
+
+
+def test_the_summary_shows_what_the_bill_is_made_of():
+    """Обе цифры лежали только в JSON прогона."""
+    from client_state_report import format_summary
+
+    text = format_summary({
+        "funnel": "buyers", "funnel_label": "Покупатели", "total": 10,
+        "analyzed": 8, "cost_rub": 3.92, "cost_rub_per_card": 0.49,
+        "usage": {"input_tokens": 23489, "output_tokens": 14734,
+                  "cached_tokens": 0, "reasoning_tokens": 8960},
+    })
+    assert "размышления 8960 из 14734 ток. ответа (61 %)" in text
+    assert "кэш входа 0 %" in text
+
+
+def test_a_run_without_llm_calls_has_no_breakdown():
+    from client_state_report import cost_breakdown
+
+    assert cost_breakdown({"usage": {}}) == ""
