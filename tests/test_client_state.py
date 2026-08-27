@@ -1405,3 +1405,64 @@ def test_deal_selection_asks_for_the_source(monkeypatch):
     )
     cs.run_client_state(cs.SELLER_PROFILE)
     assert "SOURCE_ID" in captured["select"]
+
+
+# ── Выжимка карточки для сравнения прогонов ────────────────────────────
+def test_card_digest_carries_no_text():
+    """В файл, который таскают между прогонами, имена попадать не должны."""
+    from client_state import card_digest
+
+    digest = card_digest({
+        "deal_id": 15932,
+        "state": {
+            "client_goal": "Продать квартиру Ивановой Марии",
+            "situation": "Собственница попросила набрать после выходных",
+            "next_action": "Запланировать дело: связаться с клиентом",
+            "verdict": "poor", "temperature": "warm", "confidence": 0.8,
+            "broker_work": {
+                "pause_explained": True,
+                "pause_reason_quote": "Иванова просила набрать после выходных",
+            },
+            "work_claims": {"pause_explained": False},
+        },
+    })
+    blob = repr(digest)
+    assert "Иванов" not in blob
+    assert "квартиру" not in blob
+    assert digest["has_next_action"] is True
+
+
+def test_card_digest_separates_the_model_flag_from_the_verified_one():
+    """Иначе по прогону не отличить «флага нет» от «цитата не нашлась»."""
+    from client_state import card_digest
+
+    digest = card_digest({
+        "deal_id": 15932,
+        "state": {
+            "broker_work": {"pause_explained": True, "pause_reason_quote": "x"},
+            "work_claims": {"pause_explained": False},
+        },
+    })
+    assert digest["model_flags"]["pause_explained"] is True
+    assert digest["verified_flags"]["pause_explained"] is False
+
+
+def test_card_digest_counts_facts_and_contradictions():
+    from client_state import card_digest
+
+    digest = card_digest({
+        "deal_id": 1,
+        "state": {
+            "stage_facts": {
+                "budget": {"present": True, "quote": "до 130"},
+                "district": {"present": False, "quote": ""},
+            },
+            "contradictions": [
+                {"severity": "high"}, {"severity": "low"},
+            ],
+            "missing": ["район", "сроки"],
+        },
+    })
+    assert (digest["facts_present"], digest["facts_needed"]) == (1, 2)
+    assert (digest["contradictions"], digest["contradictions_material"]) == (2, 1)
+    assert digest["missing"] == 2

@@ -22,6 +22,7 @@ if str(_SRC) not in sys.path:
 
 from client_state import (  # noqa: E402
     SOURCE_SELECT,
+    card_digest,
     STAGE_ENTRY_SELECT,
     _stage_hours,
     run_client_state,
@@ -187,7 +188,16 @@ def main() -> None:
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "chat_id": chat_id,
                 "funnels": [
-                    {k: v for k, v in stats.items() if k != "results"}
+                    {
+                        # results выкидываем: там развёрнутые состояния с
+                        # именами и суммами. Вместо них — построчная выжимка
+                        # из кодов и чисел: по ней два прогона сравниваются
+                        # машиной, а персональных данных в файле не остаётся.
+                        **{k: v for k, v in stats.items() if k != "results"},
+                        "cards": [
+                            card_digest(r) for r in stats.get("results") or []
+                        ],
+                    }
                     for stats, _titles in sections
                 ],
             },
