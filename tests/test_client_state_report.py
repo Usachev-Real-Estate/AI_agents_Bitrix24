@@ -702,3 +702,23 @@ def test_a_run_without_llm_calls_has_no_breakdown():
     from client_state_report import cost_breakdown
 
     assert cost_breakdown({"usage": {}}) == ""
+
+
+def test_zero_contradictions_says_whether_there_was_anything_to_compare():
+    """«Расхождений 0» читается как «в базе всё честно», а может значить
+    «разговоров у нас нет вовсе»."""
+    from client_state_report import format_summary
+
+    base = {
+        "funnel": "sellers", "funnel_label": "Продавцы", "total": 10,
+        "analyzed": 8, "cost_rub": 3.0, "cost_rub_per_card": 0.3,
+        "contradictions_material": 0, "contradictions_minor": 0,
+    }
+    blind = format_summary({**base, "cards_with_transcript": 0,
+                            "transcripts_pending": 4})
+    assert "разговор читается у 0 из 10 карточек" in blind
+    assert "ещё 4 расшифровок не готово" in blind
+
+    seeing = format_summary({**base, "cards_with_transcript": 7,
+                             "transcripts_pending": 0})
+    assert "разговор читается у 7 из 10 карточек)" in seeing
