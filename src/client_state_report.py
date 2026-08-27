@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from broker_work import REASON_RU as WORK_REASON_RU
+from broker_work import GAP_ABANDONED
 from broker_work import PROVEN_BY_PAUSE
 from broker_work import REMINDERS as WORK_REMINDERS
 from broker_work import TIMELESS_GAPS
@@ -211,16 +212,29 @@ def format_card(
         if reason_code in TIMELESS_GAPS:
             # Цифры приводим только там, где они и есть довод.
             tail = ""
+        elif reason_code == GAP_ABANDONED:
+            quiet = work.get("abandoned_days")
+            tail = (
+                f"ни звонка, ни комментария {float(quiet):.0f} дн."
+                if isinstance(quiet, (int, float)) else "месяцы без следов"
+            )
         # Напоминание и претензия не должны выглядеть одинаково: «работа не
         # подтверждена» про карточку, где клиент сам уехал до сентября, —
         # выговор за чужой отпуск.
-        head = "🔔 Напоминание" if reason_code in WORK_REMINDERS else (
-            "🔧 Работа не подтверждена"
-        )
+        if reason_code in WORK_REMINDERS:
+            head = "🔔 Напоминание"
+        elif reason_code == GAP_ABANDONED:
+            # «Работа не подтверждена» про карточку столетней давности —
+            # слишком мягко и не о том: тут не подтверждать нечего.
+            head = "🕸 Карточка брошена"
+        else:
+            head = "🔧 Работа не подтверждена"
         tail = "" if reason_code in WORK_REMINDERS or not tail else f" ({tail})"
         lines.append(
-            f"{head}: "
-            f"{WORK_REASON_RU.get(reason_code, reason_code)}{tail}",
+            (
+                f"{head}{tail}" if reason_code == GAP_ABANDONED
+                else f"{head}: {WORK_REASON_RU.get(reason_code, reason_code)}{tail}"
+            ),
         )
 
     if state.get("no_outgoing_call"):
@@ -466,8 +480,9 @@ def split_sections(
     list[dict[str, Any]],
     list[dict[str, Any]],
     list[dict[str, Any]],
+    list[dict[str, Any]],
 ]:
-    """Теряем / недоработка / напомнить / рано судить / в работе.
+    """Теряем / брошены / недоработка / напомнить / рано судить / в работе.
 
     Разделение по зоне ответственности, а не по строгости. «Клиент остыл» —
     забрать себе и решать; «брокер не подтвердил работу» — спросить с брокера.
@@ -486,6 +501,7 @@ def split_sections(
     не за что, но именно так теряются агенты, обещавшие приехать в сентябре.
     """
     losing: list[dict[str, Any]] = []
+    abandoned: list[dict[str, Any]] = []
     neglected: list[dict[str, Any]] = []
     reminders: list[dict[str, Any]] = []
     waiting: list[dict[str, Any]] = []
@@ -498,12 +514,20 @@ def split_sections(
         reason = str(work.get("reason") or "")
         is_losing = _is_losing_client(state)
         is_reminder = bool(work) and reason in WORK_REMINDERS
-        is_neglected = bool(work) and not work.get("proven") and not is_reminder
+        # Брошенная карточка — не отставание от каденса, а вопрос, ведём ли
+        # мы эту сделку. В общем списке недоработок она теряется.
+        is_abandoned = reason == GAP_ABANDONED
+        is_neglected = (
+            bool(work) and not work.get("proven")
+            and not is_reminder and not is_abandoned
+        )
         if is_losing:
             losing.append(result)
+        if is_abandoned:
+            abandoned.append(result)
         if is_neglected:
             neglected.append(result)
-        if is_losing or is_neglected:
+        if is_losing or is_abandoned or is_neglected:
             continue
         if is_reminder:
             reminders.append(result)
@@ -511,7 +535,17 @@ def split_sections(
             waiting.append(result)
         else:
             fine.append(result)
-    return losing, neglected, reminders, waiting, fine
+    # Худшее — первым: список читают сверху, и сделка, брошенная сто дней
+    # назад, должна стоять раньше брошенной месяц.
+    abandoned.sort(
+        key=lambda r: float(
+            ((r.get("state") or {}).get("work_evidence") or {}).get(
+                "abandoned_days",
+            ) or 0.0,
+        ),
+        reverse=True,
+    )
+    return losing, abandoned, neglected, reminders, waiting, fine
 
 
 def format_sections(
@@ -520,7 +554,9 @@ def format_sections(
     webhook_url: str,
 ) -> str:
     """Тело отчёта: сначала где теряем клиента, потом где не дорабатывают."""
-    losing, neglected, reminders, waiting, fine = split_sections(results)
+    (
+        losing, abandoned, neglected, reminders, waiting, fine,
+    ) = split_sections(results)
     blocks: list[str] = []
     printed: set[int] = set()
 
@@ -548,6 +584,9 @@ def format_sections(
         f"🚨 ТЕРЯЕМ КЛИЕНТА — {len(losing)}", losing,
         "Ни одной карточки с признаками потери.",
     )
+    if abandoned:
+        # Раньше недоработок: месяц тишины срочнее, чем отставание на три дня.
+        _block(f"🕸 БРОШЕНЫ — {len(abandoned)}", abandoned, "")
     _block(
         f"🔧 НЕДОРАБОТКА БРОКЕРА — {len(neglected)}", neglected,
         "Работа подтверждена по всем карточкам.",

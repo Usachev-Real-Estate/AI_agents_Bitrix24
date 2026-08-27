@@ -95,7 +95,7 @@ def _card(deal_id: int, **over: Any) -> dict[str, Any]:
 
 
 def test_an_unworked_contact_is_a_broker_failure():
-    _losing, neglect, _rem, _w, _f = split_sections([_card(16306)])
+    _losing, _aband, neglect, _rem, _w, _f = split_sections([_card(16306)])
     assert [r["deal_id"] for r in neglect] == [16306]
 
 
@@ -107,7 +107,7 @@ def test_an_unworked_contact_is_not_also_called_a_loss():
     контакт — это претензия к брокеру, и называть её ещё и потерей значит
     писать один факт дважды.
     """
-    losing, neglect, _rem, _w, _f = split_sections([_card(16306)])
+    losing, _aband, neglect, _rem, _w, _f = split_sections([_card(16306)])
     assert losing == []
     assert [r["deal_id"] for r in neglect] == [16306]
 
@@ -118,7 +118,7 @@ def test_an_uninformative_card_where_work_was_proven_is_a_loss():
     worked["state"]["work_evidence"] = {
         "proven": True, "reason": "call", "window_days": 1, "days_quiet": 0.2,
     }
-    losing, _n, _rem, _w, _f = split_sections([worked])
+    losing, _aband, _n, _rem, _w, _f = split_sections([worked])
     assert [r["deal_id"] for r in losing] == [16886]
 
 

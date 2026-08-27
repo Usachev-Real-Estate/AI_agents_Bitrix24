@@ -1009,6 +1009,9 @@ def apply_derived_verdict(
         # чём. Обвинять брокера на основании ответа, который спорит сам с
         # собой, нельзя.
         comment_informative=state["work_claims"]["comment_informative"],
+        abandoned_days=float(
+            (settings or get_settings()).client_state_abandoned_days,
+        ),
         # Ход за контрагентом снимает претензию за тишину: он сам назвал срок.
         next_step_who=str(_step.get("who") or ""),
         next_step_when=str(_step.get("when") or ""),

@@ -289,6 +289,14 @@ class Settings(BaseSettings):
         default=40_000,
         validation_alias="CLIENT_STATE_MAX_EVENT_CHARS",
     )
+    # Сколько дней тишины по карточке означают, что о ней просто забыли.
+    # Нормы этапов измеряются днями, и на их фоне сделка, где месяц не было
+    # ни звонка, ни комментария, — не отставание от каденса, а другой
+    # разговор: возвращать клиента или закрывать сделку.
+    client_state_abandoned_days: float = Field(
+        default=30.0,
+        validation_alias="CLIENT_STATE_ABANDONED_DAYS",
+    )
     client_state_transcript_retry_hours: float = Field(
         default=1.0,
         validation_alias="CLIENT_STATE_TRANSCRIPT_RETRY_HOURS",

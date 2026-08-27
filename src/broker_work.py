@@ -59,6 +59,12 @@ PROVEN_BY_PAUSE = "pause_explained"
 GAP_CLAIMED_MESSAGE = "claimed_message_no_proof"
 GAP_CLAIMED_NO_ANSWER = "claimed_no_answer_no_calls"
 GAP_EMPTY_COMMENT = "comment_says_nothing"
+# Карточка, о которой забыли. Нормы этапов измеряются днями, и сделка с
+# месяцем тишины среди них тонет: «последний след 107 дн. назад» стоит в
+# одном списке с «последний след 3 дн. назад» и читается так же. Это
+# другой разговор — не отставание от каденса, а решение: возвращать
+# клиента или закрывать сделку.
+GAP_ABANDONED = "abandoned"
 GAP_NO_TRACE = "no_trace"
 # Работа была, но раньше нормы этапа. Отдельно от GAP_NO_TRACE: карточка,
 # где брокер звонил четыре дня назад при норме два, и карточка, где не
@@ -142,6 +148,7 @@ REASON_RU: dict[str, str] = {
     # «следов работы нет (последний след 4 дн. назад)» — брокер звонил и
     # слал СМС, просто раньше нормы. Это опоздание, а не бездействие, и
     # обвинение должно звучать по факту.
+    GAP_ABANDONED: "карточка брошена",
     GAP_NO_TRACE: "следов работы нет вовсе",
     GAP_NO_TRACE_IN_WINDOW: "за норму этапа ни звонка, ни комментария",
     GAP_ONLY_PLANS: (
@@ -402,6 +409,7 @@ def assess_broker_work(
     claims_messaged: bool,
     comment_informative: bool,
     claims_no_answer: bool = False,
+    abandoned_days: float = 0.0,
     next_step_who: str = "",
     next_step_when: str = "",
     pause_explained: bool = False,
@@ -494,6 +502,23 @@ def assess_broker_work(
             ),
             "window_days": days,
             "days_quiet": days_quiet,
+        }
+
+    # Забытая карточка. Проверяется после паузы и хода за контрагентом:
+    # объяснённое молчание — не забвение. Но если объяснения нет, месяц
+    # тишины перестаёт быть отставанием от каденса и становится вопросом,
+    # ведём ли мы эту сделку вообще.
+    silent = days_quiet
+    if silent is None and hours_on_stage is not None:
+        # Событий нет вовсе — считаем от возраста карточки на этапе.
+        silent = hours_on_stage / 24.0
+    if abandoned_days > 0 and silent is not None and silent >= abandoned_days:
+        return {
+            "proven": False,
+            "reason": GAP_ABANDONED,
+            "window_days": days,
+            "days_quiet": days_quiet,
+            "abandoned_days": round(silent, 1),
         }
 
     # Ветка «комментарий» смотрит только на комментарии. Незакрытое дело
@@ -634,6 +659,16 @@ def next_action(
     work = state.get("work_evidence") if isinstance(
         state.get("work_evidence"), dict
     ) else {}
+    if str(work.get("reason") or "") == GAP_ABANDONED:
+        # По забытой карточке не «поставьте дело» — тут решают, ведём мы её
+        # дальше или нет, и это решение РОПа, а не напоминание брокеру.
+        quiet = work.get("abandoned_days")
+        span = f"{float(quiet):.0f} дн." if isinstance(quiet, (int, float)) else "месяцы"
+        return (
+            f"Карточка брошена {span} — решить: возвращать клиента в работу "
+            f"или закрывать сделку"
+        )
+
     fix = RECORD_FIXES.get(str(work.get("reason") or ""))
     if fix:
         # Претензия к записи в карточке отвечается записью, а не ожиданием.
