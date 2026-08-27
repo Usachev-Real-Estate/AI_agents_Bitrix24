@@ -188,10 +188,28 @@ def event_fingerprint(event: dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:FINGERPRINT_LEN]
 
 
-def compute_content_hash(events: list[dict[str, Any]]) -> str:
-    """Stable fingerprint of card evidence for skip-if-unchanged."""
+def compute_content_hash(
+    events: list[dict[str, Any]],
+    profile: FunnelProfile | None = None,
+) -> str:
+    """Отпечаток карточки: по нему решается, звать ли модель заново.
+
+    Кроме событий в отпечаток входит сам промпт. Без этого разбор, сделанный
+    по старым правилам, считался свежим до конца времён: карточка не менялась,
+    хэш совпадал, и новый факт, который мы просим у модели, на ней не
+    появлялся никогда. Так молчала пауза на #14776 — «клиент в отпуске до
+    сентября» лежало в карточке, а разбор был сделан до того, как мы
+    научились этот факт спрашивать.
+
+    Промпт меняется только вместе с набором фактов, которые модель извлекает,
+    поэтому его отпечаток и есть версия правил. Смена правил стоит одного
+    повторного разбора по каждой карточке — ровно столько, сколько стоит
+    честный ответ вместо устаревшего.
+    """
     payload = [_event_identity(e) for e in events]
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    if profile is not None:
+        raw += "\n" + profile.prompt
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -1072,7 +1090,7 @@ def analyze_deal(
         _as_list(record.get("transcripts")),
         mask_map,
     )
-    content_hash = compute_content_hash(events)
+    content_hash = compute_content_hash(events, profile)
     envelope["content_hash"] = content_hash
     # Расхождение между пересказом и разговором можно найти только там, где
     # разговор есть. Пока не видно, у скольких карточек расшифровка вообще
