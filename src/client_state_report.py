@@ -11,6 +11,7 @@ from typing import Any
 
 from broker_work import REASON_RU as WORK_REASON_RU
 from broker_work import GAP_ABANDONED
+from broker_work import PROVEN
 from broker_work import PROVEN_BY_PAUSE
 from broker_work import REMINDERS as WORK_REMINDERS
 from broker_work import TIMELESS_GAPS
@@ -79,6 +80,32 @@ REASON_RU: dict[str, str] = {
     "invalid_deal_id": "некорректный ID сделки",
     "unexpected_error": "непредвиденная ошибка",
 }
+
+
+# Причины, по которым карточка не прочитана и потому не судится ни в одном
+# разделе. «Этап вне контроля качества» сюда не входит: это решение агентства,
+# а не сбой чтения.
+UNREAD_REASONS = frozenset({
+    "evidence_incomplete",
+    "collect_error",
+    "llm_error",
+    "parse_error",
+    "invalid_deal_id",
+    "unexpected_error",
+})
+
+
+def unread_cards(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Карточки, которые прогон не смог прочитать или разобрать.
+
+    Они выпадали из тела отчёта целиком: состояния нет — раздел их
+    пропускает. Пустая «НЕДОРАБОТКА БРОКЕРА — 0» при этом заявляла «работа
+    подтверждена по всем карточкам», хотя часть карточек никто не открывал.
+    """
+    return [
+        r for r in results
+        if r.get("skipped") and str(r.get("reason") or "") in UNREAD_REASONS
+    ]
 
 
 def ru(value: Any, table: dict[str, str], default: str = UNKNOWN_RU) -> str:
@@ -241,13 +268,23 @@ def format_card(
         # Пометка, а не претензия: подтвердить слова брокера нечем, и это
         # видно. Направление звонка агентство решило не различать — важен
         # сам факт разговора.
+        #
+        # Срок называем: пометка считается по окну этапа, а не по всей
+        # истории карточки. «Звонка в таймлайне нет» на сделке, где звонили
+        # полгода назад, — неправда, и брокер вправе её оспорить.
+        window = work.get("window_days")
         lines.append(
-            "📵 Работа описана комментарием, звонка в таймлайне нет",
+            f"📵 Работа описана комментарием, звонка за {window} дн. нет"
+            if isinstance(window, (int, float))
+            else "📵 Работа описана комментарием, звонка за это время нет",
         )
 
     if state.get("recoverable") is False:
         lines.append("⚠️ Карточка неинформативна — картину клиента не восстановить")
-        if (state.get("work_evidence") or {}).get("proven", True):
+        # proven=True бывает и там, где судить ещё рано: отсрочка этапа
+        # возвращает «подтверждено», хотя работы не видели вовсе. Спрашиваем
+        # не про флаг, а про причину: работу видно тогда, когда её нашли.
+        if str((state.get("work_evidence") or {}).get("reason") or "") in PROVEN:
             # #16886 стояла в «теряем клиента» без единой строки о том, почему.
             # Температура «неизвестно», претензий к работе нет — и раздел
             # выглядит ошибкой. Причина есть, и её надо назвать: клиент теряется
@@ -279,6 +316,23 @@ def format_card(
     return "\n".join(lines)
 
 
+def _analyzed_line(stats: dict[str, Any]) -> str:
+    """Первая строка шапки: сколько карточек и сколько из них читала модель.
+
+    Пустая карточка разбирается без модели — читать в ней нечего. Считать её
+    «разобранной моделью» значит показывать РОПу работу, которой не было, и
+    завышать знаменатель, по которому судят о качестве разбора.
+    """
+    total = int(stats.get("total") or 0)
+    analyzed = int(stats.get("analyzed") or 0)
+    empty = int(stats.get("empty_cards") or 0)
+    by_model = max(0, analyzed - empty)
+    line = f"Карточек: {total} · разобрано моделью: {by_model}"
+    if empty:
+        line += f" · пустых, без модели: {empty}"
+    return line
+
+
 def format_summary(stats: dict[str, Any]) -> str:
     """Шапка отчёта по одной воронке.
 
@@ -291,8 +345,7 @@ def format_summary(stats: dict[str, Any]) -> str:
     label = stats.get("funnel_label") or stats.get("funnel") or "Воронка"
     parts = [
         f"━━━ [B]{label.upper()}[/B] ━━━",
-        f"Карточек: {int(stats.get('total') or 0)} · "
-        f"разобрано моделью: {int(stats.get('analyzed') or 0)}",
+        _analyzed_line(stats),
         " | ".join(
             f"{TEMPERATURE_ICON[key]} {TEMPERATURE_RU[key]} "
             f"{int(temperature.get(key) or 0)}"
@@ -313,12 +366,22 @@ def format_summary(stats: dict[str, Any]) -> str:
     with_calls = int(stats.get("cards_with_call") or 0)
     readable = int(stats.get("cards_with_transcript") or 0)
     total = int(stats.get("total") or 0)
-    if total:
+    # Знаменатель — карточки, таймлайн которых мы прочитали. Считали же
+    # числитель только по ним: непрочитанная карточка не может дать звонок,
+    # и делить одно на другое значит занижать долю тем сильнее, чем хуже
+    # отвечал портал. Старые прогоны ключа не знают — там остаётся total.
+    read = int(stats.get("cards_read") or 0) or total
+    if read:
         # Сначала звонки, потом расшифровки: после снятия сверки главное
         # доказательство работы — сам факт разговора, а не его текст. Одна
         # строка «разговор читается у 0 из 10» читалась как «звонков не
         # было», хотя звонки были и ни один не расшифрован.
-        line = f"📞 Звонки есть у {with_calls} из {total} карточек"
+        line = (
+            f"📞 Звонки есть у {with_calls} из {read} карточек"
+            if read == total
+            else f"📞 Звонки есть у {with_calls} из {read} прочитанных "
+                 f"(всего {total})"
+        )
         if readable != with_calls:
             line += f", разговор читается у {readable}"
         pending = int(stats.get("transcripts_pending") or 0)
@@ -336,7 +399,8 @@ def format_summary(stats: dict[str, Any]) -> str:
     silent = int(stats.get("cards_without_a_call") or 0)
     if silent:
         parts.append(
-            f"📵 Работа только на словах брокера (звонка в таймлайне нет): {silent}",
+            "📵 Работа только на словах брокера "
+            f"(звонка за окно этапа нет): {silent}",
         )
 
     agents = int(stats.get("agent_cards") or 0)
@@ -566,6 +630,13 @@ def format_sections(
     ) = split_sections(results)
     blocks: list[str] = []
     printed: set[int] = set()
+    unread = unread_cards(results)
+    # Оговорка для пустых разделов: «ни одной» и «по всем» верны только про
+    # то, что мы прочитали. Молчать об остальном — значит выдать непрочитанное
+    # за проверенное.
+    caveat = (
+        f" Не прочитано карточек: {len(unread)}." if unread else ""
+    )
 
     def _block(header: str, rows: list[dict[str, Any]], empty: str) -> None:
         blocks.append(f"[B]{header}[/B]")
@@ -589,14 +660,14 @@ def format_sections(
 
     _block(
         f"🚨 ТЕРЯЕМ КЛИЕНТА — {len(losing)}", losing,
-        "Ни одной карточки с признаками потери.",
+        "Ни одной карточки с признаками потери." + caveat,
     )
     if abandoned:
         # Раньше недоработок: месяц тишины срочнее, чем отставание на три дня.
         _block(f"🕸 БРОШЕНЫ — {len(abandoned)}", abandoned, "")
     _block(
         f"🔧 НЕДОРАБОТКА БРОКЕРА — {len(neglected)}", neglected,
-        "Работа подтверждена по всем карточкам.",
+        "Работа подтверждена по всем прочитанным карточкам." + caveat,
     )
     if reminders:
         # Не претензия, а напоминание: ход за контрагентом, и вернуться к
@@ -651,6 +722,19 @@ def format_sections(
 
     _one_liners("⏳ РАНО СУДИТЬ", waiting)
     _one_liners("✅ В РАБОТЕ", fine)
+
+    if unread:
+        # Отдельный список, а не строка в шапке: РОПу нужно знать, какие
+        # именно сделки прогон не видел. Иначе «всё хорошо» относится и к ним.
+        blocks.append(f"[B]👁 НЕ ПРОЧИТАНЫ — {len(unread)}[/B]")
+        for row in unread:
+            deal_id = int(row.get("deal_id") or 0)
+            reason = str(row.get("reason") or "")
+            blocks.append(
+                f"#{deal_id} {card_title(titles.get(deal_id))} — "
+                f"{REASON_RU.get(reason, reason)}".strip(),
+            )
+        blocks.append("")
     return "\n".join(blocks).strip()
 
 

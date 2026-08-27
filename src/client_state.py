@@ -1511,6 +1511,9 @@ def run_client_state(
         # Карточек, по которым разговор вообще можно прочитать. Без этого
         # «расхождений 0» неотличимо от «сравнивать было не с чем».
         "cards_with_call": 0,
+        # Карточек, таймлайн которых прогон вообще прочитал. Знаменатель для
+        # «звонки есть у N из M»: непрочитанная карточка звонка дать не может.
+        "cards_read": 0,
         "cards_with_transcript": 0,
         "transcripts_pending": 0,
         "transcripts_failed": 0,
@@ -1567,6 +1570,11 @@ def run_client_state(
         stats["results"].append(result)
         # Считаем и по карточкам из кэша: расшифровка от разбора не зависит.
         counts = result.get("transcripts") or {}
+        # Ключ появляется только после успешного чтения карточки — по его
+        # наличию и считаем прочитанные, а не по значению: False здесь
+        # значит «звонков нет», а не «не читали».
+        if "has_call" in result:
+            stats["cards_read"] += 1
         if result.get("has_call"):
             stats["cards_with_call"] += 1
         if int(counts.get("ready") or 0) > 0:
