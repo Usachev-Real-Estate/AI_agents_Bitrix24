@@ -106,6 +106,25 @@ def format_next_step(step: Any) -> str:
     return f"{what} ({when}, {who})"
 
 
+# Сколько символов названия сделки помещается в строку отчёта. Дальше —
+# рекламный текст, а не название.
+TITLE_LIMIT = 90
+
+
+def card_title(title: Any) -> str:
+    """Название сделки в одну строку.
+
+    #16422 называется целым объявлением с Циан: три строки текста, пустая
+    строка внутри и цена. Отчёт печатал его как есть, ссылка на сделку
+    уезжала на четвёртую строку, и карточка переставала читаться. Битрикс
+    переносы в названии разрешает — значит их убирать нам.
+    """
+    text = " ".join(str(title or "").split())
+    if len(text) <= TITLE_LIMIT:
+        return text
+    return text[:TITLE_LIMIT].rstrip() + "…"
+
+
 def format_card(
     result: dict[str, Any],
     title: str,
@@ -123,7 +142,7 @@ def format_card(
     state = result.get("state") or {}
 
     lines = [
-        f"[B]#{deal_id}[/B] {title}".rstrip(),
+        f"[B]#{deal_id}[/B] {card_title(title)}".rstrip(),
         f"[URL]{deal_url(webhook_url, deal_id)}[/URL]",
     ]
 
@@ -518,7 +537,7 @@ def format_sections(
                 # Карточка уже напечатана разбором выше. Повторять её целиком
                 # значит удвоить отчёт ради строки, которую читатель только
                 # что прочёл.
-                blocks.append(f"#{deal_id} {title} — см. выше".strip())
+                blocks.append(f"#{deal_id} {card_title(title)} — см. выше".strip())
                 blocks.append("")
                 continue
             printed.add(deal_id)
@@ -581,7 +600,7 @@ def format_sections(
                 "no_outgoing_call"
             ) else ""
             blocks.append(
-                f"{icon} #{deal_id} {titles.get(deal_id, '')} — "
+                f"{icon} #{deal_id} {card_title(titles.get(deal_id))} — "
                 f"{step}{pause}{silent}{poor}".strip(),
             )
         blocks.append("")
