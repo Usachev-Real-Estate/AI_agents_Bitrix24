@@ -176,6 +176,12 @@ def build_evidence_events(
         if not body:
             continue
         normalized["text"] = apply_mask(body, mask_map)
+        # Маска кладётся в text, а сырые subject и description оставались в
+        # том же событии — и уезжали в модель рядом с замаскированной копией.
+        # Маскируем и их: событие целиком уходит в JSON запроса, и «поле, из
+        # которого мы собрали текст» ничем не безопаснее самого текста.
+        normalized["subject"] = apply_mask(normalized["subject"], mask_map)
+        normalized["description"] = apply_mask(normalized["description"], mask_map)
         events.append(normalized)
     for item in transcripts:
         if not isinstance(item, dict):
@@ -715,6 +721,16 @@ def unmask_state(
         signals["objections"] = [
             unmask(str(v), mask_map) for v in signals.get("objections") or []
         ]
+    # Совет и тема дела собираются из замаскированных событий, а читает их
+    # РОП. Без разворота строка «➡️ связаться по делу «Звонок КЛИЕНТ_1»»
+    # стоит под строкой с настоящим именем в шапке карточки.
+    out["next_action"] = unmask(str(out.get("next_action") or ""), mask_map)
+    evidence = out.get("work_evidence")
+    if isinstance(evidence, dict):
+        due = evidence.get("due_task")
+        if isinstance(due, dict):
+            due["subject"] = unmask(str(due.get("subject") or ""), mask_map)
+
     work = out.get("broker_work")
     if isinstance(work, dict):
         # Причину паузы читают люди в отчёте — иначе там будет «КЛИЕНТ_1
@@ -734,6 +750,7 @@ def build_llm_payload(
     new_events: list[dict[str, Any]],
     all_events: list[dict[str, Any]],
     profile: FunnelProfile = BUYER_PROFILE,
+    mask_map: MaskMap | None = None,
 ) -> str:
     """Human message body for incremental state update.
 
@@ -755,7 +772,15 @@ def build_llm_payload(
         "stage_id": stage_id,
         "facts_needed": facts_needed,
         "deal_id": _coerce_int(deal.get("ID") or deal.get("id")),
-        "title": _clean_str(deal.get("TITLE") or deal.get("title")),
+        # Название сделки в этом агентстве — это ФИО клиента, а нередко и
+        # телефон: «Лариса (Клекова) агент», «Гуля Базарова (Шахмурад)».
+        # Событиям маску ставили, а названию — нет, и оно уезжало в модель
+        # первой же строкой запроса.
+        "title": (
+            apply_mask(_clean_str(deal.get("TITLE") or deal.get("title")), mask_map)
+            if mask_map is not None
+            else _clean_str(deal.get("TITLE") or deal.get("title"))
+        ),
         "previous_state": previous_state,
         "new_events": new_events,
         "event_count_total": len(all_events),
@@ -827,9 +852,12 @@ def analyze_with_llm(
     llm: LLMClient,
     profile: FunnelProfile = BUYER_PROFILE,
     usage_sink: dict[str, int] | None = None,
+    mask_map: MaskMap | None = None,
 ) -> dict[str, Any] | None:
     """Call LLM and return normalized client state."""
-    human = build_llm_payload(deal, previous_state, new_events, all_events, profile)
+    human = build_llm_payload(
+        deal, previous_state, new_events, all_events, profile, mask_map,
+    )
     response = llm.invoke([
         SystemMessage(content=profile.prompt),
         HumanMessage(content=human),
@@ -1225,7 +1253,7 @@ def analyze_deal(
         try:
             state = analyze_with_llm(
                 record, previous_state, new_events, events, model, profile,
-                usage_sink=usage,
+                usage_sink=usage, mask_map=mask_map,
             )
         except Exception as exc:  # noqa: BLE001 — одна карточка не роняет батч
             logger.warning("Client state LLM failed for deal %s: %s", deal_id, exc)

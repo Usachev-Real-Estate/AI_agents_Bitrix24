@@ -759,7 +759,7 @@ def test_deleted_event_does_not_trigger_a_paid_call(tmp_path, monkeypatch):
 
     calls: list[int] = []
 
-    def _fake_llm(deal, prev, new_events, all_events, model, profile, usage_sink=None):
+    def _fake_llm(deal, prev, new_events, all_events, model, profile, usage_sink=None, **_kw):
         calls.append(len(new_events))
         return cs._normalize_state({"client_goal": "2к", "confidence": 0.7}, profile)
 
@@ -805,7 +805,7 @@ def test_second_run_sends_only_the_new_comment(tmp_path, monkeypatch):
     ]
     sent: list[list[str]] = []
 
-    def _fake_llm(deal, prev, new_events, all_events, model, profile, usage_sink=None):
+    def _fake_llm(deal, prev, new_events, all_events, model, profile, usage_sink=None, **_kw):
         sent.append([str(e.get("text")) for e in new_events])
         return cs._normalize_state({"client_goal": "2к", "confidence": 0.7}, profile)
 
@@ -1008,7 +1008,7 @@ def test_cached_state_is_unmasked_before_it_reaches_the_report(tmp_path, monkeyp
     }
     monkeypatch.setattr(cs, "prepare_deal_record", lambda d, **k: dict(card))
 
-    def _fake_llm(deal, prev, new_events, all_events, model, profile, usage_sink=None):
+    def _fake_llm(deal, prev, new_events, all_events, model, profile, usage_sink=None, **_kw):
         return cs._normalize_state({
             "client_goal": "2к",
             "situation": "Созвонился с КЛИЕНТ_1, ищет 2к",
@@ -1050,7 +1050,7 @@ def test_force_actually_re_reads_a_card_with_no_new_events(tmp_path, monkeypatch
 
     sent: list[int] = []
 
-    def _fake_llm(deal, prev, new_events, all_events, model, profile, usage_sink=None):
+    def _fake_llm(deal, prev, new_events, all_events, model, profile, usage_sink=None, **_kw):
         sent.append(len(new_events))
         return cs._normalize_state({"client_goal": "2к", "confidence": 0.7}, profile)
 
@@ -1220,7 +1220,7 @@ def test_a_card_with_one_comment_still_goes_to_the_model(tmp_path, monkeypatch):
     monkeypatch.setattr(cs, "prepare_deal_record", lambda d, **k: dict(card))
     called: list[int] = []
 
-    def _fake(deal, prev, new_events, all_events, model, profile, usage_sink=None):
+    def _fake(deal, prev, new_events, all_events, model, profile, usage_sink=None, **_kw):
         called.append(1)
         return cs._normalize_state({"client_goal": "2к", "confidence": 0.6}, profile)
 
@@ -1285,7 +1285,7 @@ def test_a_quiet_card_stops_being_too_early_as_the_stage_ages(tmp_path, monkeypa
     fresh = _grace_card(901, (now - timedelta(hours=1)).isoformat())
     monkeypatch.setattr(cs, "prepare_deal_record", lambda d, **k: dict(fresh))
 
-    def _fake(deal, prev, new_events, all_events, model, profile, usage_sink=None):
+    def _fake(deal, prev, new_events, all_events, model, profile, usage_sink=None, **_kw):
         return cs._normalize_state({"client_goal": "2к", "confidence": 0.6}, profile)
 
     monkeypatch.setattr(cs, "analyze_with_llm", _fake)
