@@ -18,6 +18,7 @@ from funnel_profiles import BUYER_PROFILE, SELLER_PROFILE, FunnelProfile
 from broker_work import (
     assess_broker_work,
     comment_without_a_call,
+    has_any_call,
     has_open_future_task,
     next_action,
 )
@@ -1099,12 +1100,15 @@ def analyze_deal(
     )
     content_hash = compute_content_hash(events, profile)
     envelope["content_hash"] = content_hash
-    # Расхождение между пересказом и разговором можно найти только там, где
-    # разговор есть. Пока не видно, у скольких карточек расшифровка вообще
-    # читается, «расхождений 0» ничего не значит: это может быть и чистая
-    # база, и полное отсутствие первоисточника. Считается до кэша — событий
-    # это не меняет, а цифра нужна и по карточкам из кэша.
+    # Звонок в таймлайне — главное доказательство работы после того, как
+    # сверку пересказа с расшифровкой сняли. Строка «разговор читается у 0
+    # из 10» читалась как «звонков не было», хотя на деле звонки были, а не
+    # расшифрован ни один: 19 записей «не готово» на десять карточек.
+    # Считаем и то и другое, чтобы не путать отсутствие звонка с отсутствием
+    # расшифровки. До кэша: событий это не меняет, а цифра нужна и по
+    # карточкам из кэша.
     envelope["transcripts"] = _transcript_counts(events)
+    envelope["has_call"] = has_any_call(events)
 
     # Кэш читается и в DRY_RUN: чтение ничего не меняет, а без него тестовый
     # прогон заново гоняет модель по всем карточкам. Повторный разбор — по force.
@@ -1356,6 +1360,7 @@ def card_digest(result: dict[str, Any]) -> dict[str, Any]:
         "has_next_action": bool(str(state.get("next_action") or "").strip()),
         "no_call": bool(state.get("no_call")),
         "transcripts": dict(result.get("transcripts") or {}),
+        "has_call": bool(result.get("has_call")),
     }
 
 
@@ -1420,6 +1425,7 @@ def run_client_state(
         "evidence_dropped": 0,
         # Карточек, по которым разговор вообще можно прочитать. Без этого
         # «расхождений 0» неотличимо от «сравнивать было не с чем».
+        "cards_with_call": 0,
         "cards_with_transcript": 0,
         "transcripts_pending": 0,
         "transcripts_failed": 0,
@@ -1476,6 +1482,8 @@ def run_client_state(
         stats["results"].append(result)
         # Считаем и по карточкам из кэша: расшифровка от разбора не зависит.
         counts = result.get("transcripts") or {}
+        if result.get("has_call"):
+            stats["cards_with_call"] += 1
         if int(counts.get("ready") or 0) > 0:
             stats["cards_with_transcript"] += 1
         stats["transcripts_pending"] += int(counts.get("pending") or 0)
