@@ -15,7 +15,12 @@ from config import Settings, get_settings
 from db import get_client_state, init_db, save_client_state
 from lead_quality_audit import _message_content_to_str
 from funnel_profiles import BUYER_PROFILE, SELLER_PROFILE, FunnelProfile
-from broker_work import assess_broker_work, next_action
+from broker_work import (
+    assess_broker_work,
+    comment_without_outgoing_call,
+    has_open_future_task,
+    next_action,
+)
 from counterparty import (
     WHO_CLIENT,
     classify_counterparty,
@@ -40,60 +45,6 @@ logger = logging.getLogger(__name__)
 CALL_ACTIVITY_TYPE_ID = 2
 VALID_RISKS = frozenset({"low", "medium", "high"})
 VALID_NEXT_STEP_WHO = frozenset({"broker", "client", "unknown"})
-
-BUYER_CLIENT_STATE_SYSTEM_PROMPT = """\
-Ты аналитик CRM по сделкам покупателей недвижимости.
-
-Задача: восстановить состояние клиента по карточке — что ищет, что происходит,
-следующий шаг, риски. Ты НЕ оцениваешь брокера и НЕ придумываешь факты.
-
-Правила:
-1. Каждое утверждение подкрепляй дословной цитатой в массиве evidence.
-   Без цитаты поле оставь пустым / unknown / добавь в missing.
-2. «Не знаю» — нормальный ответ. Лучше низкий confidence и missing,
-   чем правдоподобная выдумка.
-3. Расшифровки звонков — сплошной текст без разделения спикеров.
-   Если неясно, кто говорил, так и пиши; не приписывай реплику клиенту наугад.
-4. null / отсутствие расшифровки означает «текст ещё не готов», а не «звонка не было».
-5. recoverable=false — если по карточке нельзя восстановить картину клиента
-   (типичный пример: «созвонился, договорились» без деталей).
-6. Сверяй источники. Комментарий брокера — это пересказ, расшифровка звонка —
-   первоисточник. Если они расходятся, занеси это в contradictions с ДВУМЯ
-   цитатами: что записано в карточке и что слышно в разговоре. Не расходятся —
-   оставь contradictions пустым. Расхождение ≠ обвинение: возможно, брокер
-   просто не обновил карточку.
-7. signals — только факты, каждый с цитатой. Не выводи их «по ощущению»:
-   не нашёл подтверждения — ставь false / unknown.
-
-Ответ — один JSON-объект (без markdown), строго по схеме:
-{
-  "client_goal": "string",
-  "situation": "string",
-  "last_event": {"what": "string", "when": "YYYY-MM-DD or unknown"},
-  "next_step": {"what": "string", "when": "string", "who": "broker|client|unknown"},
-  "blockers": ["string"],
-  "risk": "low|medium|high",
-  "recoverable": true,
-  "missing": ["string"],
-  "confidence": 0.0,
-  "evidence": ["string"],
-  "contradictions": [
-    {"what": "в чём расходится", "in_card": "цитата из карточки",
-     "in_call": "цитата из разговора", "severity": "low|medium|high"}
-  ],
-  "signals": {
-    "budget_named": false,
-    "budget_value": "string or unknown",
-    "timeline_named": false,
-    "timeline_horizon": "до месяца|1-3 месяца|более 3 месяцев|unknown",
-    "next_step_agreed": false,
-    "next_step_date": "YYYY-MM-DD or unknown",
-    "client_responsive": true,
-    "shows_count": 0,
-    "objections": ["string"]
-  }
-}
-"""
 
 
 class LLMClient(Protocol):
@@ -341,49 +292,9 @@ def verify_evidence(
     return verified, invented
 
 
-def split_corpora(events: list[dict[str, Any]]) -> tuple[str, str]:
-    """Split card evidence into (what the broker wrote, what was said on calls).
-
-    A contradiction only means something if its two quotes come from different
-    sources: the card is the retelling, the transcript is the primary record.
-    """
-    card_parts: list[str] = []
-    call_parts: list[str] = []
-    for event in events:
-        text = str(event.get("text") or "")
-        if not text:
-            continue
-        if event.get("kind") == "transcript":
-            call_parts.append(text)
-        else:
-            card_parts.append(text)
-    return (
-        _normalize_for_match(" ".join(card_parts)),
-        _normalize_for_match(" ".join(call_parts)),
-    )
-
-
-def verify_contradictions(
-    rows: list[dict[str, Any]],
-    card_corpus: str,
-    call_corpus: str,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Keep only contradictions whose both quotes are real and from both sides.
-
-    A fabricated contradiction is an accusation against a broker, so the bar is
-    higher than for a plain summary: each side must be found in its own source.
-    """
-    verified: list[dict[str, Any]] = []
-    rejected: list[dict[str, Any]] = []
-    for row in rows:
-        in_card = _normalize_for_match(row.get("in_card"))
-        in_call = _normalize_for_match(row.get("in_call"))
-        if in_card and in_call and in_card in card_corpus and in_call in call_corpus:
-            verified.append(row)
-        else:
-            rejected.append(row)
-    return verified, rejected
-
+# Ключ факта «следующий шаг с датой»: единственный, который можно закрыть
+# не текстом карточки, а самой CRM.
+NEXT_STEP_FACT = "next_step"
 
 VALID_VERDICTS = frozenset({"good", "tolerable", "poor", "too_early", "out_of_qc"})
 
@@ -479,6 +390,7 @@ def compute_completeness_verdict(
     *,
     hours_on_stage: float | None,
     qualification_ok: bool | None = None,
+    task_scheduled: bool = False,
 ) -> tuple[str, str]:
     """Итог по карточке: хорошо / терпимо / плохо / рано судить / вне QC.
 
@@ -495,18 +407,6 @@ def compute_completeness_verdict(
     """
     if stage_id in profile.stages_out_of_qc:
         return "out_of_qc", "этап не в контроле качества (у руководства)"
-
-    contradictions = state.get("contradictions") or []
-    material = [
-        c for c in contradictions
-        if str(c.get("severity", "medium")).lower() in MATERIAL_SEVERITY
-    ]
-    minor = [
-        c for c in contradictions
-        if str(c.get("severity", "medium")).lower() in MINOR_SEVERITY
-    ]
-    if material:
-        return "poor", f"существенных расхождений: {len(material)}"
 
     requirements = profile.stage_requirements.get(stage_id, ())
     required_keys = [key for key, _name in requirements]
@@ -549,9 +449,19 @@ def compute_completeness_verdict(
         return "poor", "по карточке нельзя восстановить картину клиента"
 
     stage_facts = state.get("stage_facts") or {}
+
+    def _present(key: str) -> bool:
+        if (stage_facts.get(key) or {}).get("present"):
+            return True
+        # Следующий шаг засчитывается двумя способами: он написан в
+        # комментарии — или по карточке стоит дело в Битриксе. Дело с датой
+        # и есть следующий шаг, причём доказательство лучше пересказа: его
+        # видно в CRM, а не только на словах брокера.
+        return key == NEXT_STEP_FACT and task_scheduled
+
     missing = [
         fact_names.get(key, key) for key in required_keys
-        if not (stage_facts.get(key) or {}).get("present")
+        if not _present(key)
     ]
 
     qual_gap = qualification_ok is False
@@ -565,16 +475,14 @@ def compute_completeness_verdict(
             "не хватает обязательных фактов: " + ", ".join(missing) + score
             + (" · ключевые поля карточки не заполнены" if qual_gap else "")
         )
-    if missing or minor or qual_gap:
+    if missing or qual_gap:
         reasons = []
         if missing:
             reasons.append(f"нет факта: {missing[0]}{score}")
-        if minor:
-            reasons.append(f"мелкие расхождения: {len(minor)}")
         if qual_gap:
             reasons.append("не все ключевые поля карточки заполнены")
         return "tolerable", "; ".join(reasons)
-    return "good", "обязательные факты есть, расхождений с разговором нет"
+    return "good", "обязательные факты на месте"
 
 
 def compute_temperature(
@@ -618,11 +526,8 @@ def _coerce_float(value: Any, default: float = 0.0) -> float:
 VALID_HORIZONS = frozenset({
     "до месяца", "1-3 месяца", "более 3 месяцев", "unknown",
 })
-VALID_SEVERITY = frozenset({"low", "medium", "high"})
 # LLM ставит severity низкий/средний/высокий. Порог по цифрам (30 %) прописан
 # в промпте; здесь только разделяем на мелкое (low) и существенное (medium/high).
-MINOR_SEVERITY = frozenset({"low"})
-MATERIAL_SEVERITY = frozenset({"medium", "high"})
 
 
 def _normalize_stage_facts(raw: Any) -> dict[str, dict[str, Any]]:
@@ -672,26 +577,6 @@ def _normalize_signals(raw: Any, profile: FunnelProfile) -> dict[str, Any]:
     return signals
 
 
-def _normalize_contradictions(raw: Any) -> list[dict[str, Any]]:
-    rows = raw if isinstance(raw, list) else []
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        severity = str(row.get("severity") or "medium").strip().lower()
-        if severity not in VALID_SEVERITY:
-            severity = "medium"
-        item = {
-            "what": _clean_str(row.get("what")),
-            "in_card": _clean_str(row.get("in_card")),
-            "in_call": _clean_str(row.get("in_call")),
-            "severity": severity,
-        }
-        if item["what"] and item["in_card"] and item["in_call"]:
-            out.append(item)
-    return out
-
-
 def _normalize_state(
     raw: dict[str, Any],
     profile: FunnelProfile = BUYER_PROFILE,
@@ -725,7 +610,6 @@ def _normalize_state(
         "missing": [_clean_str(x) for x in missing if _clean_str(x)],
         "confidence": max(0.0, min(1.0, _coerce_float(raw.get("confidence"), 0.0))),
         "evidence": [_clean_str(x) for x in evidence if _clean_str(x)],
-        "contradictions": _normalize_contradictions(raw.get("contradictions")),
         "signals": _normalize_signals(raw.get("signals"), profile),
         "stage_facts": _normalize_stage_facts(raw.get("stage_facts")),
         "broker_work": _normalize_broker_work(raw.get("broker_work")),
@@ -777,10 +661,6 @@ def unmask_state(
         values = out.get(key)
         if isinstance(values, list):
             out[key] = [unmask(str(v), mask_map) for v in values]
-    for row in out.get("contradictions") or []:
-        if isinstance(row, dict):
-            for key in ("what", "in_card", "in_call"):
-                row[key] = unmask(str(row.get(key) or ""), mask_map)
     signals = out.get("signals")
     if isinstance(signals, dict):
         for key in profile.text_signals:
@@ -1031,6 +911,7 @@ def apply_derived_verdict(
         stage_id, state, profile,
         hours_on_stage=hours_on_stage,
         qualification_ok=qualification_ok,
+        task_scheduled=has_open_future_task(events or []),
     )
     state["verdict"] = verdict
     state["verdict_reason"] = verdict_reason
@@ -1072,6 +953,10 @@ def apply_derived_verdict(
     # в карточке», а это два разных разговора: первый — про промпт, второй —
     # про то, что модель сослалась на несуществующую фразу.
     state["work_claims"] = {
+        "comment_informative": (
+            bool(work.get("comment_informative", True))
+            or state.get("recoverable") is not False
+        ),
         "claims_messaged": _claimed(
             "claims_messaged", "claims_messaged_quote", "написал клиенту",
         ),
@@ -1082,6 +967,15 @@ def apply_derived_verdict(
             "pause_explained", "pause_reason_quote", "причина паузы",
         ),
     }
+    # Пометка, а не претензия: работа описана комментарием, а звонил ли
+    # брокер клиенту — не видно. Считается отдельно от оценки работы и на
+    # разделы отчёта не влияет.
+    state["no_outgoing_call"] = comment_without_outgoing_call(
+        events or [],
+        profile=profile,
+        stage_id=stage_id,
+        comment_informative=state["work_claims"]["comment_informative"],
+    )
     state["work_evidence"] = assess_broker_work(
         events or [],
         profile=profile,
@@ -1095,10 +989,7 @@ def apply_derived_verdict(
         # и ожидание оценки — и тем же ответом заявила, что комментарий ни о
         # чём. Обвинять брокера на основании ответа, который спорит сам с
         # собой, нельзя.
-        comment_informative=(
-            bool(work.get("comment_informative", True))
-            or state.get("recoverable") is not False
-        ),
+        comment_informative=state["work_claims"]["comment_informative"],
         # Ход за контрагентом снимает претензию за тишину: он сам назвал срок.
         next_step_who=str(_step.get("who") or ""),
         next_step_when=str(_step.get("when") or ""),
@@ -1309,21 +1200,6 @@ def analyze_deal(
             state["missing"].append("подтверждённые цитаты")
     envelope["evidence_dropped"] = len(invented)
 
-    # Расхождение — это претензия к брокеру, поэтому планка выше, чем у
-    # обычной цитаты: обе стороны должны найтись каждая в своём источнике.
-    card_corpus, call_corpus = split_corpora(events)
-    confirmed, unfounded = verify_contradictions(
-        state.get("contradictions", []), card_corpus, call_corpus,
-    )
-    state["contradictions"] = confirmed
-    if unfounded:
-        logger.warning(
-            "Deal %s: %d contradiction(s) not confirmed by both sources — dropped",
-            deal_id,
-            len(unfounded),
-        )
-    envelope["contradictions_dropped"] = len(unfounded)
-
     # Проверить цитаты stage_facts: любая невалидная цитата → factum отсутствует.
     # Если модель поставила present=True, но цитаты нет в карточке — это
     # выдумка, обнуляем факт вместо того чтобы засчитать его.
@@ -1417,7 +1293,6 @@ def card_digest(result: dict[str, Any]) -> dict[str, Any]:
     work = state.get("work_evidence") or {}
     raw = state.get("broker_work") or {}
     facts = state.get("stage_facts") or {}
-    contradictions = [c for c in state.get("contradictions") or [] if isinstance(c, dict)]
     present = sum(
         1 for f in facts.values()
         if isinstance(f, dict) and f.get("present")
@@ -1442,11 +1317,6 @@ def card_digest(result: dict[str, Any]) -> dict[str, Any]:
         "facts_needed": len(facts),
         "missing": len(state.get("missing") or []),
         "evidence": len(state.get("evidence") or []),
-        "contradictions": len(contradictions),
-        "contradictions_material": sum(
-            1 for c in contradictions
-            if str(c.get("severity", "medium")).lower() in MATERIAL_SEVERITY
-        ),
         # Что сказала модель и что от этого осталось после сверки цитат.
         "model_flags": {
             key: bool(raw.get(key))
@@ -1458,6 +1328,7 @@ def card_digest(result: dict[str, Any]) -> dict[str, Any]:
         "comment_informative": bool(raw.get("comment_informative", True)),
         "pause_until": _clean_str(raw.get("pause_until")),
         "has_next_action": bool(str(state.get("next_action") or "").strip()),
+        "no_outgoing_call": bool(state.get("no_outgoing_call")),
         "transcripts": dict(result.get("transcripts") or {}),
     }
 
@@ -1519,11 +1390,8 @@ def run_client_state(
         "errors": 0,
         "unrecoverable": 0,
         "agent_cards": 0,
+        "cards_without_outgoing_call": 0,
         "evidence_dropped": 0,
-        "contradictions_found": 0,
-        "contradictions_minor": 0,
-        "contradictions_material": 0,
-        "contradictions_dropped": 0,
         # Карточек, по которым разговор вообще можно прочитать. Без этого
         # «расхождений 0» неотличимо от «сравнивать было не с чем».
         "cards_with_transcript": 0,
@@ -1625,6 +1493,8 @@ def run_client_state(
                     stats["unrecoverable"] += 1
                 if _is_agent_card(cached):
                     stats["agent_cards"] += 1
+                if cached.get("no_outgoing_call"):
+                    stats["cards_without_outgoing_call"] += 1
             continue
         stats["analyzed"] += 1
         if result.get("empty_card"):
@@ -1632,20 +1502,7 @@ def run_client_state(
         if result.get("stage_age_known") is False:
             stats["stage_age_unknown"] += 1
         stats["evidence_dropped"] += int(result.get("evidence_dropped") or 0)
-        stats["contradictions_dropped"] += int(
-            result.get("contradictions_dropped") or 0,
-        )
         state = result.get("state") or {}
-        contradictions = state.get("contradictions") or []
-        stats["contradictions_found"] += len(contradictions)
-        stats["contradictions_material"] += sum(
-            1 for c in contradictions
-            if str(c.get("severity", "medium")).lower() in MATERIAL_SEVERITY
-        )
-        stats["contradictions_minor"] += sum(
-            1 for c in contradictions
-            if str(c.get("severity", "medium")).lower() in MINOR_SEVERITY
-        )
         level = str(state.get("temperature") or "unknown")
         if level in stats["temperature"]:
             stats["temperature"][level] += 1
@@ -1660,6 +1517,8 @@ def run_client_state(
             stats["unrecoverable"] += 1
         if _is_agent_card(state):
             stats["agent_cards"] += 1
+        if state.get("no_outgoing_call"):
+            stats["cards_without_outgoing_call"] += 1
     usage = stats["usage"]
     # Делим неокруглённую сумму: цена за карточку — это копейки, и округление
     # до рублей перед делением её заметно искажает.

@@ -38,7 +38,6 @@ def _state(**over: Any) -> dict[str, Any]:
         "temperature_reason": "не названы сроки",
         "verdict": "poor",
         "verdict_reason": "не хватает обязательных фактов: budget",
-        "contradictions": [],
     }
     state.update(over)
     return state
@@ -51,6 +50,8 @@ def _result(**over: Any) -> dict[str, Any]:
 
 
 # ── Перевод значений ───────────────────────────────────────────────────
+
+
 def test_no_service_codes_leak_into_the_report():
     card = format_card(_result(), "ЖК «Will Towers»", WEBHOOK)
     for code in ("warm", "medium", "broker", "poor", "unknown"):
@@ -94,6 +95,8 @@ def test_unknown_code_is_shown_as_is_not_swallowed():
 
 
 # ── Кэш вместо «Пропуск» ───────────────────────────────────────────────
+
+
 def test_cached_card_shows_the_previous_analysis():
     card = format_card(
         _result(skipped=True, reason="no_new_events"), "Михаил Лужники", WEBHOOK,
@@ -127,27 +130,13 @@ def test_analyzed_card_carries_no_cache_marker():
 
 
 # ── Прочее ─────────────────────────────────────────────────────────────
+
+
 def test_uninformative_card_is_flagged():
     card = format_card(
         _result(state=_state(recoverable=False)), "Сделка #16808", WEBHOOK,
     )
     assert "неинформативна" in card
-
-
-def test_contradiction_is_printed_with_both_quotes():
-    card = format_card(
-        _result(state=_state(contradictions=[{
-            "what": "бюджет",
-            "in_card": "до 30 млн",
-            "in_call": "максимум 20 млн",
-            "severity": "high",
-        }])),
-        "Сделка",
-        WEBHOOK,
-    )
-    assert "⚡ Расхождение (грубое): бюджет" in card
-    assert "в карточке: «до 30 млн»" in card
-    assert "в разговоре: «максимум 20 млн»" in card
 
 
 def test_card_links_to_the_portal():
@@ -163,7 +152,6 @@ def test_summary_is_fully_russian():
         "temperature": {"hot": 0, "warm": 9, "cold": 1, "unknown": 0},
         "verdicts": {"good": 2, "tolerable": 3, "poor": 4, "too_early": 1,
                      "out_of_qc": 0},
-        "contradictions_material": 2, "contradictions_minor": 5,
         "skipped_out_of_qc": 3,
         "cost_rub": 1.9, "cost_rub_per_card": 0.475,
     })
@@ -172,7 +160,6 @@ def test_summary_is_fully_russian():
     assert "тёплый 9" in summary
     assert "плохо 4" in summary
     assert "без изменений 6" in summary
-    assert "существенных 2, мелких 5" in summary
     assert "этап вне контроля 3" in summary
     assert "1.90 ₽" in summary
     for code in ("warm", "poor", "good", "hot"):
@@ -208,6 +195,8 @@ def test_summary_omits_the_empty_note_when_there_are_none():
 
 
 # ── Состав выборки: перекос должен быть виден сразу ────────────────────
+
+
 def test_summary_shows_the_stage_mix_of_the_sample():
     from client_state_report import format_stage_mix
 
@@ -245,6 +234,8 @@ def test_stage_mix_reaches_the_summary():
 
 
 # ── Два раздела по зоне ответственности ────────────────────────────────
+
+
 def _res(deal_id: int, **state_over: Any) -> dict[str, Any]:
     state = _state(**state_over)
     state.setdefault("temperature", "warm")
@@ -292,17 +283,6 @@ def test_an_uninformative_card_counts_as_losing_the_client():
     blind["state"]["work_evidence"] = _work(True, "call")
     losing, _neglect, _rem, _w, _f = split_sections([blind])
     assert [r["deal_id"] for r in losing] == [5]
-
-
-def test_a_contradiction_counts_as_losing_the_client():
-    from client_state_report import split_sections
-
-    lying = _res(6, contradictions=[{
-        "what": "бюджет", "in_card": "30", "in_call": "20", "severity": "high",
-    }])
-    lying["state"]["work_evidence"] = _work(True, "call")
-    losing, _n, _rem, _w, _f = split_sections([lying])
-    assert [r["deal_id"] for r in losing] == [6]
 
 
 def test_unproven_work_is_spelled_out_on_the_card():
@@ -360,6 +340,8 @@ def test_a_card_in_both_sections_is_printed_once():
 
 
 # ── Пробел в правилах ≠ решение агентства ──────────────────────────────
+
+
 def test_a_stage_without_rules_is_not_called_out_of_quality_control():
     """«Сняли с контроля» — решение; «правил нет» — наша недоделка."""
     result = _res(11)
@@ -413,6 +395,8 @@ def test_a_trace_from_today_is_not_called_zero_days_ago():
 
 
 # ── Отсрочка и раздел «теряем клиента» не должны спорить ───────────────
+
+
 def test_a_card_inside_its_grace_period_is_not_called_a_loss():
     """«Рано судить» и «теряем клиента» на одной карточке — противоречие."""
     from client_state_report import split_sections
@@ -435,17 +419,6 @@ def test_a_cold_client_inside_grace_is_still_a_loss():
     refused["state"]["verdict"] = "too_early"
     losing, _n, _rem, _w, _f = split_sections([refused])
     assert [r["deal_id"] for r in losing] == [21]
-
-
-def test_a_contradiction_inside_grace_is_still_a_loss():
-    from client_state_report import split_sections
-
-    lying = _res(22, temperature="warm", contradictions=[{
-        "what": "бюджет", "in_card": "30", "in_call": "20", "severity": "high",
-    }])
-    lying["state"]["verdict"] = "too_early"
-    losing, _n, _rem, _w, _f = split_sections([lying])
-    assert [r["deal_id"] for r in losing] == [22]
 
 
 def test_an_empty_card_past_its_grace_is_still_a_loss():
@@ -704,24 +677,23 @@ def test_a_run_without_llm_calls_has_no_breakdown():
     assert cost_breakdown({"usage": {}}) == ""
 
 
-def test_zero_contradictions_says_whether_there_was_anything_to_compare():
-    """«Расхождений 0» читается как «в базе всё честно», а может значить
-    «разговоров у нас нет вовсе»."""
+def test_the_summary_says_how_many_cards_have_a_readable_call():
+    """Карточка без разговора разобрана по одному пересказу брокера."""
     from client_state_report import format_summary
 
     base = {
         "funnel": "sellers", "funnel_label": "Продавцы", "total": 10,
         "analyzed": 8, "cost_rub": 3.0, "cost_rub_per_card": 0.3,
-        "contradictions_material": 0, "contradictions_minor": 0,
     }
     blind = format_summary({**base, "cards_with_transcript": 0,
                             "transcripts_pending": 4})
-    assert "разговор читается у 0 из 10 карточек" in blind
+    assert "🎧 Разговор читается у 0 из 10 карточек" in blind
     assert "ещё 4 расшифровок не готово" in blind
 
     seeing = format_summary({**base, "cards_with_transcript": 7,
                              "transcripts_pending": 0})
-    assert "разговор читается у 7 из 10 карточек)" in seeing
+    assert "🎧 Разговор читается у 7 из 10 карточек" in seeing
+    assert "не готово" not in seeing
 
 
 def test_a_failed_fetch_is_not_reported_as_a_bitrix_delay():
@@ -730,8 +702,34 @@ def test_a_failed_fetch_is_not_reported_as_a_bitrix_delay():
     text = format_summary({
         "funnel": "buyers", "funnel_label": "Покупатели", "total": 10,
         "analyzed": 8, "cost_rub": 1.0, "cost_rub_per_card": 0.1,
-        "contradictions_material": 0, "contradictions_minor": 0,
         "cards_with_transcript": 2, "transcripts_pending": 10,
         "transcripts_failed": 3,
     })
     assert "ещё 10 расшифровок не готово, 3 не загрузилось)" in text
+
+
+def test_the_marker_shows_on_the_card_and_in_the_short_list():
+    from client_state_report import format_card, format_sections
+
+    res = _res(30, temperature="warm")
+    res["state"]["no_outgoing_call"] = True
+    res["state"]["work_evidence"] = {"proven": False, "reason": "comment"}
+    assert "📵 Работа описана комментарием" in format_card(res, "х", WEBHOOK)
+
+    fine = _res(31, temperature="warm")
+    fine["state"]["no_outgoing_call"] = True
+    fine["state"]["work_evidence"] = {"proven": True, "reason": "comment"}
+    body = format_sections([fine], {31: "х"}, WEBHOOK)
+    assert "✅ В РАБОТЕ" in body
+    assert "📵 без исходящего звонка" in body
+
+
+def test_the_summary_counts_cards_without_an_outgoing_call():
+    from client_state_report import format_summary
+
+    text = format_summary({
+        "funnel": "buyers", "funnel_label": "Покупатели", "total": 10,
+        "analyzed": 8, "cost_rub": 1.0, "cost_rub_per_card": 0.1,
+        "cards_without_outgoing_call": 6,
+    })
+    assert "нет исходящего звонка): 6" in text

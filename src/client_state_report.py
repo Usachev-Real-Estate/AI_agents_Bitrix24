@@ -14,7 +14,6 @@ from broker_work import PROVEN_BY_PAUSE
 from broker_work import REMINDERS as WORK_REMINDERS
 from broker_work import TIMELESS_GAPS
 from buyer_commission_reminder import deal_url
-from client_state import MATERIAL_SEVERITY
 from funnel_profiles import fact_name_table
 from tools import (
     BUYERS_STAGE_NAMES,
@@ -63,11 +62,6 @@ VERDICT_RU: dict[str, str] = {
     "no_rules": "полнота не оценивалась",
 }
 
-SEVERITY_RU: dict[str, str] = {
-    "low": "мелкое",
-    "medium": "существенное",
-    "high": "грубое",
-}
 
 # Причины, по которым карточка не пошла в модель. Те, что означают «данные не
 # изменились», отчёт показывает прошлым разбором, а не строкой о пропуске.
@@ -210,6 +204,14 @@ def format_card(
             f"{WORK_REASON_RU.get(reason_code, reason_code)}{tail}",
         )
 
+    if state.get("no_outgoing_call"):
+        # Пометка, а не претензия: подтвердить слова брокера нечем, и это
+        # видно. Расшифровку для сверки взять негде, поэтому смотрим на то,
+        # что видно всегда: звонил ли брокер клиенту.
+        lines.append(
+            "📵 Работа описана комментарием, исходящего звонка в таймлайне нет",
+        )
+
     if state.get("recoverable") is False:
         lines.append("⚠️ Карточка неинформативна — картину клиента не восстановить")
         if (state.get("work_evidence") or {}).get("proven", True):
@@ -222,14 +224,6 @@ def format_card(
                 "🚨 Работу видно, а клиента — нет: по такой карточке "
                 "сделку не подхватить, так и теряют молча",
             )
-
-    for item in state.get("contradictions") or []:
-        if not isinstance(item, dict):
-            continue
-        severity = ru(item.get("severity"), SEVERITY_RU, SEVERITY_RU["medium"])
-        lines.append(f"⚡ Расхождение ({severity}): {humanize(item.get('what'))}")
-        lines.append(f"   в карточке: «{humanize(item.get('in_card'))}»")
-        lines.append(f"   в разговоре: «{humanize(item.get('in_call'))}»")
 
     facts = fact_name_table()
     missing = [
@@ -250,18 +244,6 @@ def format_card(
         lines.append(f"↻ {REASON_RU[reason]}")
 
     return "\n".join(lines)
-
-
-def count_material_contradictions(results: list[dict[str, Any]]) -> int:
-    """Существенных расхождений по всем карточкам отчёта."""
-    total = 0
-    for result in results:
-        for item in (result.get("state") or {}).get("contradictions") or []:
-            if not isinstance(item, dict):
-                continue
-            if str(item.get("severity", "medium")).lower() in MATERIAL_SEVERITY:
-                total += 1
-    return total
 
 
 def format_summary(stats: dict[str, Any]) -> str:
@@ -291,16 +273,14 @@ def format_summary(stats: dict[str, Any]) -> str:
         ),
     ]
 
-    material = int(stats.get("contradictions_material") or 0)
-    minor = int(stats.get("contradictions_minor") or 0)
-    line = f"⚡ Расхождений с разговором: существенных {material}, мелких {minor}"
-    # Расхождение находится только там, где есть с чем сравнивать. Без этой
-    # приписки «расхождений 0» читается как «в базе всё честно», хотя может
-    # значить «разговоров у нас нет вовсе».
+    # Сверку пересказа с разговором сняли: на портале расшифровка есть у
+    # одной карточки из семи, и проверка работала вхолостую. Разговоры
+    # по-прежнему читаются моделью как первоисточник, и сколько их читается —
+    # видно здесь: карточка без разговора разобрана по одному пересказу.
     with_calls = int(stats.get("cards_with_transcript") or 0)
     total = int(stats.get("total") or 0)
     if total:
-        line += f" (разговор читается у {with_calls} из {total} карточек"
+        line = f"🎧 Разговор читается у {with_calls} из {total} карточек"
         pending = int(stats.get("transcripts_pending") or 0)
         tails = []
         if pending:
@@ -309,8 +289,15 @@ def format_summary(stats: dict[str, Any]) -> str:
         if failed:
             # Наша ошибка не должна выглядеть как задержка Битрикса.
             tails.append(f"{failed} не загрузилось")
-        line += (", " + ", ".join(tails) + ")") if tails else ")"
-    parts.append(line)
+        if tails:
+            line += " (" + ", ".join(tails) + ")"
+        parts.append(line)
+
+    silent = int(stats.get("cards_without_outgoing_call") or 0)
+    if silent:
+        parts.append(
+            f"📵 Работа только на словах брокера (нет исходящего звонка): {silent}",
+        )
 
     agents = int(stats.get("agent_cards") or 0)
     if agents:
@@ -428,13 +415,10 @@ def _is_losing_client(state: dict[str, Any]) -> bool:
     Внутри отсрочки пустая карточка в этот список не попадает. Лид, заведённый
     сутки назад, пуст потому, что брокер ещё не работал — мы это уже признали
     вердиктом «рано судить», и тащить ту же карточку в тревожный раздел значит
-    сказать двумя строками противоположное. Остывший клиент и расхождение с
-    разговором остаются: это события, а не отсутствие данных, и срок им не
-    оправдание.
+    сказать двумя строками противоположное. Остывший клиент остаётся: это
+    событие, а не отсутствие данных, и срок ему не оправдание.
     """
     if str(state.get("temperature") or "") == "cold":
-        return True
-    if state.get("contradictions"):
         return True
     work = state.get("work_evidence") or {}
     if str(state.get("temperature") or "") == "hot" and not work.get("proven", True):
@@ -593,9 +577,12 @@ def format_sections(
                 " · карточка заполнена плохо"
                 if str(state.get("verdict") or "") == "poor" else ""
             )
+            silent = " · 📵 без исходящего звонка" if state.get(
+                "no_outgoing_call"
+            ) else ""
             blocks.append(
                 f"{icon} #{deal_id} {titles.get(deal_id, '')} — "
-                f"{step}{pause}{poor}".strip(),
+                f"{step}{pause}{silent}{poor}".strip(),
             )
         blocks.append("")
 

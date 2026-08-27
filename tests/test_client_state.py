@@ -268,6 +268,8 @@ def test_three_synthetic_cards(monkeypatch):
 
 
 # ── Маскировка не должна обходиться через сохранённое состояние ────────
+
+
 def _card_with_contact() -> dict[str, Any]:
     return {
         "ID": 900,
@@ -372,6 +374,8 @@ def test_unchanged_card_is_skipped_in_dry_run(temp_db, monkeypatch):
 
 
 # ── Бюджет контекста и устойчивость ────────────────────────────────────
+
+
 def test_trim_events_keeps_the_most_recent():
     from client_state import trim_events_to_budget
 
@@ -429,6 +433,8 @@ def test_single_oversized_event_is_truncated_not_dropped():
 
 
 # ── Гейт по этапу: не платим модели за карточки вне контроля качества ──
+
+
 def test_out_of_qc_stage_is_skipped_before_the_llm(monkeypatch):
     """Задаток/Сделка/Агент — вердикт всё равно out_of_qc, разбор не нужен."""
     import client_state as cs
@@ -626,6 +632,8 @@ def test_skipped_cards_do_not_count_as_llm_calls(monkeypatch):
 
 
 # ── Отпечатки событий вместо watermark по дате ─────────────────────────
+
+
 def _ev(**over: Any) -> dict[str, Any]:
     base = {
         "kind": "comment", "id": 1, "created": "2026-08-01T10:00:00+03:00",
@@ -860,6 +868,8 @@ def test_llm_limits_are_passed_only_when_configured(monkeypatch):
 
 
 # ── Стоимость прогона в рублях ─────────────────────────────────────────
+
+
 def test_cost_uses_the_cheap_rate_for_cached_input():
     from config import get_settings
     from llm import estimate_cost
@@ -1064,6 +1074,8 @@ def test_force_actually_re_reads_a_card_with_no_new_events(tmp_path, monkeypatch
 
 
 # ── Возраст этапа: без него отсрочка недостижима ───────────────────────
+
+
 def test_stage_age_read_from_the_fields_bitrix_actually_returns():
     """stage_entered_at ставит основной аудит; QC-агент его не получает."""
     from datetime import datetime, timezone
@@ -1118,6 +1130,8 @@ def test_run_counts_cards_judged_without_a_known_stage_age(monkeypatch):
 
 
 # ── Пустая карточка: платить за предрешённый ответ незачем ─────────────
+
+
 def test_empty_card_is_judged_without_the_model(tmp_path, monkeypatch):
     import client_state as cs
     import db
@@ -1235,6 +1249,8 @@ def test_run_counts_empty_cards(monkeypatch):
 
 
 # ── Вердикт — производная, а не кэш ────────────────────────────────────
+
+
 def _grace_card(deal_id: int, created: str) -> dict[str, Any]:
     return {
         "ID": deal_id, "TITLE": "Покупка", "STAGE_ID": "C18:NEW",
@@ -1408,6 +1424,8 @@ def test_deal_selection_asks_for_the_source(monkeypatch):
 
 
 # ── Выжимка карточки для сравнения прогонов ────────────────────────────
+
+
 def test_card_digest_carries_no_text():
     """В файл, который таскают между прогонами, имена попадать не должны."""
     from client_state import card_digest
@@ -1445,27 +1463,6 @@ def test_card_digest_separates_the_model_flag_from_the_verified_one():
     })
     assert digest["model_flags"]["pause_explained"] is True
     assert digest["verified_flags"]["pause_explained"] is False
-
-
-def test_card_digest_counts_facts_and_contradictions():
-    from client_state import card_digest
-
-    digest = card_digest({
-        "deal_id": 1,
-        "state": {
-            "stage_facts": {
-                "budget": {"present": True, "quote": "до 130"},
-                "district": {"present": False, "quote": ""},
-            },
-            "contradictions": [
-                {"severity": "high"}, {"severity": "low"},
-            ],
-            "missing": ["район", "сроки"],
-        },
-    })
-    assert (digest["facts_present"], digest["facts_needed"]) == (1, 2)
-    assert (digest["contradictions"], digest["contradictions_material"]) == (2, 1)
-    assert digest["missing"] == 2
 
 
 def test_transcript_counts_separate_ready_pending_and_failed():
