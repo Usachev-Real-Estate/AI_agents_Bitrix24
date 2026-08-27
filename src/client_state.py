@@ -124,6 +124,30 @@ def _normalize_transcript_item(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _activity_without_text(activity: dict[str, Any]) -> str:
+    """Чем является дело без темы и описания — или "" если ничем.
+
+    Битрикс заводит звонки и задачи с пустой темой, и такое дело
+    выбрасывалось из доказательств целиком: события без текста нечего
+    показывать модели. Но у звонка доказательством является сам факт
+    звонка, а у дела — его срок, и без них рушится половина правил: «звонка
+    в таймлайне нет» на карточке, где брокер звонил; «дела нет» там, где
+    оно стоит; «брошена N дней» с датой, считанной мимо этих событий.
+
+    Текст мы не выдумываем — только называем то, что и так знаем из полей.
+    """
+    if int(activity.get("type_id") or 0) == CALL_ACTIVITY_TYPE_ID:
+        direction = int(activity.get("direction") or 0)
+        if direction == 1:
+            return "Входящий звонок (без описания)"
+        if direction == 2:
+            return "Исходящий звонок (без описания)"
+        return "Звонок (без описания)"
+    if str(activity.get("deadline") or "").strip():
+        return "Дело без описания"
+    return ""
+
+
 def build_evidence_events(
     timeline: list[dict[str, Any]],
     activities: list[dict[str, Any]],
@@ -147,6 +171,8 @@ def build_evidence_events(
         body = " — ".join(
             part for part in (normalized["subject"], normalized["description"]) if part
         )
+        if not body:
+            body = _activity_without_text(normalized)
         if not body:
             continue
         normalized["text"] = apply_mask(body, mask_map)
