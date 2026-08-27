@@ -733,3 +733,34 @@ def test_the_summary_counts_cards_without_an_outgoing_call():
         "cards_without_outgoing_call": 6,
     })
     assert "нет исходящего звонка): 6" in text
+
+
+def test_a_multiline_title_is_flattened():
+    """#16422 названа целым объявлением с Циан: три строки и пустая между."""
+    from client_state_report import card_title
+
+    raw = (
+        "диспозл excel Гагаринский пер.\n"
+        "Продаётся 3-комнатная квартира за 250 000 000 руб., 170 м.кв.\n\n"
+        "Гагаринский пер., 24/7С2, Москва м. Смоленская"
+    )
+    flat = card_title(raw)
+    assert "\n" not in flat
+    assert flat.startswith("диспозл excel Гагаринский пер. Продаётся")
+    assert flat.endswith("…")
+    assert len(flat) <= 91
+
+
+def test_a_normal_title_is_left_alone():
+    from client_state_report import card_title
+
+    assert card_title("ЖК «Hide»") == "ЖК «Hide»"
+    assert card_title(None) == ""
+
+
+def test_the_card_keeps_the_link_on_the_second_line():
+    """Ссылка уезжала на четвёртую строку, и карточка переставала читаться."""
+    from client_state_report import format_card
+
+    card = format_card(_res(40), "первая\nвторая\nтретья", WEBHOOK)
+    assert card.split("\n")[1].startswith("[URL]")
