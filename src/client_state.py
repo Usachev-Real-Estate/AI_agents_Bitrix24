@@ -237,6 +237,7 @@ def event_fingerprint(event: dict[str, Any]) -> str:
 def compute_content_hash(
     events: list[dict[str, Any]],
     profile: FunnelProfile | None = None,
+    stage_id: str = "",
 ) -> str:
     """Отпечаток карточки: по нему решается, звать ли модель заново.
 
@@ -256,6 +257,16 @@ def compute_content_hash(
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     if profile is not None:
         raw += "\n" + profile.prompt
+        # Набор фактов, которые мы спрашиваем, задаётся этапом. Сделка,
+        # переехавшая на другой этап без единого нового события, отдавалась
+        # из кэша — и её судили по требованиям нового этапа теми фактами,
+        # которых у старого никто не спрашивал. Поля выглядели незаполненными
+        # ровно потому, что вопрос не задавали.
+        from funnel_profiles import all_facts_for_stage
+        keys = sorted(
+            key for key, _name, _req in all_facts_for_stage(profile.key, stage_id)
+        )
+        raw += "\n" + json.dumps(keys, ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -593,6 +604,35 @@ VALID_HORIZONS = frozenset({
 })
 # LLM ставит severity низкий/средний/высокий. Порог по цифрам (30 %) прописан
 # в промпте; здесь только разделяем на мелкое (low) и существенное (medium/high).
+
+
+def merge_stage_facts(
+    fresh: dict[str, Any],
+    previous: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    """Дополнить свежие факты этапа теми, что модель в этот раз не видела.
+
+    При дозапросе модели показывают только новые события, а факт мог быть
+    найден в старом комментарии. Ответ «present: false» на таком запросе
+    означает «в новых событиях этого нет», а не «в карточке этого нет», —
+    и разница между ними решает, назовём мы карточку заполненной плохо или
+    хорошо. Молчание модели о факте — тем более не находка.
+
+    Забирается только то, что было подтверждено раньше. Цитаты всё равно
+    проверяются по живой карточке следом: если комментарий из таймлайна
+    удалили, факт отвалится там, а не выживет за счёт кэша.
+    """
+    merged = _normalize_stage_facts(fresh)
+    for key, value in (previous or {}).items():
+        if not isinstance(value, dict) or not value.get("present"):
+            continue
+        if (merged.get(key) or {}).get("present"):
+            continue
+        quote = str(value.get("quote") or "").strip()
+        if not quote:
+            continue
+        merged[key] = {"present": True, "quote": quote}
+    return merged
 
 
 def _normalize_stage_facts(raw: Any) -> dict[str, dict[str, Any]]:
@@ -1183,7 +1223,9 @@ def analyze_deal(
         _as_list(record.get("transcripts")),
         mask_map,
     )
-    content_hash = compute_content_hash(events, profile)
+    content_hash = compute_content_hash(
+        events, profile, _clean_str(record.get("STAGE_ID") or record.get("stage_id")),
+    )
     envelope["content_hash"] = content_hash
     # Звонок в таймлайне — главное доказательство работы после того, как
     # сверку пересказа с расшифровкой сняли. Строка «разговор читается у 0
@@ -1297,6 +1339,14 @@ def analyze_deal(
             envelope["skipped"] = True
             envelope["reason"] = "parse_error"
             return envelope
+
+    if previous_state and new_events is not events and len(new_events) < len(events):
+        # Дозапрос: модель видела не всю карточку. Всё, что она не назвала,
+        # добираем из прошлого разбора — и тут же отдаём на проверку цитат
+        # ниже, по живому таймлайну.
+        state["stage_facts"] = merge_stage_facts(
+            state.get("stage_facts"), previous_state.get("stage_facts"),
+        )
 
     verified, invented = verify_evidence(state.get("evidence", []), events)
     state["evidence"] = verified
