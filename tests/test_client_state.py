@@ -21,6 +21,7 @@ from client_state import (  # noqa: E402
     _normalize_state,
     _parse_state_json,
 )
+from funnel_profiles import BUYER_PROFILE  # noqa: E402
 from masking import build_mask_map  # noqa: E402
 
 
@@ -102,7 +103,9 @@ def test_skip_unchanged_when_hash_matches(temp_db, monkeypatch):
     deal["timeline"] = [{"id": 1, "created": "2026-08-20", "comment": "бюджет 20 млн"}]
     mask = build_mask_map(deal)
     events = build_evidence_events(deal["timeline"], [], [], mask)
-    content_hash = compute_content_hash(events)
+    # Отпечаток считается вместе с промптом: разбор по старым правилам не
+    # должен считаться свежим.
+    content_hash = compute_content_hash(events, BUYER_PROFILE)
     state = {"client_goal": "квартира", "confidence": 0.8, "recoverable": True}
     db.save_client_state(
         deal_id=2,
@@ -1477,3 +1480,37 @@ def test_transcript_counts_separate_ready_pending_and_failed():
     ]
     assert _transcript_counts(events) == {"ready": 1, "pending": 1, "failed": 1}
     assert _transcript_counts([]) == {"ready": 0, "pending": 0, "failed": 0}
+
+
+def test_a_prompt_change_invalidates_the_cache():
+    """#14776: «клиент в отпуске до сентября» лежало в карточке, а разбор был
+    сделан до того, как мы научились этот факт спрашивать. Карточка не
+    менялась, хэш совпадал — и правило молчало бы вечно."""
+    from dataclasses import replace
+
+    from client_state import compute_content_hash
+    from funnel_profiles import BUYER_PROFILE as BP
+
+    events = [{"kind": "comment", "id": 1, "created": "t", "text": "а"}]
+    older = replace(BP, prompt=BP.prompt + "\n11. Новый факт: спрашиваем X.")
+    assert compute_content_hash(events, BP) != compute_content_hash(events, older)
+    assert compute_content_hash(events, BP) == compute_content_hash(events, BP)
+
+
+def test_the_hash_still_reacts_to_the_card_itself():
+    from client_state import compute_content_hash
+    from funnel_profiles import BUYER_PROFILE as BP
+
+    one = [{"kind": "comment", "id": 1, "created": "t", "text": "а"}]
+    two = [{"kind": "comment", "id": 1, "created": "t", "text": "б"}]
+    assert compute_content_hash(one, BP) != compute_content_hash(two, BP)
+
+
+def test_the_two_funnels_do_not_share_a_hash():
+    """У воронок разные промпты — значит и разные версии правил."""
+    from client_state import compute_content_hash
+    from funnel_profiles import BUYER_PROFILE as BP
+    from funnel_profiles import SELLER_PROFILE as SP
+
+    events = [{"kind": "comment", "id": 1, "created": "t", "text": "а"}]
+    assert compute_content_hash(events, BP) != compute_content_hash(events, SP)

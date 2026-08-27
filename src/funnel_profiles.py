@@ -162,16 +162,29 @@ def _dated(data: dict[str, Any]) -> bool:
     return _text(data, "next_step_date") not in ("", "unknown")
 
 
-def buyer_temperature(signals: dict[str, Any]) -> tuple[str, str]:
+def buyer_temperature(
+    signals: dict[str, Any],
+    counterparty: str = "",
+) -> tuple[str, str]:
     """Buyer readiness. Definition confirmed with the agency.
 
     hot  — согласованный шаг с датой + назван бюджет + названы сроки
     cold — клиент не выходит на связь либо горизонт дальше трёх месяцев
     warm — всё остальное
+
+    У агента горизонт не считается. #11954: «Лариса (Клекова) агент» уехала
+    в «теряем клиента» с причиной «горизонт дальше трёх месяцев». Горизонт
+    там принадлежит клиентам агента, а не самому агенту, и правило,
+    написанное для прямых покупателей, на агентской карточке даёт ложную
+    тревогу. Молчание агента холодом остаётся: не выходит на связь —
+    значит контакт теряем, кто бы он ни был.
     """
     if not _flag(signals, "client_responsive", True):
         return "cold", "клиент не выходит на связь"
-    if _text(signals, "timeline_horizon") == "более 3 месяцев":
+    if (
+        counterparty != "agent"
+        and _text(signals, "timeline_horizon") == "более 3 месяцев"
+    ):
         return "cold", "горизонт покупки дальше трёх месяцев"
 
     agreed = _flag(signals, "next_step_agreed") and _dated(signals)
@@ -190,7 +203,10 @@ def buyer_temperature(signals: dict[str, Any]) -> tuple[str, str]:
     return "warm", "; ".join(gaps)
 
 
-def seller_temperature(signals: dict[str, Any]) -> tuple[str, str]:
+def seller_temperature(
+    signals: dict[str, Any],
+    counterparty: str = "",
+) -> tuple[str, str]:
     """Seller readiness.
 
     hot  — согласованный шаг с датой + названа цена
@@ -480,7 +496,7 @@ class FunnelProfile:
     label: str
     prompt: str
     normalize_signals: Callable[[dict[str, Any], Callable[[Any], int]], dict[str, Any]]
-    temperature: Callable[[dict[str, Any]], tuple[str, str]]
+    temperature: Callable[[dict[str, Any], str], tuple[str, str]]
     text_signals: tuple[str, ...]
     # Обязательные факты по этапам: {stage_id: (ключ факта, человеческое имя)}.
     # На требования из старших этапов ложатся требования младших — это

@@ -258,7 +258,7 @@ def test_losing_and_neglected_are_separate_lists():
     ok = _res(3, temperature="warm")
     ok["state"]["work_evidence"] = _work(True, "call")
 
-    losing, neglect, _rem, _wait, fine = split_sections([cold, neglected, ok])
+    losing, _aband, neglect, _rem, _wait, fine = split_sections([cold, neglected, ok])
     assert [r["deal_id"] for r in losing] == [1]
     assert [r["deal_id"] for r in neglect] == [2]
     assert [r["deal_id"] for r in fine] == [3]
@@ -270,7 +270,7 @@ def test_a_card_can_be_in_both_sections():
 
     both = _res(4, temperature="cold")
     both["state"]["work_evidence"] = _work(False)
-    losing, neglect, _rem, _wait, fine = split_sections([both])
+    losing, _aband, neglect, _rem, _wait, fine = split_sections([both])
     assert [r["deal_id"] for r in losing] == [4]
     assert [r["deal_id"] for r in neglect] == [4]
     assert fine == []
@@ -281,7 +281,7 @@ def test_an_uninformative_card_counts_as_losing_the_client():
 
     blind = _res(5, recoverable=False)
     blind["state"]["work_evidence"] = _work(True, "call")
-    losing, _neglect, _rem, _w, _f = split_sections([blind])
+    losing, _aband, _neglect, _rem, _w, _f = split_sections([blind])
     assert [r["deal_id"] for r in losing] == [5]
 
 
@@ -404,7 +404,7 @@ def test_a_card_inside_its_grace_period_is_not_called_a_loss():
     fresh = _res(20, recoverable=False, temperature="unknown")
     fresh["state"]["verdict"] = "too_early"
     fresh["state"]["verdict_reason"] = "этап моложе отсрочки (23 ч < 72 ч)"
-    losing, _neglect, _rem, waiting, fine = split_sections([fresh])
+    losing, _aband, _neglect, _rem, waiting, fine = split_sections([fresh])
     assert losing == []
     # И не «в работе»: работа по ней ещё не начиналась, галочка ✅ здесь лжёт.
     assert fine == []
@@ -417,7 +417,7 @@ def test_a_cold_client_inside_grace_is_still_a_loss():
 
     refused = _res(21, temperature="cold")
     refused["state"]["verdict"] = "too_early"
-    losing, _n, _rem, _w, _f = split_sections([refused])
+    losing, _aband, _n, _rem, _w, _f = split_sections([refused])
     assert [r["deal_id"] for r in losing] == [21]
 
 
@@ -427,7 +427,7 @@ def test_an_empty_card_past_its_grace_is_still_a_loss():
 
     stale = _res(23, recoverable=False, temperature="unknown")
     stale["state"]["verdict"] = "poor"
-    losing, _n, _rem, _w, _f = split_sections([stale])
+    losing, _aband, _n, _rem, _w, _f = split_sections([stale])
     assert [r["deal_id"] for r in losing] == [23]
 
 
@@ -465,7 +465,7 @@ def test_the_two_sections_stop_being_identical_lists():
     for card in unworked:
         card["state"]["verdict"] = "poor"
         card["state"]["work_evidence"] = _work(False)
-    losing, neglect, _rem, _w, _f = split_sections(unworked)
+    losing, _aband, neglect, _rem, _w, _f = split_sections(unworked)
     assert losing == []
     assert len(neglect) == 10
 
@@ -479,7 +479,7 @@ def test_a_hot_client_nobody_works_is_a_loss():
 
     hot = _res(16066, temperature="hot")
     hot["state"]["work_evidence"] = _work(False)
-    losing, neglect, _rem, _w, _f = split_sections([hot])
+    losing, _aband, neglect, _rem, _w, _f = split_sections([hot])
     assert [r["deal_id"] for r in losing] == [16066]
     assert [r["deal_id"] for r in neglect] == [16066]
 
@@ -489,7 +489,7 @@ def test_a_hot_client_being_worked_is_not_a_loss():
 
     hot = _res(1, temperature="hot")
     hot["state"]["work_evidence"] = _work(True, "call")
-    losing, _n, _rem, _w, fine = split_sections([hot])
+    losing, _aband, _n, _rem, _w, fine = split_sections([hot])
     assert losing == []
     assert [r["deal_id"] for r in fine] == [1]
 
@@ -500,7 +500,7 @@ def test_a_warm_client_unworked_stays_a_broker_matter():
 
     warm = _res(2, temperature="warm")
     warm["state"]["work_evidence"] = _work(False)
-    losing, neglect, _rem, _w, _f = split_sections([warm])
+    losing, _aband, neglect, _rem, _w, _f = split_sections([warm])
     assert losing == []
     assert [r["deal_id"] for r in neglect] == [2]
 
@@ -563,7 +563,7 @@ def test_a_waiting_card_is_a_reminder_not_an_accusation():
         "window_days": 2, "days_quiet": 5.0,
     }
     res["state"]["counterparty"] = {"who": "agent", "why": "тип контакта «Агент»"}
-    losing, neglect, reminders, _wait, fine = split_sections([res])
+    losing, _aband, neglect, reminders, _wait, fine = split_sections([res])
     assert [r["deal_id"] for r in reminders] == [10]
     assert neglect == [] and fine == [] and losing == []
 
@@ -640,7 +640,7 @@ def test_an_unrecoverable_card_says_why_it_is_losing():
 
     res = _res(16, recoverable=False)
     res["state"]["work_evidence"] = {"proven": True, "reason": "call"}
-    losing, _n, _rem, _w, _f = split_sections([res])
+    losing, _aband, _n, _rem, _w, _f = split_sections([res])
     assert [r["deal_id"] for r in losing] == [16]
     assert "так и теряют молча" in format_card(res, "Пентхаус", WEBHOOK)
 
@@ -712,27 +712,27 @@ def test_the_marker_shows_on_the_card_and_in_the_short_list():
     from client_state_report import format_card, format_sections
 
     res = _res(30, temperature="warm")
-    res["state"]["no_outgoing_call"] = True
+    res["state"]["no_call"] = True
     res["state"]["work_evidence"] = {"proven": False, "reason": "comment"}
     assert "📵 Работа описана комментарием" in format_card(res, "х", WEBHOOK)
 
     fine = _res(31, temperature="warm")
-    fine["state"]["no_outgoing_call"] = True
+    fine["state"]["no_call"] = True
     fine["state"]["work_evidence"] = {"proven": True, "reason": "comment"}
     body = format_sections([fine], {31: "х"}, WEBHOOK)
     assert "✅ В РАБОТЕ" in body
-    assert "📵 без исходящего звонка" in body
+    assert "📵 без звонка" in body
 
 
-def test_the_summary_counts_cards_without_an_outgoing_call():
+def test_the_summary_counts_cards_without_a_call():
     from client_state_report import format_summary
 
     text = format_summary({
         "funnel": "buyers", "funnel_label": "Покупатели", "total": 10,
         "analyzed": 8, "cost_rub": 1.0, "cost_rub_per_card": 0.1,
-        "cards_without_outgoing_call": 6,
+        "cards_without_a_call": 6,
     })
-    assert "нет исходящего звонка): 6" in text
+    assert "звонка в таймлайне нет): 6" in text
 
 
 def test_a_multiline_title_is_flattened():
@@ -764,3 +764,63 @@ def test_the_card_keeps_the_link_on_the_second_line():
 
     card = format_card(_res(40), "первая\nвторая\nтретья", WEBHOOK)
     assert card.split("\n")[1].startswith("[URL]")
+
+
+def test_abandoned_cards_get_their_own_section_worst_first():
+    """Сто дней тишины не должны стоять в одном списке с тремя."""
+    from broker_work import GAP_ABANDONED
+    from client_state_report import format_sections, split_sections
+
+    def _card(deal_id: int, quiet: float) -> dict:
+        res = _res(deal_id, temperature="warm")
+        res["state"]["work_evidence"] = {
+            "proven": False, "reason": GAP_ABANDONED,
+            "window_days": 3, "days_quiet": quiet, "abandoned_days": quiet,
+        }
+        return res
+
+    rows = [_card(1, 41.0), _card(2, 107.0)]
+    losing, abandoned, neglect, _rem, _wait, fine = split_sections(rows)
+    assert [r["deal_id"] for r in abandoned] == [2, 1]
+    assert neglect == [] and fine == [] and losing == []
+
+    body = format_sections(rows, {1: "х", 2: "у"}, WEBHOOK)
+    assert "🕸 БРОШЕНЫ — 2" in body
+    assert body.index("🕸 БРОШЕНЫ") < body.index("🔧 НЕДОРАБОТКА")
+    assert "🕸 Карточка брошена (ни звонка, ни комментария 107 дн.)" in body
+    assert "Работа не подтверждена" not in body
+
+
+def test_the_abandoned_section_is_hidden_when_empty():
+    from client_state_report import format_sections
+
+    body = format_sections([_res(3, temperature="warm")], {3: "х"}, WEBHOOK)
+    assert "БРОШЕНЫ" not in body
+
+
+def test_sources_differing_only_by_case_are_merged():
+    """На портале «усачев» и «Усачев» — два кода, а канал один."""
+    from client_state_report import format_source_mix, set_source_names
+
+    set_source_names({"1": "усачев", "2": "Усачев", "3": "Циан"})
+    try:
+        line = format_source_mix({"1": 6, "2": 1, "3": 2})
+        assert "усачев 7" in line
+        assert "Усачев" not in line
+        assert "Циан 2" in line
+    finally:
+        set_source_names({})
+
+
+def test_the_winning_spelling_is_the_more_common_one():
+    from client_state_report import merge_source_names, set_source_names
+
+    set_source_names({"1": "усачев", "2": "Усачев"})
+    try:
+        assert merge_source_names({"1": 1, "2": 9}) == {"Усачев": 10}
+        assert merge_source_names({"1": 9, "2": 1}) == {"усачев": 10}
+        # При равенстве — с заглавной, чтобы строка не плясала от прогона
+        # к прогону.
+        assert merge_source_names({"1": 5, "2": 5}) == {"Усачев": 10}
+    finally:
+        set_source_names({})

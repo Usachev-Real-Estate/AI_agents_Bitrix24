@@ -17,7 +17,7 @@ from lead_quality_audit import _message_content_to_str
 from funnel_profiles import BUYER_PROFILE, SELLER_PROFILE, FunnelProfile
 from broker_work import (
     assess_broker_work,
-    comment_without_outgoing_call,
+    comment_without_a_call,
     has_open_future_task,
     next_action,
 )
@@ -188,10 +188,28 @@ def event_fingerprint(event: dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:FINGERPRINT_LEN]
 
 
-def compute_content_hash(events: list[dict[str, Any]]) -> str:
-    """Stable fingerprint of card evidence for skip-if-unchanged."""
+def compute_content_hash(
+    events: list[dict[str, Any]],
+    profile: FunnelProfile | None = None,
+) -> str:
+    """Отпечаток карточки: по нему решается, звать ли модель заново.
+
+    Кроме событий в отпечаток входит сам промпт. Без этого разбор, сделанный
+    по старым правилам, считался свежим до конца времён: карточка не менялась,
+    хэш совпадал, и новый факт, который мы просим у модели, на ней не
+    появлялся никогда. Так молчала пауза на #14776 — «клиент в отпуске до
+    сентября» лежало в карточке, а разбор был сделан до того, как мы
+    научились этот факт спрашивать.
+
+    Промпт меняется только вместе с набором фактов, которые модель извлекает,
+    поэтому его отпечаток и есть версия правил. Смена правил стоит одного
+    повторного разбора по каждой карточке — ровно столько, сколько стоит
+    честный ответ вместо устаревшего.
+    """
     payload = [_event_identity(e) for e in events]
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    if profile is not None:
+        raw += "\n" + profile.prompt
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -490,6 +508,7 @@ def compute_temperature(
     *,
     recoverable: bool = True,
     profile: FunnelProfile = BUYER_PROFILE,
+    counterparty: str = "",
 ) -> tuple[str, str]:
     """Derive client temperature from extracted signals. Returns (level, why).
 
@@ -500,7 +519,7 @@ def compute_temperature(
     """
     if not recoverable:
         return "unknown", "по карточке нельзя восстановить картину клиента"
-    return profile.temperature(signals)
+    return profile.temperature(signals, counterparty)
 
 
 def _parse_state_json(content: str) -> dict[str, Any] | None:
@@ -879,10 +898,21 @@ def apply_derived_verdict(
 
     stage_id = _clean_str(record.get("STAGE_ID") or record.get("stage_id"))
 
+    # Клиент или агент. Признак ищется в CRM, а не у модели, и считается
+    # заново: тип контакта могли проставить уже после разбора. Считается до
+    # температуры: у агента горизонт покупки принадлежит его клиентам, а не
+    # ему, и холодом карточку не делает.
+    state["counterparty"] = (
+        classify_counterparty(record, _as_list(record.get("contacts")))
+        if profile.counterparty_can_be_agent
+        else {"who": WHO_CLIENT, "why": ""}
+    )
+
     level, why = compute_temperature(
         state.get("signals", {}),
         recoverable=bool(state.get("recoverable", True)),
         profile=profile,
+        counterparty=str(state["counterparty"].get("who") or ""),
     )
     state["temperature"] = level
     state["temperature_reason"] = why
@@ -967,10 +997,10 @@ def apply_derived_verdict(
             "pause_explained", "pause_reason_quote", "причина паузы",
         ),
     }
-    # Пометка, а не претензия: работа описана комментарием, а звонил ли
-    # брокер клиенту — не видно. Считается отдельно от оценки работы и на
-    # разделы отчёта не влияет.
-    state["no_outgoing_call"] = comment_without_outgoing_call(
+    # Пометка, а не претензия: работа описана комментарием, а разговора по
+    # карточке не видно. Считается отдельно от оценки работы и на разделы
+    # отчёта не влияет.
+    state["no_call"] = comment_without_a_call(
         events or [],
         profile=profile,
         stage_id=stage_id,
@@ -991,6 +1021,9 @@ def apply_derived_verdict(
         # чём. Обвинять брокера на основании ответа, который спорит сам с
         # собой, нельзя.
         comment_informative=state["work_claims"]["comment_informative"],
+        abandoned_days=float(
+            (settings or get_settings()).client_state_abandoned_days,
+        ),
         # Ход за контрагентом снимает претензию за тишину: он сам назвал срок.
         next_step_who=str(_step.get("who") or ""),
         next_step_when=str(_step.get("when") or ""),
@@ -1000,14 +1033,6 @@ def apply_derived_verdict(
         pause_until=str(work.get("pause_until") or ""),
     )
     envelope["work_proven"] = state["work_evidence"]["proven"]
-
-    # Клиент или агент. Признак ищется в CRM, а не у модели, и считается
-    # заново: тип контакта могли проставить уже после разбора.
-    state["counterparty"] = (
-        classify_counterparty(record, _as_list(record.get("contacts")))
-        if profile.counterparty_can_be_agent
-        else {"who": WHO_CLIENT, "why": ""}
-    )
 
     # Рецепт, а не только диагноз. Считается заново на каждом прогоне: дело
     # могли поставить уже после разбора, и тогда совет надо снять.
@@ -1072,7 +1097,7 @@ def analyze_deal(
         _as_list(record.get("transcripts")),
         mask_map,
     )
-    content_hash = compute_content_hash(events)
+    content_hash = compute_content_hash(events, profile)
     envelope["content_hash"] = content_hash
     # Расхождение между пересказом и разговором можно найти только там, где
     # разговор есть. Пока не видно, у скольких карточек расшифровка вообще
@@ -1329,7 +1354,7 @@ def card_digest(result: dict[str, Any]) -> dict[str, Any]:
         "comment_informative": bool(raw.get("comment_informative", True)),
         "pause_until": _clean_str(raw.get("pause_until")),
         "has_next_action": bool(str(state.get("next_action") or "").strip()),
-        "no_outgoing_call": bool(state.get("no_outgoing_call")),
+        "no_call": bool(state.get("no_call")),
         "transcripts": dict(result.get("transcripts") or {}),
     }
 
@@ -1391,7 +1416,7 @@ def run_client_state(
         "errors": 0,
         "unrecoverable": 0,
         "agent_cards": 0,
-        "cards_without_outgoing_call": 0,
+        "cards_without_a_call": 0,
         "evidence_dropped": 0,
         # Карточек, по которым разговор вообще можно прочитать. Без этого
         # «расхождений 0» неотличимо от «сравнивать было не с чем».
@@ -1494,8 +1519,8 @@ def run_client_state(
                     stats["unrecoverable"] += 1
                 if _is_agent_card(cached):
                     stats["agent_cards"] += 1
-                if cached.get("no_outgoing_call"):
-                    stats["cards_without_outgoing_call"] += 1
+                if cached.get("no_call"):
+                    stats["cards_without_a_call"] += 1
             continue
         stats["analyzed"] += 1
         if result.get("empty_card"):
@@ -1518,8 +1543,8 @@ def run_client_state(
             stats["unrecoverable"] += 1
         if _is_agent_card(state):
             stats["agent_cards"] += 1
-        if state.get("no_outgoing_call"):
-            stats["cards_without_outgoing_call"] += 1
+        if state.get("no_call"):
+            stats["cards_without_a_call"] += 1
     usage = stats["usage"]
     # Делим неокруглённую сумму: цена за карточку — это копейки, и округление
     # до рублей перед делением её заметно искажает.

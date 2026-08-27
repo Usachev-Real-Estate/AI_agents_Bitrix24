@@ -28,8 +28,6 @@ from typing import Any
 from funnel_profiles import FunnelProfile
 
 CALL_ACTIVITY_TYPE_ID = 2
-# DIRECTION у Битрикса: 1 — входящий, 2 — исходящий.
-OUTGOING_DIRECTION = 2
 # Битрикс отдаёт даты со смещением портала; «сегодня» для отчёта — это
 # московские сутки, а не UTC: иначе вечернее дело уезжает во вчера.
 PORTAL_TZ = timezone(timedelta(hours=3))
@@ -59,6 +57,12 @@ PROVEN_BY_PAUSE = "pause_explained"
 GAP_CLAIMED_MESSAGE = "claimed_message_no_proof"
 GAP_CLAIMED_NO_ANSWER = "claimed_no_answer_no_calls"
 GAP_EMPTY_COMMENT = "comment_says_nothing"
+# Карточка, о которой забыли. Нормы этапов измеряются днями, и сделка с
+# месяцем тишины среди них тонет: «последний след 107 дн. назад» стоит в
+# одном списке с «последний след 3 дн. назад» и читается так же. Это
+# другой разговор — не отставание от каденса, а решение: возвращать
+# клиента или закрывать сделку.
+GAP_ABANDONED = "abandoned"
 GAP_NO_TRACE = "no_trace"
 # Работа была, но раньше нормы этапа. Отдельно от GAP_NO_TRACE: карточка,
 # где брокер звонил четыре дня назад при норме два, и карточка, где не
@@ -142,6 +146,7 @@ REASON_RU: dict[str, str] = {
     # «следов работы нет (последний след 4 дн. назад)» — брокер звонил и
     # слал СМС, просто раньше нормы. Это опоздание, а не бездействие, и
     # обвинение должно звучать по факту.
+    GAP_ABANDONED: "карточка брошена",
     GAP_NO_TRACE: "следов работы нет вовсе",
     GAP_NO_TRACE_IN_WINDOW: "за норму этапа ни звонка, ни комментария",
     GAP_ONLY_PLANS: (
@@ -342,24 +347,25 @@ def _ball_is_theirs(who: str, when: str, now: datetime) -> bool:
     return _date_state(str(when or ""), now) != "past"
 
 
-def has_outgoing_call(events: list[dict[str, Any]]) -> bool:
-    """Был ли исходящий звонок клиенту.
+def has_any_call(events: list[dict[str, Any]]) -> bool:
+    """Был ли звонок — неважно, исходящий или входящий.
 
-    Входящий звонок — тоже контакт, но инициатива в нём не брокера. Работа с
-    клиентом, которого ведут, начинается со звонка ему, а не с ожидания
-    звонка от него.
+    Направление агентство решило не различать: разговор состоялся, и слова
+    брокера в комментарии им подкреплены. Входящий звонок — тоже контакт, и
+    ставить брокеру в упрёк, что позвонил клиент, а не он, значит требовать
+    инициативы там, где важен сам факт разговора.
     """
     for event in events:
+        if event.get("kind") == "transcript":
+            return True
         if event.get("kind") != "activity":
             continue
-        if int(event.get("type_id") or 0) != CALL_ACTIVITY_TYPE_ID:
-            continue
-        if int(event.get("direction") or 0) == OUTGOING_DIRECTION:
+        if int(event.get("type_id") or 0) == CALL_ACTIVITY_TYPE_ID:
             return True
     return False
 
 
-def comment_without_outgoing_call(
+def comment_without_a_call(
     events: list[dict[str, Any]],
     *,
     profile: FunnelProfile,
@@ -368,12 +374,12 @@ def comment_without_outgoing_call(
     hours_on_stage: float | None = None,
     now: datetime | None = None,
 ) -> bool:
-    """Работа описана комментарием, а исходящего звонка в таймлайне нет.
+    """Работа описана комментарием, а звонка в таймлайне нет.
 
     Не обвинение, а пометка: комментарий брокера — это его же слова о своей
-    работе, и подтвердить их нечем. Расшифровку разговора для сверки взять
-    негде — на портале она есть у одной карточки из семи, — поэтому смотрим
-    на то, что видно всегда: звонил ли брокер клиенту вообще.
+    работе, и подтвердить их нечем. Сверять пересказ с расшифровкой мы
+    перестали, поэтому смотрим на то, что видно всегда: был ли по карточке
+    разговор — исходящий или входящий, всё равно.
     """
     now = now or datetime.now(timezone.utc)
     if hours_on_stage is not None and hours_on_stage < judgement_starts_after(
@@ -390,7 +396,7 @@ def comment_without_outgoing_call(
         return False
     if not any(e.get("kind") == "comment" for e in window):
         return False
-    return not has_outgoing_call(window)
+    return not has_any_call(window)
 
 
 def assess_broker_work(
@@ -402,6 +408,7 @@ def assess_broker_work(
     claims_messaged: bool,
     comment_informative: bool,
     claims_no_answer: bool = False,
+    abandoned_days: float = 0.0,
     next_step_who: str = "",
     next_step_when: str = "",
     pause_explained: bool = False,
@@ -494,6 +501,23 @@ def assess_broker_work(
             ),
             "window_days": days,
             "days_quiet": days_quiet,
+        }
+
+    # Забытая карточка. Проверяется после паузы и хода за контрагентом:
+    # объяснённое молчание — не забвение. Но если объяснения нет, месяц
+    # тишины перестаёт быть отставанием от каденса и становится вопросом,
+    # ведём ли мы эту сделку вообще.
+    silent = days_quiet
+    if silent is None and hours_on_stage is not None:
+        # Событий нет вовсе — считаем от возраста карточки на этапе.
+        silent = hours_on_stage / 24.0
+    if abandoned_days > 0 and silent is not None and silent >= abandoned_days:
+        return {
+            "proven": False,
+            "reason": GAP_ABANDONED,
+            "window_days": days,
+            "days_quiet": days_quiet,
+            "abandoned_days": round(silent, 1),
         }
 
     # Ветка «комментарий» смотрит только на комментарии. Незакрытое дело
@@ -634,6 +658,16 @@ def next_action(
     work = state.get("work_evidence") if isinstance(
         state.get("work_evidence"), dict
     ) else {}
+    if str(work.get("reason") or "") == GAP_ABANDONED:
+        # По забытой карточке не «поставьте дело» — тут решают, ведём мы её
+        # дальше или нет, и это решение РОПа, а не напоминание брокеру.
+        quiet = work.get("abandoned_days")
+        span = f"{float(quiet):.0f} дн." if isinstance(quiet, (int, float)) else "месяцы"
+        return (
+            f"Карточка брошена {span} — решить: возвращать клиента в работу "
+            f"или закрывать сделку"
+        )
+
     fix = RECORD_FIXES.get(str(work.get("reason") or ""))
     if fix:
         # Претензия к записи в карточке отвечается записью, а не ожиданием.
