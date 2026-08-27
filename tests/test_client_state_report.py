@@ -677,23 +677,34 @@ def test_a_run_without_llm_calls_has_no_breakdown():
     assert cost_breakdown({"usage": {}}) == ""
 
 
-def test_the_summary_says_how_many_cards_have_a_readable_call():
-    """Карточка без разговора разобрана по одному пересказу брокера."""
+def test_the_summary_separates_calls_from_transcripts():
+    """«Разговор читается у 0 из 10» читалось как «звонков не было».
+
+    На прогоне 27.08 у покупателей было 19 записей «расшифровка не готова»
+    на десять карточек: звонки были, расшифрован не был ни один.
+    """
     from client_state_report import format_summary
 
     base = {
         "funnel": "sellers", "funnel_label": "Продавцы", "total": 10,
         "analyzed": 8, "cost_rub": 3.0, "cost_rub_per_card": 0.3,
     }
-    blind = format_summary({**base, "cards_with_transcript": 0,
-                            "transcripts_pending": 4})
-    assert "🎧 Разговор читается у 0 из 10 карточек" in blind
-    assert "ещё 4 расшифровок не готово" in blind
+    calls_no_text = format_summary({
+        **base, "cards_with_call": 7, "cards_with_transcript": 0,
+        "transcripts_pending": 19,
+    })
+    assert "📞 Звонки есть у 7 из 10 карточек" in calls_no_text
+    assert "разговор читается у 0" in calls_no_text
+    assert "ещё 19 расшифровок не готово" in calls_no_text
 
-    seeing = format_summary({**base, "cards_with_transcript": 7,
-                             "transcripts_pending": 0})
-    assert "🎧 Разговор читается у 7 из 10 карточек" in seeing
-    assert "не готово" not in seeing
+    # Всё расшифровано — вторую половину строки не пишем, она лишняя.
+    all_read = format_summary({
+        **base, "cards_with_call": 7, "cards_with_transcript": 7,
+        "transcripts_pending": 0,
+    })
+    assert "📞 Звонки есть у 7 из 10 карточек" in all_read
+    assert "разговор читается" not in all_read
+    assert "не готово" not in all_read
 
 
 def test_a_failed_fetch_is_not_reported_as_a_bitrix_delay():

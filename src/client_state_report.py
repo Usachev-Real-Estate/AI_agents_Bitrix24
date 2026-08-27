@@ -310,10 +310,17 @@ def format_summary(stats: dict[str, Any]) -> str:
     # одной карточки из семи, и проверка работала вхолостую. Разговоры
     # по-прежнему читаются моделью как первоисточник, и сколько их читается —
     # видно здесь: карточка без разговора разобрана по одному пересказу.
-    with_calls = int(stats.get("cards_with_transcript") or 0)
+    with_calls = int(stats.get("cards_with_call") or 0)
+    readable = int(stats.get("cards_with_transcript") or 0)
     total = int(stats.get("total") or 0)
     if total:
-        line = f"🎧 Разговор читается у {with_calls} из {total} карточек"
+        # Сначала звонки, потом расшифровки: после снятия сверки главное
+        # доказательство работы — сам факт разговора, а не его текст. Одна
+        # строка «разговор читается у 0 из 10» читалась как «звонков не
+        # было», хотя звонки были и ни один не расшифрован.
+        line = f"📞 Звонки есть у {with_calls} из {total} карточек"
+        if readable != with_calls:
+            line += f", разговор читается у {readable}"
         pending = int(stats.get("transcripts_pending") or 0)
         tails = []
         if pending:
