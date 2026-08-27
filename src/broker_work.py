@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -502,6 +503,31 @@ def has_open_future_task(
     return open_future_deadline(events, now) is not None
 
 
+_DATE_IN_TEXT = re.compile(r"\d{4}-\d{2}-\d{2}|\d{1,2}\.\d{1,2}\.\d{4}")
+
+
+def _extract_date(text: str) -> datetime | None:
+    """Дата из срока, даже если она внутри фразы.
+
+    #11952: срок записан как «сегодня - завтра (2026-08-03 - 2026-08-04)».
+    Строка целиком не разбирается, и совет выходил «уточнить дату» — про
+    даты, которые прошли три недели назад и написаны прямо в ней же.
+    Из диапазона берём последнюю дату: срок кончается ею, а не началом.
+    """
+    whole = _parse(text)
+    if whole is not None:
+        return whole
+    found: list[datetime] = []
+    for chunk in _DATE_IN_TEXT.findall(str(text or "")):
+        if "." in chunk:
+            day, month, year = chunk.split(".")
+            chunk = f"{year}-{int(month):02d}-{int(day):02d}"
+        parsed = _parse(chunk)
+        if parsed is not None:
+            found.append(parsed)
+    return max(found) if found else None
+
+
 def _date_state(text: str, now: datetime) -> str:
     """Срок: "future" / "past" / "" (не дата).
 
@@ -509,7 +535,7 @@ def _date_state(text: str, now: datetime) -> str:
     на 19 августа», когда сегодня 26-е, читается как издёвка: срок уже
     сорван, и планировать надо не его, а разговор о новом.
     """
-    parsed = _parse(text)
+    parsed = _extract_date(text)
     if parsed is None:
         return ""
     return "future" if parsed > now else "past"
@@ -575,6 +601,13 @@ def next_action(
         return "Запланировать дело: согласовать с клиентом следующий шаг и срок"
 
     when_state = _date_state(when, now) if dated else ""
+    # В сообщении называем разобранную дату, а не фразу целиком: «Срок сегодня
+    # - завтра (2026-08-03 - 2026-08-04) прошёл» читать нельзя.
+    resolved = _extract_date(when) if dated else None
+    day = (
+        resolved.astimezone(PORTAL_TZ).date().isoformat()
+        if resolved is not None else when
+    )
 
     if who == "client":
         # Агента называем агентом. «Проверить, выполнил ли клиент» про
@@ -588,12 +621,12 @@ def next_action(
         loss = " — иначе контакт потеряется" if agent else ""
         if when_state == "future":
             return (
-                f"Запланировать дело на {when}: связаться и проверить, "
+                f"Запланировать дело на {day}: связаться и проверить, "
                 f"выполнено ли — {what}"
             )
         if when_state == "past":
             return (
-                f"Срок {when} прошёл, ответа нет — связаться с {noun} "
+                f"Срок {day} прошёл, ответа нет — связаться с {noun} "
                 f"и назначить новый: {what}"
             )
         if dated:
@@ -607,9 +640,9 @@ def next_action(
         )
 
     if when_state == "future":
-        return f"Запланировать дело на {when}: {what}"
+        return f"Запланировать дело на {day}: {what}"
     if when_state == "past":
-        return f"Срок {when} прошёл, дела нет — связаться и назначить новый: {what}"
+        return f"Срок {day} прошёл, дела нет — связаться и назначить новый: {what}"
     if dated:
         return f"Запланировать дело: уточнить дату («{when}») и поставить — {what}"
     return f"Запланировать дело с датой: {what}"

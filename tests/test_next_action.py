@@ -184,3 +184,38 @@ def test_todays_date_counts_as_past_not_future():
     """Срок «сегодня» без дела — уже просрочен к моменту прогона."""
     action = next_action(_step("Созвон", when="2026-08-26"), [], NOW)
     assert action.startswith("Срок 2026-08-26 прошёл")
+
+
+# ── Дата внутри фразы ──────────────────────────────────────────────────
+def test_a_date_buried_in_a_phrase_is_read():
+    """#11952: «сегодня - завтра (2026-08-03 - 2026-08-04)».
+
+    Строка целиком не разбирается, и совет выходил «уточнить дату» — про
+    даты, которые прошли три недели назад и написаны прямо в ней же.
+    """
+    action = next_action(
+        _step("Подготовить объект в Афине",
+              when="сегодня - завтра (2026-08-03 - 2026-08-04)"),
+        [], NOW,
+    )
+    assert action.startswith("Срок 2026-08-04 прошёл")
+    assert "уточнить дату" not in action
+
+
+def test_a_range_takes_its_last_date():
+    """Срок кончается концом диапазона, а не его началом."""
+    action = next_action(
+        _step("Показ", when="с 2026-08-28 по 2026-08-30"), [], NOW,
+    )
+    assert action == "Запланировать дело на 2026-08-30: Показ"
+
+
+def test_a_russian_dotted_date_is_read():
+    action = next_action(_step("Созвон", when="перезвонить 19.08.2026"), [], NOW)
+    assert action.startswith("Срок 2026-08-19 прошёл")
+
+
+def test_a_phrase_without_any_date_still_asks_to_pin_it_down():
+    action = next_action(_step("Созвон", when="в пятницу"), [], NOW)
+    assert "уточнить дату" in action
+    assert "в пятницу" in action

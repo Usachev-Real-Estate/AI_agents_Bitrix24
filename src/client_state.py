@@ -1067,17 +1067,28 @@ def apply_derived_verdict(
         return True
 
     _step = state.get("next_step") if isinstance(state.get("next_step"), dict) else {}
+    # Что осталось от утверждений модели после сверки цитат. Без этого по
+    # прогону нельзя отличить «модель не поставила флаг» от «цитата не нашлась
+    # в карточке», а это два разных разговора: первый — про промпт, второй —
+    # про то, что модель сослалась на несуществующую фразу.
+    state["work_claims"] = {
+        "claims_messaged": _claimed(
+            "claims_messaged", "claims_messaged_quote", "написал клиенту",
+        ),
+        "claims_no_answer": _claimed(
+            "claims_no_answer", "claims_no_answer_quote", "клиент не отвечает",
+        ),
+        "pause_explained": _claimed(
+            "pause_explained", "pause_reason_quote", "причина паузы",
+        ),
+    }
     state["work_evidence"] = assess_broker_work(
         events or [],
         profile=profile,
         stage_id=stage_id,
         hours_on_stage=hours_on_stage,
-        claims_messaged=_claimed(
-            "claims_messaged", "claims_messaged_quote", "написал клиенту",
-        ),
-        claims_no_answer=_claimed(
-            "claims_no_answer", "claims_no_answer_quote", "клиент не отвечает",
-        ),
+        claims_messaged=state["work_claims"]["claims_messaged"],
+        claims_no_answer=state["work_claims"]["claims_no_answer"],
         # «Из комментария не понять, что с клиентом» засчитывается только
         # тогда, когда модель и сама признала, что картину не восстановила.
         # #16192: она написала три предложения про собственника, дизайн-проект
@@ -1093,9 +1104,7 @@ def apply_derived_verdict(
         next_step_when=str(_step.get("when") or ""),
         # Названная причина паузы — тоже снимает, но только вместе с делом
         # на контроле и только на тот срок, который причина покрывает.
-        pause_explained=_claimed(
-            "pause_explained", "pause_reason_quote", "причина паузы",
-        ),
+        pause_explained=state["work_claims"]["pause_explained"],
         pause_until=str(work.get("pause_until") or ""),
     )
     envelope["work_proven"] = state["work_evidence"]["proven"]
@@ -1364,6 +1373,65 @@ def analyze_deal(
             float(state.get("confidence") or 0.0),
         )
     return envelope
+
+
+def card_digest(result: dict[str, Any]) -> dict[str, Any]:
+    """Карточка прогона в машиночитаемом виде: только коды и числа.
+
+    Нужна, чтобы два прогона можно было сравнить построчно, а не глазами по
+    двум простыням текста, и чтобы по файлу было видно, почему правило не
+    сработало: модель не поставила флаг или цитата не нашлась в карточке.
+
+    Текста здесь нет намеренно. Цель клиента, ситуация и цитаты — это имена,
+    адреса и суммы; в отчёт они уходят по делу, а в файл, который потом
+    таскают между прогонами и пересылают, попадать не должны.
+    """
+    state = result.get("state") or {}
+    work = state.get("work_evidence") or {}
+    raw = state.get("broker_work") or {}
+    facts = state.get("stage_facts") or {}
+    contradictions = [c for c in state.get("contradictions") or [] if isinstance(c, dict)]
+    present = sum(
+        1 for f in facts.values()
+        if isinstance(f, dict) and f.get("present")
+    )
+    party = state.get("counterparty") if isinstance(
+        state.get("counterparty"), dict
+    ) else {}
+    return {
+        "deal_id": _coerce_int(result.get("deal_id")),
+        "skipped_reason": _clean_str(result.get("reason")),
+        "verdict": _clean_str(state.get("verdict")),
+        "temperature": _clean_str(state.get("temperature")),
+        "risk": _clean_str(state.get("risk")),
+        "confidence": round(float(state.get("confidence") or 0.0), 2),
+        "recoverable": state.get("recoverable"),
+        "counterparty": _clean_str(party.get("who")),
+        "work_reason": _clean_str(work.get("reason")),
+        "work_proven": bool(work.get("proven")),
+        "days_quiet": work.get("days_quiet"),
+        "window_days": work.get("window_days"),
+        "facts_present": present,
+        "facts_needed": len(facts),
+        "missing": len(state.get("missing") or []),
+        "evidence": len(state.get("evidence") or []),
+        "contradictions": len(contradictions),
+        "contradictions_material": sum(
+            1 for c in contradictions
+            if str(c.get("severity", "medium")).lower() in MATERIAL_SEVERITY
+        ),
+        # Что сказала модель и что от этого осталось после сверки цитат.
+        "model_flags": {
+            key: bool(raw.get(key))
+            for key in (
+                "claims_messaged", "claims_no_answer", "pause_explained",
+            )
+        },
+        "verified_flags": dict(state.get("work_claims") or {}),
+        "comment_informative": bool(raw.get("comment_informative", True)),
+        "pause_until": _clean_str(raw.get("pause_until")),
+        "has_next_action": bool(str(state.get("next_action") or "").strip()),
+    }
 
 
 def _is_agent_card(state: dict[str, Any]) -> bool:
