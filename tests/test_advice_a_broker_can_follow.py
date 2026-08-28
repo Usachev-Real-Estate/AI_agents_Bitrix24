@@ -72,34 +72,84 @@ def test_a_named_step_is_untouched_by_the_silence():
 
 
 # ── откуда берётся флаг ────────────────────────────────────────────────
-def _derived(signals: dict, profile) -> dict:
+CALL = {
+    "kind": "activity", "created": "2026-08-25T10:00:00+03:00",
+    "type_id": 2, "completed": "Y", "text": "Звонок",
+}
+
+
+def _derived(signals: dict, profile, events=None, work=None) -> dict:
     state = {
         "signals": signals, "recoverable": True, "stage_facts": {},
         "next_step": {"what": "unknown", "when": "unknown", "who": "unknown"},
         "missing": [], "confidence": 0.5,
     }
+    if work:
+        state["broker_work"] = work
     record = {"ID": 12290, "STAGE_ID": "C18:NEW", "DATE_CREATE": "2026-08-01"}
-    apply_derived_verdict(state, record, profile, {}, [], None)
+    apply_derived_verdict(state, record, profile, {}, events or [], None)
     return state
 
 
 def test_a_buyer_who_does_not_answer_sets_the_flag():
-    state = _derived({"client_responsive": False}, BUYER_PROFILE)
+    """#12290: брокеры звонили — звонки в таймлайне есть, трубку не берут."""
+    state = _derived({"client_responsive": False}, BUYER_PROFILE, [CALL])
     assert state["counterparty_silent"] is True
 
 
 def test_an_owner_who_does_not_answer_sets_the_flag():
     """Ключ у воронок разный — ответ совету нужен один."""
-    state = _derived({"owner_responsive": False}, SELLER_PROFILE)
+    state = _derived({"owner_responsive": False}, SELLER_PROFILE, [CALL])
     assert state["counterparty_silent"] is True
+
+
+def test_nobody_ever_called_is_not_the_client_being_silent():
+    """#16656, #16554, #16658, #16668 — регресс, введённый этой же правкой.
+
+    «Связи с клиентом пока не зафиксировано» — и модель ставит
+    owner_responsive=false. Это не отказ собственника говорить, а
+    отсутствие разговора вовсе. Совет выходил обвинительным не в ту
+    сторону: брокеру, который ни разу не звонил, предлагалось записать,
+    «сколько раз уже пробовали».
+    """
+    state = _derived({"owner_responsive": False}, SELLER_PROFILE, [])
+    assert state["counterparty_silent"] is False
+
+
+def test_the_brokers_own_words_count_as_a_trace():
+    """«Не отвечает» с подтверждённой цитатой — тоже след попытки."""
+    said = {
+        "kind": "comment", "created": "2026-08-25T10:00:00+03:00",
+        "text": "клиент не отвечает третий день", "has_files": False,
+    }
+    state = _derived(
+        {"owner_responsive": False}, SELLER_PROFILE, [said],
+        work={
+            "claims_no_answer": True,
+            "claims_no_answer_quote": "клиент не отвечает",
+        },
+    )
+    assert state["counterparty_silent"] is True
+
+
+def test_an_unquoted_claim_is_not_a_trace():
+    """Цитаты нет в карточке — утверждения нет. Правило проекта, не новое."""
+    state = _derived(
+        {"owner_responsive": False}, SELLER_PROFILE, [],
+        work={
+            "claims_no_answer": True,
+            "claims_no_answer_quote": "клиент не отвечает",
+        },
+    )
+    assert state["counterparty_silent"] is False
 
 
 def test_silence_must_be_proven_not_assumed():
     """Молчание модели про связь не делает клиента молчащим."""
-    assert _derived({}, BUYER_PROFILE)["counterparty_silent"] is False
-    assert _derived({}, SELLER_PROFILE)["counterparty_silent"] is False
+    assert _derived({}, BUYER_PROFILE, [CALL])["counterparty_silent"] is False
+    assert _derived({}, SELLER_PROFILE, [CALL])["counterparty_silent"] is False
 
 
 def test_a_responsive_buyer_is_not_silent():
-    state = _derived({"client_responsive": True}, BUYER_PROFILE)
+    state = _derived({"client_responsive": True}, BUYER_PROFILE, [CALL])
     assert state["counterparty_silent"] is False

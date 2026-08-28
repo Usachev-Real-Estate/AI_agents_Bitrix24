@@ -1123,14 +1123,6 @@ def apply_derived_verdict(
     # знает его только профиль. Кладём решение в состояние: разделы отчёта
     # собираются из него, профиля там уже нет.
     state["cold_is_a_loss"] = profile.cold_means_losing
-    # Молчит ли контрагент. Ключ у воронок разный (client_responsive против
-    # owner_responsive), а совету нужен один ответ: обе умолчанием True,
-    # поэтому отсутствующий ключ на итог не влияет.
-    _signals = state.get("signals") if isinstance(state.get("signals"), dict) else {}
-    state["counterparty_silent"] = not (
-        bool(_signals.get("client_responsive", True))
-        and bool(_signals.get("owner_responsive", True))
-    )
     envelope["temperature"] = level
     hours_on_stage = _stage_hours(record, datetime.now(timezone.utc))
     envelope["stage_age_known"] = hours_on_stage is not None
@@ -1212,6 +1204,37 @@ def apply_derived_verdict(
             "pause_explained", "pause_reason_quote", "причина паузы",
         ),
     }
+    # Молчит ли контрагент — и знаем ли мы это, или только предполагаем.
+    #
+    # Ключ у воронок разный (client_responsive против owner_responsive), а
+    # совету нужен один ответ; оба умолчанием True, поэтому отсутствующий
+    # ключ на итог не влияет.
+    #
+    # Одного флага модели мало. Прогон 28.08 13:07: на карточках, где
+    # «связи с клиентом пока не зафиксировано» и «факт коммуникации
+    # отсутствует», модель ставила owner_responsive=false — не потому, что
+    # собственник отказывается говорить, а потому, что разговора в карточке
+    # нет вовсе. Совет выходил обвинительным не в ту сторону: брокеру,
+    # который ни разу не звонил, предлагалось записать, «сколько раз уже
+    # пробовали». На соседних карточках с тем же содержанием флаг
+    # оставался true — значит по нему одному судить нельзя.
+    #
+    # Молчание контрагента — это событие, и оно требует следа: попытки
+    # дозвона в таймлайне или слов брокера «не отвечает», подтверждённых
+    # цитатой. Нет следа — нет и утверждения о молчании.
+    _signals = state.get("signals") if isinstance(state.get("signals"), dict) else {}
+    _model_says_silent = not (
+        bool(_signals.get("client_responsive", True))
+        and bool(_signals.get("owner_responsive", True))
+    )
+    state["counterparty_silent"] = bool(
+        _model_says_silent
+        and (
+            has_any_call(events or [])
+            or state["work_claims"]["claims_no_answer"]
+        ),
+    )
+
     # Пометка, а не претензия: работа описана комментарием, а разговора по
     # карточке не видно. Считается отдельно от оценки работы и на разделы
     # отчёта не влияет.
