@@ -15,6 +15,7 @@ from broker_work import GAP_PAUSE_TASK_TOO_LATE
 from broker_work import PROVEN
 from broker_work import PROVEN_BY_PAUSE
 from broker_work import REMINDERS as WORK_REMINDERS
+from broker_work import SELF_ARGUED_GAPS
 from broker_work import TIMELESS_GAPS
 from buyer_commission_reminder import deal_url
 from funnel_profiles import fact_name_table
@@ -273,7 +274,11 @@ def format_card(
             head = "🕸 Карточка брошена"
         else:
             head = "🔧 Работа не подтверждена"
-        tail = "" if reason_code in WORK_REMINDERS or not tail else f" ({tail})"
+        # Напоминание печатается без скобок: норма этапа там не довод.
+        # Но у разрыва со своим доводом скобки и есть вся проверяемость —
+        # «вернуться собрался позже» без двух дат оспорить нечем.
+        drop_tail = reason_code in WORK_REMINDERS and reason_code not in SELF_ARGUED_GAPS
+        tail = "" if drop_tail or not tail else f" ({tail})"
         lines.append(
             (
                 f"{head}{tail}" if reason_code == GAP_ABANDONED

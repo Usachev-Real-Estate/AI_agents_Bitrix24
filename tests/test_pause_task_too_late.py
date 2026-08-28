@@ -128,3 +128,65 @@ def test_an_unnamed_pause_end_never_reaches_this_branch():
     """Срок паузы не назван — проверять нечем, и ожидание засчитывается."""
     work = _assess([_comment(3.9), _task("2026-09-07")], pause_until="")
     assert work["reason"] == PROVEN_BY_PAUSE
+
+
+def test_setting_a_task_is_never_worse_than_not_setting_one():
+    """Лестница не должна быть перевёрнутой (решение агентства).
+
+    Паузу записал, дела нет — напоминание. Паузу записал и дело поставил,
+    пусть и поздно, — тоже напоминание: он сделал больше, а не меньше.
+    Иначе правило учит не ставить дел.
+    """
+    from broker_work import REMINDERS
+
+    assert GAP_PAUSE_NO_TASK in REMINDERS
+    assert GAP_PAUSE_TASK_TOO_LATE in REMINDERS
+
+
+def test_the_card_lands_in_reminders_not_in_shortfalls():
+    from client_state_report import split_sections
+
+    work = _assess([_comment(3.9), _task("2026-09-07")])
+    card = {
+        "deal_id": 16756, "skipped": False,
+        "state": {"temperature": "warm", "verdict": "poor", "work_evidence": work},
+    }
+    losing, _ab, neglected, reminders, _w, _f = split_sections([card])
+    assert losing == []
+    assert neglected == []
+    assert [r["deal_id"] for r in reminders] == [16756]
+
+
+def test_a_reminder_keeps_the_dates_that_prove_it():
+    """Напоминания печатаются без скобок — но не это: даты и есть довод."""
+    work = _assess([_comment(3.9), _task("2026-09-07")])
+    card = format_card(
+        {
+            "deal_id": 16756, "skipped": False,
+            "state": {
+                "temperature": "warm", "verdict": "poor", "work_evidence": work,
+            },
+        },
+        "ЖК «Доминион»",
+        WEBHOOK,
+    )
+    assert "🔔 Напоминание" in card
+    assert "Работа не подтверждена" not in card
+    assert "(клиент возвращается 2026-09-01, дело на 2026-09-07)" in card
+
+
+def test_a_plain_reminder_still_prints_without_brackets():
+    work = _assess([_comment(3.9)])
+    card = format_card(
+        {
+            "deal_id": 14052, "skipped": False,
+            "state": {
+                "temperature": "warm", "verdict": "poor", "work_evidence": work,
+            },
+        },
+        "ЖК «Садовые кварталы»",
+        WEBHOOK,
+    )
+    assert "🔔 Напоминание" in card
+    assert "норма" not in card
+    assert "последний след" not in card
