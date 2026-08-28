@@ -101,7 +101,17 @@ def test_fresh_leads_are_not_a_complaint_about_brokers():
 
 def test_a_mixed_sample_names_how_many_are_young():
     text = _summary(unrecoverable=8, unrecoverable_too_early=3)
-    assert "Неинформативных карточек: 8 (3 моложе отсрочки — по ним судить рано)" in text
+    assert (
+        "Неинформативных карточек: 8 (3 моложе отсрочки — по 3 карточкам "
+        "судить ещё рано)"
+    ) in text
+
+
+def test_a_single_young_card_is_not_called_them():
+    """«1 моложе отсрочки — по ним судить рано» — число не сходится."""
+    text = _summary(unrecoverable=8, unrecoverable_too_early=1)
+    assert "по 1 карточке судить ещё рано" in text
+    assert "по ним" not in text
 
 
 def test_a_judged_sample_reads_as_before():
@@ -119,3 +129,39 @@ def test_an_old_run_without_the_key_reads_as_before():
     text = _summary(unrecoverable=8)
     assert "Неинформативных карточек: 8" in text
     assert "отсрочки" not in text
+
+
+# ── пустой раздел потерь ───────────────────────────────────────────────
+def test_no_loss_also_admits_the_cards_it_did_not_judge():
+    """После #17080 холод внутри отсрочки тревогу не поднимает.
+
+    Значит «ни одной карточки с признаками потери» стало неверным ровно
+    так же, как «работа подтверждена»: признак был, мы решили пока не
+    считать его потерей.
+    """
+    text = format_sections([_too_early(i) for i in (17048, 17058)], {}, WEBHOOK)
+    assert (
+        "Ни одной карточки с признаками потери; по 2 карточкам судить ещё рано."
+    ) in text
+
+
+def test_no_loss_stays_plain_when_everything_was_judged():
+    text = format_sections([_worked(16204)], {}, WEBHOOK)
+    assert "Ни одной карточки с признаками потери." in text
+    assert "судить ещё рано" not in text
+
+
+def test_the_plural_of_one_card_is_singular_everywhere():
+    text = format_sections([_too_early(17048)], {}, WEBHOOK)
+    assert "по 1 карточке судить ещё рано" in text
+    assert "карточкам" not in text
+
+
+def test_eleven_is_not_singular():
+    """21 — «карточке», 11 — «карточкам». Правило не «последняя цифра 1»."""
+    from client_state_report import too_early_tail
+
+    assert too_early_tail(1) == "по 1 карточке судить ещё рано"
+    assert too_early_tail(11) == "по 11 карточкам судить ещё рано"
+    assert too_early_tail(21) == "по 21 карточке судить ещё рано"
+    assert too_early_tail(0) == ""
