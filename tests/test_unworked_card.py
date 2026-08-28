@@ -140,3 +140,21 @@ def test_the_source_mix_still_shows_where_contacts_came_from():
     line = format_source_mix({"26": 4, "1": 3})
     assert "Диспозл 5% 4" in line
     assert "холодная база" not in line
+
+
+def test_the_wording_does_not_deny_what_the_report_just_said():
+    """#16210: отчёт пересказал комментарий — и заявил, что из него ничего не понять.
+
+    Претензия к неотработанной карточке остаётся, но она не в том, что
+    текст нечитаем: одной строки контекста мало, чтобы сделку подхватил
+    кто-то другой. Спорить с собственным пересказом отчёт не должен.
+    """
+    from broker_work import RECORD_FIXES, REASON_RU
+
+    reason = REASON_RU[GAP_EMPTY_COMMENT]
+    assert "не понять" not in reason
+    assert "подхватить сделку" in reason
+
+    fix = RECORD_FIXES[GAP_EMPTY_COMMENT]
+    assert "что происходит с клиентом" not in fix
+    assert "следующий шаг" in fix
