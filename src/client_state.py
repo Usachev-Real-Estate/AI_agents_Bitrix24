@@ -16,6 +16,8 @@ from db import get_client_state, init_db, save_client_state
 from lead_quality_audit import _message_content_to_str
 from funnel_profiles import BUYER_PROFILE, SELLER_PROFILE, FunnelProfile
 from broker_work import (
+    PORTAL_TZ,
+    _extract_date,
     assess_broker_work,
     comment_without_a_call,
     has_any_call,
@@ -46,6 +48,9 @@ logger = logging.getLogger(__name__)
 CALL_ACTIVITY_TYPE_ID = 2
 VALID_RISKS = frozenset({"low", "medium", "high"})
 VALID_NEXT_STEP_WHO = frozenset({"broker", "client", "unknown"})
+# Чем модель отвечает «не знаю». Отдельной константой, потому что по
+# этому значению сверяются поля из разных секций её ответа.
+UNKNOWN_VALUE = "unknown"
 
 
 class LLMClient(Protocol):
@@ -516,8 +521,16 @@ def compute_completeness_verdict(
     # написанного, а не про то, сколько времени прошло.
     grace = grace_period_for(profile, stage_id)
     if hours_on_stage is not None and hours_on_stage < grace:
+        # #15594: «этап моложе отсрочки (24 ч < 24 ч)» — неравенство, которое
+        # само себя опровергает. Карточке было 23.6 часа, округление до целого
+        # съело разницу, на которой стоит вердикт. У границы показываем
+        # десятую долю: цифра, которой обосновано решение, должна сходиться.
+        shown = (
+            f"{hours_on_stage:.1f}"
+            if round(hours_on_stage) >= grace else f"{hours_on_stage:.0f}"
+        )
         return "too_early", (
-            f"этап моложе отсрочки ({hours_on_stage:.0f} ч < {grace} ч)"
+            f"этап моложе отсрочки ({shown} ч < {grace} ч)"
         )
 
     if not state.get("recoverable", True):
@@ -996,6 +1009,53 @@ def prepare_deal_record(deal: dict[str, Any], settings: Settings | None = None) 
     return record
 
 
+def reconcile_step_date(state: dict[str, Any]) -> str:
+    """Свести к одной дату следующего шага и вернуть её ("" — даты нет).
+
+    Дату шага модель заполняет дважды: в signals.next_step_date, откуда её
+    берёт температура, и в next_step.when, который печатается в отчёте и по
+    которому строится совет. Поля независимы, и модель отвечала по ним
+    вразнобой. #14362: «🔥 горячий — есть согласованный шаг с датой» и
+    строкой ниже «Шаг: … (не указано, брокер)», а советом — «запланировать
+    дело с датой». Три строки на одной карточке, и все три про одно и то же.
+
+    Кто прав, выбирать не из чего: обе половины — ответ одной и той же
+    модели про одну и ту же карточку. Поэтому не выбираем, а сводим: дата,
+    названная в любой из половин, становится общей. Ничего не выдумывается —
+    пустое поле заполняется соседним, а два разных значения не трогаются:
+    там спорить не с чем, дата есть в обоих.
+
+    Заодно это выносит на свет число, на котором стоит вердикт: раньше
+    температура опиралась на дату, которой в отчёте не было видно, и
+    проверить её РОП не мог.
+    """
+    signals = state.get("signals") if isinstance(state.get("signals"), dict) else None
+    step = state.get("next_step") if isinstance(state.get("next_step"), dict) else None
+    if signals is None and step is None:
+        return ""
+
+    signal_date = _clean_str((signals or {}).get("next_step_date"))
+    if signal_date.lower() == UNKNOWN_VALUE:
+        signal_date = ""
+    when = _clean_str((step or {}).get("when"))
+    if when.lower() == UNKNOWN_VALUE:
+        when = ""
+
+    # Из фразы «в пятницу» даты не выйдет — и это правильный ответ «даты
+    # нет»: совет как раз просит её уточнить.
+    parsed = _extract_date(when) if when else None
+    when_date = parsed.astimezone(PORTAL_TZ).date().isoformat() if parsed else ""
+
+    resolved = when_date or signal_date
+    if not resolved:
+        return ""
+    if signals is not None and not signal_date:
+        signals["next_step_date"] = resolved
+    if step is not None and not when:
+        step["when"] = resolved
+    return resolved
+
+
 def apply_derived_verdict(
     state: dict[str, Any],
     record: dict[str, Any],
@@ -1034,6 +1094,8 @@ def apply_derived_verdict(
         else {"who": WHO_CLIENT, "why": ""}
     )
 
+    reconcile_step_date(state)
+
     level, why = compute_temperature(
         state.get("signals", {}),
         recoverable=bool(state.get("recoverable", True)),
@@ -1042,6 +1104,10 @@ def apply_derived_verdict(
     )
     state["temperature"] = level
     state["temperature_reason"] = why
+    # Считать ли «холодный» потерей — свойство воронки, а не карточки, и
+    # знает его только профиль. Кладём решение в состояние: разделы отчёта
+    # собираются из него, профиля там уже нет.
+    state["cold_is_a_loss"] = profile.cold_means_losing
     envelope["temperature"] = level
     hours_on_stage = _stage_hours(record, datetime.now(timezone.utc))
     envelope["stage_age_known"] = hours_on_stage is not None
