@@ -11,6 +11,7 @@ from typing import Any
 
 from broker_work import REASON_RU as WORK_REASON_RU
 from broker_work import GAP_ABANDONED
+from broker_work import GAP_DUE_TASK_NO_RESULT
 from broker_work import GAP_PAUSE_TASK_TOO_LATE
 from broker_work import PROVEN
 from broker_work import PROVEN_BY_PAUSE
@@ -588,6 +589,35 @@ def format_stage_mix(stages: dict[str, int]) -> str:
 
 
 # ── Два раздела: клиент уходит / брокер не дорабатывает ────────────────
+def _gap_has_elapsed(work: dict[str, Any]) -> bool:
+    """Пробел, за которым уже прошло время, — или ещё нет.
+
+    «Теряем клиента» — про то, что клиента упускают, и упустить его можно
+    только со временем. #16736: горячая карточка, бюджет и сроки названы,
+    уверенность 0.95, клиент вернётся в Москву к сентябрю — и она одна
+    стоит в тревожном разделе, потому что дело назначено на сегодня, а
+    отчёт собран в 13:51. День не кончился; терять пока нечего.
+
+    Правило «горячий и работа не подтверждена» писалось под #16066 —
+    восемь дней тишины при норме три. Наступивший сегодня срок такой
+    тревоги не заслуживает: если к вечеру брокер не отпишется, следующий
+    прогон поднимет её сам, уже с просрочкой.
+
+    Остальные пробелы время учитывают по построению: норма этапа, дни
+    молчания, конец паузы.
+    """
+    if str(work.get("reason") or "") != GAP_DUE_TASK_NO_RESULT:
+        return True
+    due = work.get("due_task") if isinstance(work.get("due_task"), dict) else {}
+    overdue = due.get("days_overdue")
+    if not isinstance(overdue, (int, float)):
+        # Просрочки не знаем — значит не знаем и того, что срок ещё не вышел.
+        # Снимать тревогу с горячей карточки из-за отсутствующего поля —
+        # то же самое отсутствие данных, выданное за результат.
+        return True
+    return overdue >= 1
+
+
 def _is_losing_client(state: dict[str, Any]) -> bool:
     """Признаки, что клиента теряем: остыл, замолчал, картины нет.
 
@@ -619,7 +649,11 @@ def _is_losing_client(state: dict[str, Any]) -> bool:
     ):
         return True
     work = state.get("work_evidence") or {}
-    if str(state.get("temperature") or "") == "hot" and not work.get("proven", True):
+    if (
+        str(state.get("temperature") or "") == "hot"
+        and not work.get("proven", True)
+        and _gap_has_elapsed(work)
+    ):
         # Горячий клиент, которым не занимаются, — самое дорогое в отчёте.
         # #16066: бюджет 130 млн, согласован шаг, восемь дней тишины при норме
         # три. Такая карточка не должна лежать вторым пунктом среди восьми
