@@ -201,7 +201,7 @@ def test_random_order_is_the_default_and_reproducible(pilot, monkeypatch):
     assert first != ["1", "2", "3", "4", "5"]
 
 
-@pytest.mark.parametrize("order", ["random", "judgeable", "newest"])
+@pytest.mark.parametrize("order", ["random", "judgeable", "newest", "uncached"])
 def test_out_of_qc_stages_never_take_a_slot_in_the_sample(pilot, monkeypatch, order):
     """По ним вердикта не будет в любом режиме, а место в выборке они занимают."""
     from funnel_profiles import SELLER_PROFILE
@@ -223,6 +223,33 @@ def test_a_funnel_entirely_out_of_qc_yields_an_empty_sample(pilot, monkeypatch):
         {"ID": str(i), "STAGE_ID": "UC_KEOOG8"} for i in range(1, 6)
     ])
     assert pilot.pick_deals(SELLER_PROFILE, 0, 5) == []
+
+
+def test_uncached_skips_deals_already_in_client_states(pilot, monkeypatch):
+    from funnel_profiles import BUYER_PROFILE
+
+    monkeypatch.setattr(pilot, "_bx_get_all_sync", lambda m, p: [
+        {"ID": "100", "STAGE_ID": "C18:NEW"},
+        {"ID": "200", "STAGE_ID": "C18:NEW"},
+        {"ID": "300", "STAGE_ID": "C18:NEW"},
+    ])
+    picked = pilot.pick_deals(
+        BUYER_PROFILE, 18, 2, "uncached", cached_deal_ids={200},
+    )
+    assert [d["ID"] for d in picked] == ["300", "100"]
+
+
+def test_uncached_respects_the_limit(pilot, monkeypatch):
+    from funnel_profiles import SELLER_PROFILE
+
+    monkeypatch.setattr(pilot, "_bx_get_all_sync", lambda m, p: [
+        {"ID": str(i), "STAGE_ID": "NEW"} for i in range(1, 21)
+    ])
+    picked = pilot.pick_deals(
+        SELLER_PROFILE, 0, 10, "uncached", cached_deal_ids=set(),
+    )
+    assert len(picked) == 10
+    assert [d["ID"] for d in picked] == [str(i) for i in range(20, 10, -1)]
 
 
 def test_closed_sale_takes_no_slot_in_the_sample(pilot, monkeypatch):

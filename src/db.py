@@ -1716,6 +1716,14 @@ def list_call_transcripts_for_deal(deal_id: int) -> list[dict[str, Any]]:
         return [dict(r) for r in rows]
 
 
+def list_client_state_deal_ids() -> set[int]:
+    """ID сделок, для которых уже есть снимок в client_states."""
+    init_db()
+    with db_session() as conn:
+        rows = conn.execute("SELECT deal_id FROM client_states").fetchall()
+    return {int(r[0]) for r in rows if r and r[0] is not None}
+
+
 def get_client_state(deal_id: int) -> dict[str, Any] | None:
     """Return stored client-state row for a buyer deal."""
     init_db()
