@@ -1,17 +1,18 @@
-"""Дело, назначенное на сегодня, — не потеря клиента.
+"""Дело со сроком — повод напомнить, а не потерять клиента.
 
 #16736 (прогон 28.08 13:51): горячая карточка, бюджет и сроки названы,
 уверенность 0.95, риск низкий, клиент вернётся в Москву к сентябрю — и
 она одна стоит в разделе «🚨 ТЕРЯЕМ КЛИЕНТА». Причина: дело назначено на
 сегодня, а отчёт собран в 13:51. День не кончился; терять пока нечего.
 
-Правило «горячий и работа не подтверждена» писалось под #16066 — восемь
-дней тишины при норме три. Наступивший сегодня срок такой тревоги не
-заслуживает: не отпишется брокер к вечеру — следующий прогон поднимет её
-сам, уже с просрочкой.
+Сначала эту карточку вывели из тревоги отдельным исключением — «срок
+наступил сегодня, тревога подождёт до завтра». Решение агентства от 28.08
+сняло вопрос шире: просроченное дело — тоже флажок «напомнить». Брокер,
+поставивший дело и не успевший его закрыть, сделал больше, чем брокер, не
+поставивший ничего, и упрёка получать не должен.
 
-Претензия к работе при этом остаётся: карточка по-прежнему в
-«недоработке», совет прежний.
+Поэтому карточка с делом уходит в 🔔 и не попадает ни в тревогу, ни в
+недоработки. Тревогу поднимает то, чего в карточке нет вовсе.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from broker_work import (  # noqa: E402
     GAP_ABANDONED,
     GAP_DUE_TASK_NO_RESULT,
     GAP_NO_TRACE_IN_WINDOW,
+    GAP_TASK_DUE_TODAY,
 )
 from client_state_report import split_sections  # noqa: E402
 
@@ -51,20 +53,28 @@ def _hot(deal_id: int, reason: str, *, overdue: int | None = None) -> dict:
     }
 
 
-def test_a_task_due_today_does_not_raise_the_alarm():
-    losing, _ab, neglected, _rem, _w, _f = split_sections(
-        [_hot(16736, GAP_DUE_TASK_NO_RESULT, overdue=0)],
+def test_a_task_due_today_is_a_reminder():
+    losing, _ab, neglected, reminders, _w, _f = split_sections(
+        [_hot(16736, GAP_TASK_DUE_TODAY, overdue=0)],
     )
     assert losing == []
-    # Претензия к работе остаётся — ушла только тревога.
-    assert [r["deal_id"] for r in neglected] == [16736]
+    assert neglected == []
+    assert [r["deal_id"] for r in reminders] == [16736]
 
 
-def test_a_task_overdue_by_a_day_does():
-    losing, _ab, _n, _rem, _w, _f = split_sections(
+def test_an_overdue_task_is_a_reminder_too():
+    """Решение агентства от 28.08: «если дело просрочено — флажок напомнить».
+
+    Раньше просрочка в один день заводила горячую карточку в 🚨. Разница
+    между «дело стоит на сегодня» и «срок вчера прошёл» — это разница в
+    тексте напоминания, а не в том, теряем ли мы клиента.
+    """
+    losing, _ab, neglected, reminders, _w, _f = split_sections(
         [_hot(16736, GAP_DUE_TASK_NO_RESULT, overdue=1)],
     )
-    assert [r["deal_id"] for r in losing] == [16736]
+    assert losing == []
+    assert neglected == []
+    assert [r["deal_id"] for r in reminders] == [16736]
 
 
 def test_eight_days_of_silence_still_raises_it():
@@ -83,17 +93,27 @@ def test_an_abandoned_hot_card_still_raises_it():
     assert [r["deal_id"] for r in abandoned] == [10122]
 
 
-def test_a_due_task_without_details_is_treated_as_elapsed():
-    """Подробностей о просрочке нет — молчать о тревоге не станем."""
-    losing, _ab, _n, _rem, _w, _f = split_sections(
+def test_a_due_task_without_details_is_still_a_reminder():
+    """Раздел выбирается по коду разрыва, а не по подробностям о просрочке.
+
+    Раньше отсутствие days_overdue решало судьбу карточки: поля нет —
+    считаем срок вышедшим и поднимаем тревогу. Теперь поле влияет только на
+    текст в скобках, и «не знаем, на сколько просрочено» перестало быть
+    поводом сказать о клиенте больше, чем мы знаем.
+    """
+    losing, _ab, _n, reminders, _w, _f = split_sections(
         [_hot(16736, GAP_DUE_TASK_NO_RESULT)],
     )
-    assert [r["deal_id"] for r in losing] == [16736]
-
-
-def test_a_warm_card_due_today_was_never_a_loss_anyway():
-    card = _hot(16736, GAP_DUE_TASK_NO_RESULT, overdue=0)
-    card["state"]["temperature"] = "warm"
-    losing, _ab, neglected, _rem, _w, _f = split_sections([card])
     assert losing == []
-    assert [r["deal_id"] for r in neglected] == [16736]
+    assert [r["deal_id"] for r in reminders] == [16736]
+
+
+def test_the_temperature_does_not_change_the_section():
+    """Тёплая, горячая, холодная — напоминание остаётся напоминанием."""
+    for temperature in ("warm", "hot", "cold"):
+        card = _hot(16736, GAP_TASK_DUE_TODAY, overdue=0)
+        card["state"]["temperature"] = temperature
+        losing, _ab, neglected, reminders, _w, _f = split_sections([card])
+        assert losing == [], temperature
+        assert neglected == [], temperature
+        assert [r["deal_id"] for r in reminders] == [16736], temperature

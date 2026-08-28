@@ -110,6 +110,14 @@ def _normalize_activity_item(item: dict[str, Any]) -> dict[str, Any]:
         # Срок дела нужен рекомендации: если по карточке уже стоит живое дело
         # на будущее, советовать «запланируйте дело» бессмысленно.
         "deadline": _clean_str(item.get("DEADLINE") or item.get("deadline")),
+        # Кто завёл дело. В отпечаток карточки не входит (_event_identity),
+        # поэтому поле ничего не стоит и портфель заново в модель не уедет.
+        # Правила его пока не читают — см. открытый вопрос про дела, которые
+        # заводит бизнес-процесс, в plans/qc-client-state-rules.md.
+        "author_id": _coerce_int(
+            item.get("AUTHOR_ID") or item.get("author_id")
+            or item.get("RESPONSIBLE_ID") or item.get("responsible_id"),
+        ),
     }
 
 
@@ -798,6 +806,13 @@ def unmask_state(
         due = evidence.get("due_task")
         if isinstance(due, dict):
             due["subject"] = unmask(str(due.get("subject") or ""), mask_map)
+        # Текст дела-заглушки печатается РОПу как довод: по нему видно, за
+        # что карточка получила претензию. Без разворота там будет
+        # «в деле только: „Позвонить КЛИЕНТ_1"».
+        if evidence.get("task_text"):
+            evidence["task_text"] = unmask(
+                str(evidence.get("task_text") or ""), mask_map,
+            )
 
     work = out.get("broker_work")
     if isinstance(work, dict):
@@ -1119,10 +1134,6 @@ def apply_derived_verdict(
     )
     state["temperature"] = level
     state["temperature_reason"] = why
-    # Считать ли «холодный» потерей — свойство воронки, а не карточки, и
-    # знает его только профиль. Кладём решение в состояние: разделы отчёта
-    # собираются из него, профиля там уже нет.
-    state["cold_is_a_loss"] = profile.cold_means_losing
     envelope["temperature"] = level
     hours_on_stage = _stage_hours(record, datetime.now(timezone.utc))
     envelope["stage_age_known"] = hours_on_stage is not None

@@ -625,11 +625,15 @@ def test_a_timing_gap_still_gets_the_usual_advice() -> None:
 
 
 def test_a_task_due_today_says_today() -> None:
-    """«Дело стоит на 2026-08-26 — ждём» в отчёте от 26-го заставляет сверять."""
+    """«Дело стоит на 2026-08-26 — ждём» в отчёте от 26-го заставляет сверять.
+
+    Дату называем прямо, а совет по решению агентства от 28.08 зовёт дело
+    выполнить: день срока — повод напомнить, а не ждать.
+    """
     events = [_task(2.0, (NOW + timedelta(hours=5)).isoformat())]
     action = next_action({"next_step": {"what": "показ"}}, events, NOW)
     assert "на сегодня" in action
-    assert "ждать результата" in action
+    assert "выполнить" in action
 
 
 def test_a_task_due_later_keeps_the_plain_wording() -> None:
