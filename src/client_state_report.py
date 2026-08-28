@@ -463,7 +463,18 @@ def format_summary(stats: dict[str, Any]) -> str:
     unrecoverable = int(stats.get("unrecoverable") or 0)
     if unrecoverable:
         empty = int(stats.get("empty_cards") or 0)
-        tail = f" (из них полностью пустых: {empty})" if empty else ""
+        tails = []
+        # Лид, заведённый два часа назад, пуст не по вине брокера — мы это
+        # уже признали вердиктом «рано судить». Без оговорки «неинформативных
+        # 8 из 10» на выборке свежих лидов читается как претензия к людям.
+        young = int(stats.get("unrecoverable_too_early") or 0)
+        if young >= unrecoverable:
+            tails.append("все моложе отсрочки — судить рано")
+        elif young:
+            tails.append(f"{young} моложе отсрочки — по ним судить рано")
+        if empty:
+            tails.append(f"полностью пустых: {empty}")
+        tail = f" ({', '.join(tails)})" if tails else ""
         parts.append(f"⚠️ Неинформативных карточек: {unrecoverable}{tail}")
 
     skipped = []
@@ -576,10 +587,21 @@ def _is_losing_client(state: dict[str, Any]) -> bool:
     выходит на связь» — обычное начало работы по холодной базе, а не потеря
     (#15594, решение агентства). Решает воронка, и она кладёт ответ в
     state["cold_is_a_loss"].
+
+    Внутри отсрочки остывания не бывает и у покупателей: клиенту не хватило
+    времени остыть. #17080 — карточке 22 часа при отсрочке 72, клиент один
+    раз не взял трубку и тем же комментарием договорился о показе в четверг,
+    а отчёт назвал это потерей. Обоснование правила («это событие, а не
+    отсутствие данных») на такой карточке не работает: событию неоткуда
+    взяться. Ярлык «холодный» остаётся, тревога снимается до конца отсрочки —
+    тот же принцип, что у собственников, только по возрасту карточки, а не
+    по воронке.
     """
+    too_early = str(state.get("verdict") or "") == "too_early"
     if (
         str(state.get("temperature") or "") == "cold"
         and state.get("cold_is_a_loss", True)
+        and not too_early
     ):
         return True
     work = state.get("work_evidence") or {}
@@ -589,7 +611,7 @@ def _is_losing_client(state: dict[str, Any]) -> bool:
         # три. Такая карточка не должна лежать вторым пунктом среди восьми
         # недоработок.
         return True
-    if str(state.get("verdict") or "") == "too_early":
+    if too_early:
         return False
     if state.get("recoverable") is not False:
         return False
@@ -723,9 +745,20 @@ def format_sections(
     if abandoned:
         # Раньше недоработок: месяц тишины срочнее, чем отставание на три дня.
         _block(f"🕸 БРОШЕНЫ — {len(abandoned)}", abandoned, "")
+    # «Работа подтверждена по всем прочитанным карточкам» на выборке, где по
+    # всем карточкам судить ещё рано, — то же самое отсутствие вердикта,
+    # выданное за вердикт. Прогон 28.08 12:08: двадцать свежих лидов, ни
+    # одного разбора работы, и обе воронки отрапортовали «подтверждена».
+    if waiting:
+        no_shortfall = (
+            f"Недоработок нет; по {len(waiting)} "
+            f"{'карточке' if len(waiting) == 1 else 'карточкам'} судить ещё рано."
+        )
+    else:
+        no_shortfall = "Работа подтверждена по всем прочитанным карточкам."
     _block(
         f"🔧 НЕДОРАБОТКА БРОКЕРА — {len(neglected)}", neglected,
-        "Работа подтверждена по всем прочитанным карточкам." + caveat,
+        no_shortfall + caveat,
     )
     if reminders:
         # Не претензия, а напоминание: ход за контрагентом, и вернуться к

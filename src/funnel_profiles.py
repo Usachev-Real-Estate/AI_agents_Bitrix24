@@ -162,9 +162,30 @@ def _dated(data: dict[str, Any]) -> bool:
     return _text(data, "next_step_date") not in ("", "unknown")
 
 
+# Пробел «шага с датой нет» звучит одинаково в двух разных случаях, а
+# случаи эти для РОПа противоположные. #11954: вердикт из семи фактов
+# недосчитался одного — бюджета, то есть следующий шаг он засчитал (дело в
+# Битриксе стоит, и «доказательство лучше пересказа»). Строкой выше
+# температура говорила «нет согласованного шага с датой». Две строки подряд,
+# и читатель видит спор.
+#
+# Спора нет: вопросы разные. Вердикт спрашивает, записан ли шаг хоть
+# где-нибудь; температура — договорились ли о нём с клиентом. Всю разницу
+# несло слово «согласованный», и заметить её было нельзя. Теперь случай со
+# стоящим делом называется отдельно: клиент горячим от плана брокера не
+# становится, но и «шага нет» про карточку с делом мы не говорим.
+NO_AGREED_STEP = "нет согласованного шага с датой"
+ONLY_BROKERS_TASK = "шаг стоит делом брокера, но с клиентом он не согласован"
+
+
+def _step_gap(task_scheduled: bool) -> str:
+    return ONLY_BROKERS_TASK if task_scheduled else NO_AGREED_STEP
+
+
 def buyer_temperature(
     signals: dict[str, Any],
     counterparty: str = "",
+    task_scheduled: bool = False,
 ) -> tuple[str, str]:
     """Buyer readiness. Definition confirmed with the agency.
 
@@ -195,7 +216,7 @@ def buyer_temperature(
 
     gaps = []
     if not agreed:
-        gaps.append("нет согласованного шага с датой")
+        gaps.append(_step_gap(task_scheduled))
     if not budget:
         gaps.append("не назван бюджет")
     if not timeline:
@@ -206,6 +227,7 @@ def buyer_temperature(
 def seller_temperature(
     signals: dict[str, Any],
     counterparty: str = "",
+    task_scheduled: bool = False,
 ) -> tuple[str, str]:
     """Seller readiness.
 
@@ -237,7 +259,7 @@ def seller_temperature(
 
     gaps = []
     if not agreed:
-        gaps.append("нет согласованного шага с датой")
+        gaps.append(_step_gap(task_scheduled))
     if not priced:
         gaps.append("не названа цена")
     return "warm", "; ".join(gaps)
@@ -496,7 +518,7 @@ class FunnelProfile:
     label: str
     prompt: str
     normalize_signals: Callable[[dict[str, Any], Callable[[Any], int]], dict[str, Any]]
-    temperature: Callable[[dict[str, Any], str], tuple[str, str]]
+    temperature: Callable[[dict[str, Any], str, bool], tuple[str, str]]
     text_signals: tuple[str, ...]
     # Обязательные факты по этапам: {stage_id: (ключ факта, человеческое имя)}.
     # На требования из старших этапов ложатся требования младших — это
