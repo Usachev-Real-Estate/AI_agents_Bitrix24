@@ -165,3 +165,38 @@ def test_eleven_is_not_singular():
     assert too_early_tail(11) == "по 11 карточкам судить ещё рано"
     assert too_early_tail(21) == "по 21 карточке судить ещё рано"
     assert too_early_tail(0) == ""
+
+
+# ── один вопрос — один ответ ───────────────────────────────────────────
+def _too_early_but_neglected(deal_id: int) -> dict:
+    """«Рано судить» по полноте — и просроченное дело по работе.
+
+    #15682: этап сменился час назад, но дело брокера просрочено на девять
+    дней. Карточка попадает в «недоработку», а вердикт полноты остаётся
+    «рано судить» — и в разделе «рано судить» её нет.
+    """
+    card = _too_early(deal_id)
+    card["state"]["work_evidence"] = {
+        "proven": False, "reason": "due_task_no_result", "window_days": 1,
+        "due_task": {"deadline": "2026-08-19", "days_overdue": 9},
+    }
+    return card
+
+
+def test_the_caveat_counts_by_verdict_not_by_section():
+    """Прогон 28.08 13:37: шапка «рано судить 2», оговорка «по 1 карточке».
+
+    Проверку потери мы отложили по обеим одинаково: _is_losing_client
+    возвращает False на любой too_early, где бы она потом ни оказалась.
+    Значит и назвать надо обе.
+    """
+    results = [_too_early(17122), _too_early_but_neglected(15682)]
+    text = format_sections(results, {}, WEBHOOK)
+    assert "по 2 карточкам судить ещё рано" in text
+    assert "по 1 карточке судить ещё рано" not in text
+
+
+def test_a_judged_card_is_not_counted_as_young():
+    results = [_too_early(17122), _worked(15152)]
+    text = format_sections(results, {}, WEBHOOK)
+    assert "по 1 карточке судить ещё рано" in text
