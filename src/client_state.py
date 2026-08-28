@@ -580,6 +580,7 @@ def compute_temperature(
     recoverable: bool = True,
     profile: FunnelProfile = BUYER_PROFILE,
     counterparty: str = "",
+    task_scheduled: bool = False,
 ) -> tuple[str, str]:
     """Derive client temperature from extracted signals. Returns (level, why).
 
@@ -590,7 +591,7 @@ def compute_temperature(
     """
     if not recoverable:
         return "unknown", "по карточке нельзя восстановить картину клиента"
-    return profile.temperature(signals, counterparty)
+    return profile.temperature(signals, counterparty, task_scheduled)
 
 
 def _parse_state_json(content: str) -> dict[str, Any] | None:
@@ -1097,11 +1098,24 @@ def apply_derived_verdict(
 
     reconcile_step_date(state)
 
+    # Дело с датой в Битриксе и есть следующий шаг — так уже считает вердикт
+    # (см. NEXT_STEP_FACT). Отчёт про это не знал и печатал «шаг не назначен»
+    # на карточке, у которой дело стоит: #13520 — «шаг не назначен» и строкой
+    # ниже «дело стоит на 2026-09-01». Кладём дату сюда, чтобы обе строки
+    # говорили об одном. Считается до температуры: её формулировка про
+    # несогласованный шаг тоже зависит от того, стоит ли дело.
+    _scheduled = open_future_deadline(events or [])
+    state["scheduled_task_at"] = (
+        _scheduled.astimezone(PORTAL_TZ).date().isoformat()
+        if _scheduled is not None else ""
+    )
+
     level, why = compute_temperature(
         state.get("signals", {}),
         recoverable=bool(state.get("recoverable", True)),
         profile=profile,
         counterparty=str(state["counterparty"].get("who") or ""),
+        task_scheduled=_scheduled is not None,
     )
     state["temperature"] = level
     state["temperature_reason"] = why
@@ -1109,16 +1123,6 @@ def apply_derived_verdict(
     # знает его только профиль. Кладём решение в состояние: разделы отчёта
     # собираются из него, профиля там уже нет.
     state["cold_is_a_loss"] = profile.cold_means_losing
-    # Дело с датой в Битриксе и есть следующий шаг — так уже считает вердикт
-    # (см. NEXT_STEP_FACT). Отчёт про это не знал и печатал «шаг не назначен»
-    # на карточке, у которой дело стоит: #13520 — «шаг не назначен» и строкой
-    # ниже «дело стоит на 2026-09-01». Кладём дату сюда, чтобы обе строки
-    # говорили об одном.
-    _scheduled = open_future_deadline(events or [])
-    state["scheduled_task_at"] = (
-        _scheduled.astimezone(PORTAL_TZ).date().isoformat()
-        if _scheduled is not None else ""
-    )
     envelope["temperature"] = level
     hours_on_stage = _stage_hours(record, datetime.now(timezone.utc))
     envelope["stage_age_known"] = hours_on_stage is not None
