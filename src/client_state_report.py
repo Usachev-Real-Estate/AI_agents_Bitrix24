@@ -11,6 +11,7 @@ from typing import Any
 
 from broker_work import REASON_RU as WORK_REASON_RU
 from broker_work import GAP_ABANDONED
+from broker_work import GAP_PAUSE_TASK_TOO_LATE
 from broker_work import PROVEN
 from broker_work import PROVEN_BY_PAUSE
 from broker_work import REMINDERS as WORK_REMINDERS
@@ -244,6 +245,17 @@ def format_card(
         if reason_code in TIMELESS_GAPS:
             # Цифры приводим только там, где они и есть довод.
             tail = ""
+        elif reason_code == GAP_PAUSE_TASK_TOO_LATE:
+            # Норма этапа и «последний след» тут не довод: брокер молчал
+            # ровно потому, что клиент в отпуске, и это он же и записал.
+            # Довод — две даты, которые не сходятся.
+            until = str(work.get("pause_until") or "").strip()
+            stands = str(work.get("task_deadline") or "").strip()
+            tail = (
+                f"клиент возвращается {until}, дело на {stands}"
+                if until and until != "unknown" and stands
+                else f"норма {work.get('window_days')} дн."
+            )
         elif reason_code == GAP_ABANDONED:
             quiet = work.get("abandoned_days")
             tail = (
@@ -529,8 +541,16 @@ def _is_losing_client(state: dict[str, Any]) -> bool:
     вердиктом «рано судить», и тащить ту же карточку в тревожный раздел значит
     сказать двумя строками противоположное. Остывший клиент остаётся: это
     событие, а не отсутствие данных, и срок ему не оправдание.
+
+    Но только там, где остывание вообще событие. У продавцов «собственник не
+    выходит на связь» — обычное начало работы по холодной базе, а не потеря
+    (#15594, решение агентства). Решает воронка, и она кладёт ответ в
+    state["cold_is_a_loss"].
     """
-    if str(state.get("temperature") or "") == "cold":
+    if (
+        str(state.get("temperature") or "") == "cold"
+        and state.get("cold_is_a_loss", True)
+    ):
         return True
     work = state.get("work_evidence") or {}
     if str(state.get("temperature") or "") == "hot" and not work.get("proven", True):

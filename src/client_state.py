@@ -1104,6 +1104,10 @@ def apply_derived_verdict(
     )
     state["temperature"] = level
     state["temperature_reason"] = why
+    # Считать ли «холодный» потерей — свойство воронки, а не карточки, и
+    # знает его только профиль. Кладём решение в состояние: разделы отчёта
+    # собираются из него, профиля там уже нет.
+    state["cold_is_a_loss"] = profile.cold_means_losing
     envelope["temperature"] = level
     hours_on_stage = _stage_hours(record, datetime.now(timezone.utc))
     envelope["stage_age_known"] = hours_on_stage is not None
