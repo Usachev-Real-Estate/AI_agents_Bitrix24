@@ -23,6 +23,7 @@ from broker_work import (
     has_any_call,
     has_open_future_task,
     next_action,
+    open_future_deadline,
 )
 from counterparty import (
     WHO_CLIENT,
@@ -1108,6 +1109,16 @@ def apply_derived_verdict(
     # знает его только профиль. Кладём решение в состояние: разделы отчёта
     # собираются из него, профиля там уже нет.
     state["cold_is_a_loss"] = profile.cold_means_losing
+    # Дело с датой в Битриксе и есть следующий шаг — так уже считает вердикт
+    # (см. NEXT_STEP_FACT). Отчёт про это не знал и печатал «шаг не назначен»
+    # на карточке, у которой дело стоит: #13520 — «шаг не назначен» и строкой
+    # ниже «дело стоит на 2026-09-01». Кладём дату сюда, чтобы обе строки
+    # говорили об одном.
+    _scheduled = open_future_deadline(events or [])
+    state["scheduled_task_at"] = (
+        _scheduled.astimezone(PORTAL_TZ).date().isoformat()
+        if _scheduled is not None else ""
+    )
     envelope["temperature"] = level
     hours_on_stage = _stage_hours(record, datetime.now(timezone.utc))
     envelope["stage_age_known"] = hours_on_stage is not None

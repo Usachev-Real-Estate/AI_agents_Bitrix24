@@ -137,8 +137,33 @@ def format_next_step(step: Any) -> str:
         # «не указано (не указано, не определён)» — три пустоты подряд там,
         # где нечего сказать одной. Срок и исполнитель имеют смысл только
         # при названном шаге: без него они не уточняют, а повторяют.
-        return "шаг не назначен"
+        return NO_STEP_RU
     return f"{what} ({when}, {who})"
+
+
+NO_STEP_RU = "шаг не назначен"
+
+
+def describe_next_step(state: dict[str, Any]) -> str:
+    """Следующий шаг карточки — словами брокера или делом из Битрикса.
+
+    Правило проекта уже гласит, что дело с датой и есть следующий шаг, и
+    доказательство это лучше пересказа: его видно в CRM, а не только на
+    словах (см. NEXT_STEP_FACT — вердикт так и считает). Отчёт про это не
+    знал: #13520 печатала «шаг не назначен», а строкой ниже — «дело стоит
+    на 2026-09-01». Две строки одной карточки о разном.
+
+    Пересказ брокера, если он есть, остаётся главным: он говорит, ЧТО
+    будет сделано, а дело — только когда. Подменять одно другим нельзя,
+    поэтому дело подставляется лишь там, где шага не назвали вовсе.
+    """
+    step = format_next_step(state.get("next_step"))
+    if step != NO_STEP_RU:
+        return step
+    scheduled = str(state.get("scheduled_task_at") or "").strip()
+    if not scheduled:
+        return step
+    return f"в карточке не описан, но в Битриксе стоит дело на {scheduled}"
 
 
 # Сколько символов названия сделки помещается в строку отчёта. Дальше —
@@ -212,7 +237,7 @@ def format_card(
 
     lines.append(f"Цель: {humanize(state.get('client_goal'))}")
     lines.append(f"Ситуация: {humanize(state.get('situation'))}")
-    lines.append(f"Шаг: {format_next_step(state.get('next_step'))}")
+    lines.append(f"Шаг: {describe_next_step(state)}")
 
     work = state.get("work_evidence") or {}
     if work and not work.get("proven"):
@@ -723,7 +748,7 @@ def format_sections(
             icon = TEMPERATURE_ICON.get(
                 str(state.get("temperature") or ""), "",
             )
-            step = format_next_step(state.get("next_step"))
+            step = describe_next_step(state)
             work = state.get("work_evidence") or {}
             # Карточка молчит восемь дней и стоит с галочкой ✅ — без
             # объяснения это выглядит как просмотренная недоработка. Пауза
