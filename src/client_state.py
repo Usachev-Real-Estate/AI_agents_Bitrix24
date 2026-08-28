@@ -124,6 +124,33 @@ def _normalize_transcript_item(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+COMMENT_FILE_ONLY = "Вложение без текста"
+
+
+def _activity_without_text(activity: dict[str, Any]) -> str:
+    """Чем является дело без темы и описания — или "" если ничем.
+
+    Битрикс заводит звонки и задачи с пустой темой, и такое дело
+    выбрасывалось из доказательств целиком: события без текста нечего
+    показывать модели. Но у звонка доказательством является сам факт
+    звонка, а у дела — его срок, и без них рушится половина правил: «звонка
+    в таймлайне нет» на карточке, где брокер звонил; «дела нет» там, где
+    оно стоит; «брошена N дней» с датой, считанной мимо этих событий.
+
+    Текст мы не выдумываем — только называем то, что и так знаем из полей.
+    """
+    if int(activity.get("type_id") or 0) == CALL_ACTIVITY_TYPE_ID:
+        direction = int(activity.get("direction") or 0)
+        if direction == 1:
+            return "Входящий звонок (без описания)"
+        if direction == 2:
+            return "Исходящий звонок (без описания)"
+        return "Звонок (без описания)"
+    if str(activity.get("deadline") or "").strip():
+        return "Дело без описания"
+    return ""
+
+
 def build_evidence_events(
     timeline: list[dict[str, Any]],
     activities: list[dict[str, Any]],
@@ -136,7 +163,17 @@ def build_evidence_events(
         if not isinstance(item, dict):
             continue
         normalized = _normalize_timeline_item(item)
+        # Комментарий из одних пробелов — это пустой комментарий: он ничего
+        # не рассказывает, но раньше проходил как след работы.
+        normalized["text"] = normalized["text"].strip()
         if not normalized["text"]:
+            # Комментарий без текста, но с вложением — это и есть скриншот
+            # переписки. Выбрасывая его, мы теряли единственное подтверждение
+            # «написал клиенту» и упрекали брокера в том, что он приложил.
+            if not normalized["has_files"]:
+                continue
+            normalized["text"] = COMMENT_FILE_ONLY
+            events.append(normalized)
             continue
         normalized["text"] = apply_mask(normalized["text"], mask_map)
         events.append(normalized)
@@ -148,8 +185,16 @@ def build_evidence_events(
             part for part in (normalized["subject"], normalized["description"]) if part
         )
         if not body:
+            body = _activity_without_text(normalized)
+        if not body:
             continue
         normalized["text"] = apply_mask(body, mask_map)
+        # Маска кладётся в text, а сырые subject и description оставались в
+        # том же событии — и уезжали в модель рядом с замаскированной копией.
+        # Маскируем и их: событие целиком уходит в JSON запроса, и «поле, из
+        # которого мы собрали текст» ничем не безопаснее самого текста.
+        normalized["subject"] = apply_mask(normalized["subject"], mask_map)
+        normalized["description"] = apply_mask(normalized["description"], mask_map)
         events.append(normalized)
     for item in transcripts:
         if not isinstance(item, dict):
@@ -192,6 +237,7 @@ def event_fingerprint(event: dict[str, Any]) -> str:
 def compute_content_hash(
     events: list[dict[str, Any]],
     profile: FunnelProfile | None = None,
+    stage_id: str = "",
 ) -> str:
     """Отпечаток карточки: по нему решается, звать ли модель заново.
 
@@ -211,6 +257,16 @@ def compute_content_hash(
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     if profile is not None:
         raw += "\n" + profile.prompt
+        # Набор фактов, которые мы спрашиваем, задаётся этапом. Сделка,
+        # переехавшая на другой этап без единого нового события, отдавалась
+        # из кэша — и её судили по требованиям нового этапа теми фактами,
+        # которых у старого никто не спрашивал. Поля выглядели незаполненными
+        # ровно потому, что вопрос не задавали.
+        from funnel_profiles import all_facts_for_stage
+        keys = sorted(
+            key for key, _name, _req in all_facts_for_stage(profile.key, stage_id)
+        )
+        raw += "\n" + json.dumps(keys, ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -550,6 +606,35 @@ VALID_HORIZONS = frozenset({
 # в промпте; здесь только разделяем на мелкое (low) и существенное (medium/high).
 
 
+def merge_stage_facts(
+    fresh: dict[str, Any],
+    previous: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    """Дополнить свежие факты этапа теми, что модель в этот раз не видела.
+
+    При дозапросе модели показывают только новые события, а факт мог быть
+    найден в старом комментарии. Ответ «present: false» на таком запросе
+    означает «в новых событиях этого нет», а не «в карточке этого нет», —
+    и разница между ними решает, назовём мы карточку заполненной плохо или
+    хорошо. Молчание модели о факте — тем более не находка.
+
+    Забирается только то, что было подтверждено раньше. Цитаты всё равно
+    проверяются по живой карточке следом: если комментарий из таймлайна
+    удалили, факт отвалится там, а не выживет за счёт кэша.
+    """
+    merged = _normalize_stage_facts(fresh)
+    for key, value in (previous or {}).items():
+        if not isinstance(value, dict) or not value.get("present"):
+            continue
+        if (merged.get(key) or {}).get("present"):
+            continue
+        quote = str(value.get("quote") or "").strip()
+        if not quote:
+            continue
+        merged[key] = {"present": True, "quote": quote}
+    return merged
+
+
 def _normalize_stage_facts(raw: Any) -> dict[str, dict[str, Any]]:
     """Нормализация stage_facts: {key: {"present": bool, "quote": str}}."""
     data = raw if isinstance(raw, dict) else {}
@@ -689,6 +774,16 @@ def unmask_state(
         signals["objections"] = [
             unmask(str(v), mask_map) for v in signals.get("objections") or []
         ]
+    # Совет и тема дела собираются из замаскированных событий, а читает их
+    # РОП. Без разворота строка «➡️ связаться по делу «Звонок КЛИЕНТ_1»»
+    # стоит под строкой с настоящим именем в шапке карточки.
+    out["next_action"] = unmask(str(out.get("next_action") or ""), mask_map)
+    evidence = out.get("work_evidence")
+    if isinstance(evidence, dict):
+        due = evidence.get("due_task")
+        if isinstance(due, dict):
+            due["subject"] = unmask(str(due.get("subject") or ""), mask_map)
+
     work = out.get("broker_work")
     if isinstance(work, dict):
         # Причину паузы читают люди в отчёте — иначе там будет «КЛИЕНТ_1
@@ -708,6 +803,7 @@ def build_llm_payload(
     new_events: list[dict[str, Any]],
     all_events: list[dict[str, Any]],
     profile: FunnelProfile = BUYER_PROFILE,
+    mask_map: MaskMap | None = None,
 ) -> str:
     """Human message body for incremental state update.
 
@@ -729,7 +825,15 @@ def build_llm_payload(
         "stage_id": stage_id,
         "facts_needed": facts_needed,
         "deal_id": _coerce_int(deal.get("ID") or deal.get("id")),
-        "title": _clean_str(deal.get("TITLE") or deal.get("title")),
+        # Название сделки в этом агентстве — это ФИО клиента, а нередко и
+        # телефон: «Лариса (Клекова) агент», «Гуля Базарова (Шахмурад)».
+        # Событиям маску ставили, а названию — нет, и оно уезжало в модель
+        # первой же строкой запроса.
+        "title": (
+            apply_mask(_clean_str(deal.get("TITLE") or deal.get("title")), mask_map)
+            if mask_map is not None
+            else _clean_str(deal.get("TITLE") or deal.get("title"))
+        ),
         "previous_state": previous_state,
         "new_events": new_events,
         "event_count_total": len(all_events),
@@ -801,9 +905,12 @@ def analyze_with_llm(
     llm: LLMClient,
     profile: FunnelProfile = BUYER_PROFILE,
     usage_sink: dict[str, int] | None = None,
+    mask_map: MaskMap | None = None,
 ) -> dict[str, Any] | None:
     """Call LLM and return normalized client state."""
-    human = build_llm_payload(deal, previous_state, new_events, all_events, profile)
+    human = build_llm_payload(
+        deal, previous_state, new_events, all_events, profile, mask_map,
+    )
     response = llm.invoke([
         SystemMessage(content=profile.prompt),
         HumanMessage(content=human),
@@ -818,20 +925,34 @@ def analyze_with_llm(
     return _normalize_state(parsed, profile)
 
 
-def fetch_deal_contacts(deal: dict[str, Any]) -> list[dict[str, Any]]:
-    """Load contacts linked to a deal for masking."""
+def fetch_deal_contacts(deal: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+    """Контакты сделки для маскировки и признак «прочитали не всё».
+
+    Возвращает (контакты, failed). Раньше сбойный crm.contact.get просто
+    пропускался, и карточка с непрочитанным контактом выглядела как карточка
+    без контактов: маска пустая, маскировать нечего — и имя с телефоном из
+    комментариев уезжали в модель открытым текстом. Пустой список контактов
+    и несостоявшееся чтение контактов — разные вещи, и различить их может
+    только вызывающий код.
+    """
     if isinstance(deal.get("contacts"), list):
-        return [c for c in deal["contacts"] if isinstance(c, dict)]
+        return [c for c in deal["contacts"] if isinstance(c, dict)], False
+    failed = False
     contact_ids: list[int] = []
     main_id = _coerce_int(deal.get("CONTACT_ID") or deal.get("contact_id"))
     if main_id > 0:
         contact_ids.append(main_id)
     deal_id = _coerce_int(deal.get("ID") or deal.get("id"))
     if deal_id > 0:
-        raw = _bx_get_all_sync(
-            "crm.deal.contact.items.get",
-            {"id": deal_id},
-        )
+        try:
+            raw = _bx_get_all_sync(
+                "crm.deal.contact.items.get",
+                {"id": deal_id},
+            )
+        except Exception:
+            logger.warning("Deal contacts fetch failed for deal id=%s", deal_id)
+            raw = []
+            failed = True
         for row in _as_list(raw):
             if isinstance(row, dict):
                 cid = _coerce_int(row.get("CONTACT_ID") or row.get("contact_id"))
@@ -847,10 +968,11 @@ def fetch_deal_contacts(deal: dict[str, Any]) -> list[dict[str, Any]]:
             row = _bx_get_all_sync("crm.contact.get", {"id": cid})
         except Exception:
             logger.warning("Contact fetch failed for deal contact id=%s", cid)
+            failed = True
             continue
         if isinstance(row, dict):
             contacts.append(row)
-    return contacts
+    return contacts, failed
 
 
 def prepare_deal_record(deal: dict[str, Any], settings: Settings | None = None) -> dict[str, Any]:
@@ -862,8 +984,11 @@ def prepare_deal_record(deal: dict[str, Any], settings: Settings | None = None) 
     record = dict(deal)
     record["timeline"] = timeline
     record["activities"] = activities
-    record["evidence_incomplete"] = timeline_failed or activities_failed
-    record["contacts"] = fetch_deal_contacts(deal)
+    contacts, contacts_failed = fetch_deal_contacts(deal)
+    record["contacts"] = contacts
+    record["evidence_incomplete"] = (
+        timeline_failed or activities_failed or contacts_failed
+    )
     if not record["evidence_incomplete"]:
         record["transcripts"] = fetch_and_cache(deal_id, settings=settings)
     else:
@@ -1098,7 +1223,9 @@ def analyze_deal(
         _as_list(record.get("transcripts")),
         mask_map,
     )
-    content_hash = compute_content_hash(events, profile)
+    content_hash = compute_content_hash(
+        events, profile, _clean_str(record.get("STAGE_ID") or record.get("stage_id")),
+    )
     envelope["content_hash"] = content_hash
     # Звонок в таймлайне — главное доказательство работы после того, как
     # сверку пересказа с расшифровкой сняли. Строка «разговор читается у 0
@@ -1199,7 +1326,7 @@ def analyze_deal(
         try:
             state = analyze_with_llm(
                 record, previous_state, new_events, events, model, profile,
-                usage_sink=usage,
+                usage_sink=usage, mask_map=mask_map,
             )
         except Exception as exc:  # noqa: BLE001 — одна карточка не роняет батч
             logger.warning("Client state LLM failed for deal %s: %s", deal_id, exc)
@@ -1212,6 +1339,14 @@ def analyze_deal(
             envelope["skipped"] = True
             envelope["reason"] = "parse_error"
             return envelope
+
+    if previous_state and new_events is not events and len(new_events) < len(events):
+        # Дозапрос: модель видела не всю карточку. Всё, что она не назвала,
+        # добираем из прошлого разбора — и тут же отдаём на проверку цитат
+        # ниже, по живому таймлайну.
+        state["stage_facts"] = merge_stage_facts(
+            state.get("stage_facts"), previous_state.get("stage_facts"),
+        )
 
     verified, invented = verify_evidence(state.get("evidence", []), events)
     state["evidence"] = verified
@@ -1426,6 +1561,9 @@ def run_client_state(
         # Карточек, по которым разговор вообще можно прочитать. Без этого
         # «расхождений 0» неотличимо от «сравнивать было не с чем».
         "cards_with_call": 0,
+        # Карточек, таймлайн которых прогон вообще прочитал. Знаменатель для
+        # «звонки есть у N из M»: непрочитанная карточка звонка дать не может.
+        "cards_read": 0,
         "cards_with_transcript": 0,
         "transcripts_pending": 0,
         "transcripts_failed": 0,
@@ -1482,6 +1620,11 @@ def run_client_state(
         stats["results"].append(result)
         # Считаем и по карточкам из кэша: расшифровка от разбора не зависит.
         counts = result.get("transcripts") or {}
+        # Ключ появляется только после успешного чтения карточки — по его
+        # наличию и считаем прочитанные, а не по значению: False здесь
+        # значит «звонков нет», а не «не читали».
+        if "has_call" in result:
+            stats["cards_read"] += 1
         if result.get("has_call"):
             stats["cards_with_call"] += 1
         if int(counts.get("ready") or 0) > 0:

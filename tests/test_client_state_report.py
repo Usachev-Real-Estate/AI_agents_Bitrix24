@@ -743,7 +743,7 @@ def test_the_summary_counts_cards_without_a_call():
         "analyzed": 8, "cost_rub": 1.0, "cost_rub_per_card": 0.1,
         "cards_without_a_call": 6,
     })
-    assert "звонка в таймлайне нет): 6" in text
+    assert "звонка за окно этапа нет): 6" in text
 
 
 def test_a_multiline_title_is_flattened():
