@@ -1,12 +1,16 @@
-"""Засчитываем только дело брокера или его РОПа.
+"""Засчитываем только следы брокера или его РОПа.
 
-Решение агентства от 28.08. До него `assess_broker_work` автора дела не
-смотрел вовсе: дело, заведённое бизнес-процессом или роботом, могло нести
-длинный типовой текст — и засчитывалось брокеру как его работа, его пауза и
-его контроль над карточкой.
+Решение агентства от 28.08, в два приёма: сначала про дела, потом про
+комментарии. До него `assess_broker_work` автора не смотрел вовсе. Дело,
+заведённое бизнес-процессом, могло нести длинный типовой текст — и
+засчитывалось брокеру как его работа, его пауза и его контроль над
+карточкой; комментарий бэк-офиса закрывал норму этапа за брокера.
 
-Фильтруем только незакрытые дела. Закрытая активность — это запись о
-состоявшемся разговоре, и для факта разговора неважно, кто её отметил.
+Основной аудит фильтровал авторов комментариев с самого начала
+(`_allowed_comment_authors`), QC — нигде. Теперь правило одно.
+
+Остаются всегда: закрытые активности (запись о состоявшемся разговоре — для
+факта разговора неважно, кто её отметил) и расшифровки.
 
 Автора не знаем — засчитываем. Незнание не должно превращаться в претензию:
 это то же самое отсутствие данных, выданное за результат.
@@ -25,14 +29,17 @@ if str(_SRC) not in sys.path:
 
 from broker_work import (  # noqa: E402
     GAP_ABANDONED,
+    GAP_NO_TRACE,
     GAP_NO_TRACE_IN_WINDOW,
     GAP_PAUSE_NO_TASK,
     GAP_WAITING_NO_TASK,
     PROVEN_BY_CALL,
+    PROVEN_BY_COMMENT,
     PROVEN_BY_PAUSE,
     PROVEN_BY_TASK_PLAN,
+    REASON_RU,
     assess_broker_work,
-    tasks_of_the_broker,
+    evidence_of_the_broker,
 )
 from funnel_profiles import BUYER_PROFILE  # noqa: E402
 
@@ -67,6 +74,18 @@ def _comment(ago: float, text: str = "созвонились") -> dict[str, Any]
     }
 
 
+def _comment_by(
+    author: int | None, ago: float, text: str = "созвонились",
+) -> dict[str, Any]:
+    event: dict[str, Any] = {
+        "kind": "comment", "text": text,
+        "created": (NOW - timedelta(days=ago)).isoformat(),
+    }
+    if author is not None:
+        event["author_id"] = author
+    return event
+
+
 def _call(author: int, ago: float = 1.0) -> dict[str, Any]:
     return {
         "kind": "activity", "type_id": 2, "completed": "Y",
@@ -88,32 +107,32 @@ def _assess(events: list[dict], **over: Any) -> dict:
 
 # ── Сам отбор ──────────────────────────────────────────────────────────
 def test_a_robots_task_is_dropped():
-    kept = tasks_of_the_broker([_task(ROBOT)], OURS)
+    kept = evidence_of_the_broker([_task(ROBOT)], OURS)
     assert kept == []
 
 
 def test_the_brokers_and_the_rops_tasks_stay():
     events = [_task(BROKER), _task(ROP)]
-    assert tasks_of_the_broker(events, OURS) == events
+    assert evidence_of_the_broker(events, OURS) == events
 
 
 def test_an_unknown_author_gets_the_benefit_of_the_doubt():
     """Мы не знаем, чьё дело, — и не делаем из этого претензии."""
     events = [_task(None)]
-    assert tasks_of_the_broker(events, OURS) == events
+    assert evidence_of_the_broker(events, OURS) == events
 
 
 def test_an_empty_author_set_switches_the_rule_off():
     """Карты не построились — правило молчит, а не работает наоборот."""
     events = [_task(ROBOT)]
-    assert tasks_of_the_broker(events, set()) == events
-    assert tasks_of_the_broker(events, None) == events
+    assert evidence_of_the_broker(events, set()) == events
+    assert evidence_of_the_broker(events, None) == events
 
 
 def test_a_closed_activity_is_kept_whoever_logged_it():
     """Разговор состоялся — для факта разговора автор отметки неважен."""
     events = [_call(ROBOT)]
-    assert tasks_of_the_broker(events, OURS) == events
+    assert evidence_of_the_broker(events, OURS) == events
 
 
 # ── Что это меняет в оценке ────────────────────────────────────────────
@@ -181,3 +200,60 @@ def test_a_robots_overdue_task_does_not_nag_the_broker():
 
 def test_a_robots_call_still_proves_the_conversation():
     assert _assess([_call(ROBOT)])["reason"] == PROVEN_BY_CALL
+
+
+# ── Комментарии: то же правило ─────────────────────────────────────────
+def test_someone_elses_comment_is_dropped():
+    """Бэк-офис написал в карточку — это не работа брокера с клиентом."""
+    kept = evidence_of_the_broker([_comment_by(ROBOT, 1.0)], OURS)
+    assert kept == []
+
+
+def test_the_brokers_and_the_rops_comments_stay():
+    events = [_comment_by(BROKER, 1.0), _comment_by(ROP, 1.0)]
+    assert evidence_of_the_broker(events, OURS) == events
+
+
+def test_a_comment_without_an_author_gets_the_benefit_of_the_doubt():
+    events = [_comment_by(None, 1.0)]
+    assert evidence_of_the_broker(events, OURS) == events
+
+
+def test_someone_elses_comment_does_not_close_the_stage_norm():
+    """Раньше комментарий бэк-офиса закрывал норму этапа за брокера."""
+    result = _assess([_comment_by(ROBOT, 1.0, "клиент перезвонит")])
+    assert result["reason"] != PROVEN_BY_COMMENT
+
+
+def test_the_brokers_comment_does():
+    result = _assess([_comment_by(BROKER, 1.0, "созвонились, показ в четверг")])
+    assert result["reason"] == PROVEN_BY_COMMENT
+
+
+def test_the_wording_says_whose_trace_is_missing():
+    """РОП открывает карточку и видит там чужие комментарии.
+
+    «Следов работы нет вовсе» на такой карточке читается как ошибка отчёта.
+    Претензия от уточнения не слабеет: она о том, что ответственный по
+    сделке ничего не написал.
+    """
+    assert "брокера или РОПа" in REASON_RU[GAP_NO_TRACE]
+    assert "брокера или РОПа" in REASON_RU[GAP_NO_TRACE_IN_WINDOW]
+
+
+def test_someone_elses_comment_is_not_a_report_on_the_due_task():
+    """Отписка по делу — тоже след брокера, а не любого, кто зашёл в карточку."""
+    events = [
+        _task(BROKER, ago=5.0, ahead=-3.0),
+        _comment_by(ROBOT, 0.1, "заявка обработана автоматически"),
+    ]
+    result = _assess(events)
+    assert result["due_task"]["days_overdue"] >= 1
+
+
+def test_the_brokers_own_report_closes_it():
+    events = [
+        _task(BROKER, ago=5.0, ahead=-3.0),
+        _comment_by(BROKER, 0.1, "дозвонился, договорились на пятницу"),
+    ]
+    assert "due_task" not in _assess(events)

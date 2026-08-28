@@ -24,7 +24,7 @@ from broker_work import (
     has_open_future_task,
     next_action,
     open_future_deadline,
-    tasks_of_the_broker,
+    evidence_of_the_broker,
 )
 from counterparty import (
     WHO_CLIENT,
@@ -1082,7 +1082,7 @@ def allowed_task_authors(
     """Чьи дела засчитываются: брокер и его РОП.
 
     Пустое множество означает «правило не применяем»: карты не построились
-    или брокер неизвестен. Это сознательно — см. tasks_of_the_broker.
+    или брокер неизвестен. Это сознательно — см. evidence_of_the_broker.
     """
     if not broker_id or not broker_dept_map or not rop_map:
         return set()
@@ -1145,7 +1145,7 @@ def apply_derived_verdict(
     # Чужие дела не считаются нигде: если бы вердикт видел дело робота, а
     # оценка работы — нет, карточка получила бы «шаг назначен» и «следов
     # работы нет» разом.
-    own_events = tasks_of_the_broker(events or [], task_authors)
+    own_events = evidence_of_the_broker(events or [], task_authors)
     _scheduled = open_future_deadline(own_events)
     state["scheduled_task_at"] = (
         _scheduled.astimezone(PORTAL_TZ).date().isoformat()
@@ -1277,7 +1277,10 @@ def apply_derived_verdict(
     # карточке не видно. Считается отдельно от оценки работы и на разделы
     # отчёта не влияет.
     state["no_call"] = comment_without_a_call(
-        events or [],
+        # Пометка про комментарий без звонка считается по тем же
+        # комментариям, что и оценка работы: иначе «работа описана
+        # комментарием» стояло бы на карточке, где комментарий чужой.
+        own_events,
         profile=profile,
         stage_id=stage_id,
         comment_informative=state["work_claims"]["comment_informative"],
