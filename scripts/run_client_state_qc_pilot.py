@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import random
 import sys
 from datetime import datetime, timezone
@@ -44,6 +45,8 @@ from tools import (  # noqa: E402
     fetch_source_names,
 )
 
+logger = logging.getLogger(__name__)
+
 MSK = ZoneInfo("Europe/Moscow")
 OUT_PATH = Path("data/client_state_qc_pilot.json")
 
@@ -53,6 +56,7 @@ def pick_deals(
     category_id: int,
     limit: int,
     order: str = "random",
+    deal_ids: tuple[int, ...] = (),
 ) -> list[dict]:
     """Открытые сделки воронки.
 
@@ -73,6 +77,13 @@ def pick_deals(
     * "newest" — самые свежие. Почти все моложе отсрочки, поэтому годится
       только для отладки свежих лидов, не для оценки качества.
 
+    deal_ids отменяет и порядок, и лимит: берутся ровно названные сделки той
+    воронки, к которой они относятся. Нужно, чтобы проверить правку на той
+    самой карточке, из-за которой она делалась, не дожидаясь, пока сделка
+    выпадет в случайную выборку. Этап вне контроля качества при этом не
+    отсеивается: если карточку спросили по номеру, ответить надо про неё, а
+    не промолчать.
+
     UF-поля квалификации запрашиваются наравне с остальными: без них прямая
     проверка бюджета и района не видит данных и объявляет поля незаполненными.
     Поля даты нужны отсрочке: без них свежий лид судится как застоявшийся.
@@ -89,6 +100,25 @@ def pick_deals(
             ],
         },
     )
+    if deal_ids:
+        wanted = set(deal_ids)
+        named = [
+            d for d in _as_list(raw)
+            if isinstance(d, dict) and _coerce_int(d.get("ID")) in wanted
+        ]
+        found = {_coerce_int(d.get("ID")) for d in named}
+        missing = sorted(wanted - found)
+        if missing:
+            # Молча вернуть меньше — значит выдать «карточки нет» за «мы её
+            # не искали». Сделка может лежать в другой воронке или быть
+            # закрыта; и то и другое надо сказать вслух.
+            logger.warning(
+                "%s: не найдены среди открытых сделок воронки: %s",
+                profile.label,
+                ", ".join(f"#{i}" for i in missing),
+            )
+        return sorted(named, key=lambda d: _coerce_int(d.get("ID")))
+
     deals = [
         d for d in _as_list(raw)
         if isinstance(d, dict)
@@ -155,6 +185,12 @@ def main() -> None:
              "которые QC судит (где хуже всего); newest — самые свежие "
              "(отладка, почти все моложе отсрочки)",
     )
+    parser.add_argument(
+        "--deal-id", type=int, action="append", default=[], metavar="ID",
+        help="Разобрать ровно эти сделки (можно повторять). Отменяет --order "
+             "и --limit; удобно проверить правку на той карточке, из-за "
+             "которой она делалась",
+    )
     args = parser.parse_args()
 
     settings = get_settings()
@@ -169,7 +205,10 @@ def main() -> None:
         (BUYER_PROFILE, settings.buyers_category_id),
         (SELLER_PROFILE, settings.sellers_category_id),
     ):
-        deals = pick_deals(profile, category_id, args.limit, args.order)
+        deals = pick_deals(
+            profile, category_id, args.limit, args.order,
+            deal_ids=tuple(args.deal_id),
+        )
         titles = {
             _coerce_int(d.get("ID")): _clean_str(d.get("TITLE")) for d in deals
         }
