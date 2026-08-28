@@ -823,9 +823,22 @@ def format_sections(
                 if str(state.get("verdict") or "") == "poor" else ""
             )
             silent = " · 📵 без звонка" if state.get("no_call") else ""
+            # Шапка считает агентские карточки, а найти их в теле было
+            # нельзя: полный разбор метку печатает, однострочник — нет.
+            # Прогон 28.08 12:58: «👤 Карточек с агентом: 6», в теле видна
+            # одна, остальные пять — в «рано судить». Цифра, которую нечем
+            # проверить, ничем не лучше отсутствующей; к тому же агент
+            # судится другим правилом температуры, и знать, что перед
+            # тобой агент, нужно до чтения оценки.
+            party = state.get("counterparty")
+            agent = (
+                " · 👤 агент"
+                if isinstance(party, dict) and str(party.get("who") or "") == "agent"
+                else ""
+            )
             blocks.append(
                 f"{icon} #{deal_id} {card_title(titles.get(deal_id))} — "
-                f"{step}{pause}{silent}{poor}".strip(),
+                f"{step}{agent}{pause}{silent}{poor}".strip(),
             )
         blocks.append("")
 
