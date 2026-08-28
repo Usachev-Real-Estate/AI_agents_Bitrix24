@@ -144,6 +144,20 @@ def format_next_step(step: Any) -> str:
 NO_STEP_RU = "шаг не назначен"
 
 
+def too_early_tail(count: int) -> str:
+    """«по N карточкам судить ещё рано» — с правильным числом.
+
+    Оговорка нужна обоим пустым разделам, а не одному: после того как холод
+    внутри отсрочки перестал поднимать тревогу (#17080), «ни одной карточки
+    с признаками потери» стало неверным ровно так же, как «работа
+    подтверждена». Признак был — мы решили пока не считать его потерей.
+    """
+    if count <= 0:
+        return ""
+    noun = "карточке" if count % 10 == 1 and count % 100 != 11 else "карточкам"
+    return f"по {count} {noun} судить ещё рано"
+
+
 def describe_next_step(state: dict[str, Any]) -> str:
     """Следующий шаг карточки — словами брокера или делом из Битрикса.
 
@@ -471,7 +485,7 @@ def format_summary(stats: dict[str, Any]) -> str:
         if young >= unrecoverable:
             tails.append("все моложе отсрочки — судить рано")
         elif young:
-            tails.append(f"{young} моложе отсрочки — по ним судить рано")
+            tails.append(f"{young} моложе отсрочки — {too_early_tail(young)}")
         if empty:
             tails.append(f"полностью пустых: {empty}")
         tail = f" ({', '.join(tails)})" if tails else ""
@@ -738,9 +752,16 @@ def format_sections(
             blocks.append(format_card(row, title, webhook_url))
             blocks.append("")
 
+    # Та же оговорка, что и у недоработок: холод внутри отсрочки тревогу
+    # больше не поднимает (#17080), значит «ни одной с признаками» верно
+    # только про карточки, которые мы взялись судить.
+    young = too_early_tail(len(waiting))
+    no_loss = (
+        f"Ни одной карточки с признаками потери; {young}."
+        if young else "Ни одной карточки с признаками потери."
+    )
     _block(
-        f"🚨 ТЕРЯЕМ КЛИЕНТА — {len(losing)}", losing,
-        "Ни одной карточки с признаками потери." + caveat,
+        f"🚨 ТЕРЯЕМ КЛИЕНТА — {len(losing)}", losing, no_loss + caveat,
     )
     if abandoned:
         # Раньше недоработок: месяц тишины срочнее, чем отставание на три дня.
@@ -749,11 +770,8 @@ def format_sections(
     # всем карточкам судить ещё рано, — то же самое отсутствие вердикта,
     # выданное за вердикт. Прогон 28.08 12:08: двадцать свежих лидов, ни
     # одного разбора работы, и обе воронки отрапортовали «подтверждена».
-    if waiting:
-        no_shortfall = (
-            f"Недоработок нет; по {len(waiting)} "
-            f"{'карточке' if len(waiting) == 1 else 'карточкам'} судить ещё рано."
-        )
+    if young:
+        no_shortfall = f"Недоработок нет; {young}."
     else:
         no_shortfall = "Работа подтверждена по всем прочитанным карточкам."
     _block(
