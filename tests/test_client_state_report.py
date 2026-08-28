@@ -182,7 +182,7 @@ def test_summary_separates_empty_cards_from_uninformative_ones():
         "unrecoverable": 8, "empty_cards": 5,
         "cost_rub": 3.08, "cost_rub_per_card": 0.308,
     })
-    assert "Неинформативных карточек: 8 (из них полностью пустых: 5)" in summary
+    assert "Неинформативных карточек: 8 (полностью пустых: 5)" in summary
 
 
 def test_summary_omits_the_empty_note_when_there_are_none():

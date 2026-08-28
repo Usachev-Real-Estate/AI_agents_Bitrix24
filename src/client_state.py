@@ -1657,6 +1657,11 @@ def run_client_state(
         "stage_age_unknown": 0,
         # Пустые карточки: разобраны без модели, потому что читать нечего.
         "empty_cards": 0,
+        # Неинформативные карточки, по которым мы сами отказались судить:
+        # лид, заведённый два часа назад, пуст не по вине брокера. Без этой
+        # цифры «неинформативных 8 из 10» на выборке свежих лидов читается
+        # как претензия к людям, хотя работать по ним ещё не начинали.
+        "unrecoverable_too_early": 0,
         # Состав выборки по этапам. Три прогона подряд дали неинформативный
         # итог из-за перекоса выборки, и каждый раз это приходилось
         # раскапывать. Пусть перекос будет виден сразу.
@@ -1749,6 +1754,8 @@ def run_client_state(
                     stats["verdicts"][cached_verdict] += 1
                 if cached.get("recoverable") is False:
                     stats["unrecoverable"] += 1
+                    if cached_verdict == "too_early":
+                        stats["unrecoverable_too_early"] += 1
                 if _is_agent_card(cached):
                     stats["agent_cards"] += 1
                 if cached.get("no_call"):
@@ -1773,6 +1780,8 @@ def run_client_state(
             )
         if state.get("recoverable") is False:
             stats["unrecoverable"] += 1
+            if verdict == "too_early":
+                stats["unrecoverable_too_early"] += 1
         if _is_agent_card(state):
             stats["agent_cards"] += 1
         if state.get("no_call"):
