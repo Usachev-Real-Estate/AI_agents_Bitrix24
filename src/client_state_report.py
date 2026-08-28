@@ -131,6 +131,11 @@ def format_next_step(step: Any) -> str:
     what = humanize(step.get("what"))
     when = humanize(step.get("when"))
     who = ru(step.get("who"), WHO_RU, WHO_RU["unknown"])
+    if what == UNKNOWN_RU:
+        # «не указано (не указано, не определён)» — три пустоты подряд там,
+        # где нечего сказать одной. Срок и исполнитель имеют смысл только
+        # при названном шаге: без него они не уточняют, а повторяют.
+        return "шаг не назначен"
     return f"{what} ({when}, {who})"
 
 
@@ -387,11 +392,14 @@ def format_summary(stats: dict[str, Any]) -> str:
         pending = int(stats.get("transcripts_pending") or 0)
         tails = []
         if pending:
-            tails.append(f"ещё {pending} расшифровок не готово")
+            # Считаем разговоры, а не карточки: «ещё 7 расшифровок не готово»
+            # рядом с «звонки есть у 1 из 10» читалось как «ещё у семи
+            # карточек звонки есть», хотя все семь записей — с той же одной.
+            tails.append(f"не расшифровано разговоров: {pending}")
         failed = int(stats.get("transcripts_failed") or 0)
         if failed:
             # Наша ошибка не должна выглядеть как задержка Битрикса.
-            tails.append(f"{failed} не загрузилось")
+            tails.append(f"не загрузилось разговоров: {failed}")
         if tails:
             line += " (" + ", ".join(tails) + ")"
         parts.append(line)

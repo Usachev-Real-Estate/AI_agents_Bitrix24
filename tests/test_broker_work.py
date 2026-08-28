@@ -587,14 +587,14 @@ def test_a_real_deadline_still_counts_next_to_the_sentinel() -> None:
 
 
 def test_a_record_gap_is_answered_by_a_record_not_by_waiting() -> None:
-    """#16210 и #13636: «из комментария не понять» — и «дело стоит, ждём»."""
+    """#16210 и #13636: претензия к записи — и «дело стоит, ждём»."""
     events = [_comment(2.0), _task(2.0, (NOW + timedelta(days=1)).isoformat())]
     state = {
         "next_step": {"what": "показ", "who": "broker"},
         "work_evidence": {"proven": False, "reason": GAP_EMPTY_COMMENT},
     }
     action = next_action(state, events, NOW)
-    assert "Написать в карточке" in action
+    assert "Записать в карточке" in action
     assert "ждём" not in action
 
 

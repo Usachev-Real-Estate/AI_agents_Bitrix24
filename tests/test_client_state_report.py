@@ -83,8 +83,13 @@ def test_unknown_values_are_written_out():
     assert humanize("unknown") == "не указано"
     assert humanize("") == "не указано"
     assert humanize("  Покупка  ") == "Покупка"
-    assert format_next_step({"what": "unknown", "when": "unknown", "who": "unknown"}) == (
-        "не указано (не указано, не определён)"
+    # Три пустоты подряд («не указано (не указано, не определён)») сжимаются
+    # в одну фразу: срок и исполнитель без названного шага ничего не говорят.
+    assert format_next_step(
+        {"what": "unknown", "when": "unknown", "who": "unknown"},
+    ) == "шаг не назначен"
+    assert format_next_step({"what": "unknown", "when": "2026-09-01", "who": "broker"}) == (
+        "шаг не назначен"
     )
     assert format_next_step(None) == "не указано"
 
@@ -695,7 +700,7 @@ def test_the_summary_separates_calls_from_transcripts():
     })
     assert "📞 Звонки есть у 7 из 10 карточек" in calls_no_text
     assert "разговор читается у 0" in calls_no_text
-    assert "ещё 19 расшифровок не готово" in calls_no_text
+    assert "не расшифровано разговоров: 19" in calls_no_text
 
     # Всё расшифровано — вторую половину строки не пишем, она лишняя.
     all_read = format_summary({
@@ -716,7 +721,7 @@ def test_a_failed_fetch_is_not_reported_as_a_bitrix_delay():
         "cards_with_transcript": 2, "transcripts_pending": 10,
         "transcripts_failed": 3,
     })
-    assert "ещё 10 расшифровок не готово, 3 не загрузилось)" in text
+    assert "не расшифровано разговоров: 10, не загрузилось разговоров: 3)" in text
 
 
 def test_the_marker_shows_on_the_card_and_in_the_short_list():
