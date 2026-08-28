@@ -1123,6 +1123,14 @@ def apply_derived_verdict(
     # знает его только профиль. Кладём решение в состояние: разделы отчёта
     # собираются из него, профиля там уже нет.
     state["cold_is_a_loss"] = profile.cold_means_losing
+    # Молчит ли контрагент. Ключ у воронок разный (client_responsive против
+    # owner_responsive), а совету нужен один ответ: обе умолчанием True,
+    # поэтому отсутствующий ключ на итог не влияет.
+    _signals = state.get("signals") if isinstance(state.get("signals"), dict) else {}
+    state["counterparty_silent"] = not (
+        bool(_signals.get("client_responsive", True))
+        and bool(_signals.get("owner_responsive", True))
+    )
     envelope["temperature"] = level
     hours_on_stage = _stage_hours(record, datetime.now(timezone.utc))
     envelope["stage_age_known"] = hours_on_stage is not None
