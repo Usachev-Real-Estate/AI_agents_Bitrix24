@@ -158,6 +158,21 @@ REMINDERS = frozenset({
     GAP_DUE_TASK_NO_RESULT, GAP_TASK_DUE_TODAY, GAP_PLAN_TOO_FAR,
 })
 
+# Исходы, которые уступают просроченному делу. Решение агентства от 28.08:
+# «претензия может быть только если дело просрочено» — то есть просрочка
+# претензию не гасит, а там, где претензии нет, она и есть самое конкретное,
+# что можно сказать: у неё есть дело и дата.
+#
+# GAP_ONLY_PLANS сюда входит, хотя формально это претензия: она о том, что
+# план в деле не расписан, а расписывать уже поздно — срок вышел. Говорить
+# «допишите план» про дело, которое надо было сделать вчера, значит отвечать
+# не на тот вопрос.
+YIELDS_TO_OVERDUE = frozenset({GAP_ONLY_PLANS})
+
+# Разрывы, которые сами и есть «дело со сроком». У них довод в скобках —
+# дата дела; у всех остальных дело идёт довеском к их собственному доводу.
+DUE_TASK_GAPS = frozenset({GAP_DUE_TASK_NO_RESULT, GAP_TASK_DUE_TODAY})
+
 # Разрывы, которые доказывают себя сами и не нуждаются в норме этапа:
 # у них в скобках стоит собственный довод — сколько карточка молчит или
 # какие две даты не сходятся. Напоминания обычно печатаются без скобок,
@@ -283,6 +298,44 @@ def judgement_starts_after(profile: FunnelProfile, stage_id: str) -> float:
     grace = profile.grace_hours
     hours = int(grace.get(stage_id, grace.get("_default", 24)))
     return max(float(hours), work_window_days(profile, stage_id) * 24.0)
+
+
+def _is_open_task(event: dict[str, Any]) -> bool:
+    """Незакрытое дело — то есть план, а не запись о сделанном."""
+    return (
+        event.get("kind") == "activity"
+        and str(event.get("completed") or "").upper() != "Y"
+    )
+
+
+def tasks_of_the_broker(
+    events: list[dict[str, Any]],
+    authors: set[int] | None,
+) -> list[dict[str, Any]]:
+    """События без чужих дел: считаем только дела брокера и его РОПа.
+
+    Решение агентства от 28.08. Дело, заведённое бизнес-процессом или
+    роботом, может нести длинный типовой текст — и по всем правилам ниже
+    оно засчитывалось брокеру как его работа, его пауза и его контроль.
+
+    Фильтруем только НЕЗАКРЫТЫЕ дела: закрытая активность — это запись о
+    состоявшемся разговоре, и чей она, для факта разговора неважно.
+
+    Автор неизвестен или список авторов пуст — дело засчитываем. Мы не знаем,
+    чьё оно, и превращать своё незнание в претензию к брокеру нельзя: это то
+    же самое отсутствие данных, выданное за результат.
+    """
+    if not authors:
+        return events
+    kept: list[dict[str, Any]] = []
+    for event in events:
+        if not _is_open_task(event):
+            kept.append(event)
+            continue
+        author = event.get("author_id")
+        if not isinstance(author, int) or author <= 0 or author in authors:
+            kept.append(event)
+    return kept
 
 
 def _parse(value: Any) -> datetime | None:
@@ -655,6 +708,7 @@ def assess_broker_work(
     next_step_when: str = "",
     pause_explained: bool = False,
     pause_until: str = "",
+    task_authors: set[int] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Подтверждена ли работа брокера за последнее окно по этапу.
@@ -664,6 +718,11 @@ def assess_broker_work(
     """
     now = now or datetime.now(timezone.utc)
     days = work_window_days(profile, stage_id)
+    # Чужие незакрытые дела в зачёт не идут — решение агентства от 28.08.
+    # Отсекаем один раз здесь: дальше по цепочке дело засчитывается работой,
+    # паузой, ожиданием и признаком «карточку держат», и в каждом из четырёх
+    # мест ответ должен быть один и тот же.
+    events = tasks_of_the_broker(events, task_authors)
     window = events_in_window(events, now, days)
 
     last_seen: datetime | None = None
@@ -702,49 +761,87 @@ def assess_broker_work(
         # Событий нет вовсе — считаем от возраста карточки на этапе.
         silent = hours_on_stage / 24.0
     on_control = has_open_future_task(events, now)
-    if (
+    abandoned = bool(
         abandoned_days > 0
         and silent is not None
         and silent >= abandoned_days
         and not on_control
-    ):
-        return {
-            "proven": False,
-            "reason": GAP_ABANDONED,
+    )
+
+    def _finish(reason: str, **extra: Any) -> dict[str, Any]:
+        """Собрать ответ и добавить к нему просроченное дело, если оно есть.
+
+        Просрочка доезжает до любого исхода, а не только до последнего:
+        ветки паузы, ожидания и отсрочки возвращают результат раньше, и
+        раньше теряли её молча.
+        """
+        out: dict[str, Any] = {
+            "proven": reason in PROVEN,
+            "reason": reason,
             "window_days": days,
             "days_quiet": days_quiet,
-            "abandoned_days": round(silent, 1),
         }
+        out.update(extra)
+        if due is None:
+            return out
+        # Дело просрочено. Претензию оно не отменяет — решение агентства от
+        # 28.08: «претензия может быть только если дело просрочено». Если по
+        # карточке и так не видно работы, разговор о ней, а не о том, что
+        # дело пора закрыть. Но саму просрочку РОП должен видеть в любом
+        # случае: кладём её доводом.
+        out["due_task"] = due
+        # Спрашиваем не про членство в PROVEN, а про сам флаг: отсрочка этапа
+        # возвращает proven=True с кодом GAP_OUT_OF_WINDOW, которого в PROVEN
+        # нет. Проверка по множеству молча пропускала бы именно тот случай,
+        # ради которого всё это писалось, — молодую карточку с делом, срок
+        # которого брокер назначил себе сам.
+        claimed = (
+            not out["proven"]
+            and reason not in REMINDERS
+            and reason not in YIELDS_TO_OVERDUE
+        )
+        if not claimed:
+            # Претензии нет — остаётся напоминание, и оно конкретнее любого
+            # другого: у него есть дело и дата.
+            out["proven"] = False
+            out["reason"] = GAP_DUE_TASK_NO_RESULT
+        return out
 
-    # Срок дела проверяется раньше окна этапа и раньше звонка: обязательство
-    # брокер назначил себе сам, и оно не отменяется ни тем, что карточка
-    # молодая, ни звонком трёхдневной давности. Но это напоминание, а не
-    # упрёк (решение агентства от 28.08), поэтому стоит оно ниже
-    # заброшенности: напоминать о деле на карточке, брошенной сто дней
-    # назад, значит говорить не о том.
+    # Дело со сроком. Решение агентства от 28.08 разделило два случая, и
+    # разделило по существу: «претензия может быть только если дело
+    # просрочено».
+    #
+    # Дело стоит на СЕГОДНЯ — день не кончился, спрашивать не с чего:
+    # напоминаем и на этом останавливаемся. Проверка стоит раньше окна
+    # этапа и раньше звонка (обязательство брокер назначил себе сам, и
+    # молодость карточки его не отменяет) и ниже заброшенности —
+    # напоминать о деле на карточке, брошенной сто дней назад, значит
+    # говорить не о том.
     due = due_task_without_result(events, now)
-    if due is not None:
+    due_today = due is not None and int(due.get("days_overdue") or 0) < 1
+    if due_today:
         return {
             "proven": False,
-            "reason": (
-                GAP_TASK_DUE_TODAY if due.get("due_today")
-                else GAP_DUE_TASK_NO_RESULT
-            ),
+            "reason": GAP_TASK_DUE_TODAY,
             "window_days": days,
             "days_quiet": days_quiet,
             "due_task": due,
         }
+    if abandoned:
+        return _finish(
+            GAP_ABANDONED, abandoned_days=round(float(silent or 0.0), 1),
+        )
+
+    # Просроченное дело претензию НЕ гасит: оно разбирается в самом конце,
+    # после того как цепочка сказала своё. Иначе самый мягкий вердикт
+    # перебивал самый тяжёлый — карточка без единого следа работы получала
+    # «напоминание: срок дела прошёл» вместо «следов работы нет вовсе».
 
     # Карточка младше отсрочки этапа: спрашивать не с чего.
     if hours_on_stage is not None and hours_on_stage < judgement_starts_after(
         profile, stage_id,
     ):
-        return {
-            "proven": True,
-            "reason": GAP_OUT_OF_WINDOW,
-            "window_days": days,
-            "days_quiet": days_quiet,
-        }
+        return _finish(GAP_OUT_OF_WINDOW, proven=True)
 
     # Пауза с названной причиной: клиент в отпуске, ждёт документы, продаёт
     # свою квартиру. Ход при этом может числиться за брокером — выйти на связь
@@ -754,28 +851,16 @@ def assess_broker_work(
     if pause_explained:
         deadline = open_future_deadline(events, now)
         if deadline is None:
-            return {
-                "proven": False,
-                "reason": GAP_PAUSE_NO_TASK,
-                "window_days": days,
-                "days_quiet": days_quiet,
-            }
+            return _finish(GAP_PAUSE_NO_TASK)
         if _pause_covers_the_task(pause_until, deadline, now, days):
-            return {
-                "proven": True,
-                "reason": PROVEN_BY_PAUSE,
-                "window_days": days,
-                "days_quiet": days_quiet,
-                "pause_until": pause_until or "unknown",
-            }
-        return {
-            "proven": False,
-            "reason": GAP_PAUSE_TASK_TOO_LATE,
-            "window_days": days,
-            "days_quiet": days_quiet,
-            "pause_until": pause_until or "unknown",
-            "task_deadline": deadline.astimezone(PORTAL_TZ).date().isoformat(),
-        }
+            return _finish(
+                PROVEN_BY_PAUSE, pause_until=pause_until or "unknown",
+            )
+        return _finish(
+            GAP_PAUSE_TASK_TOO_LATE,
+            pause_until=pause_until or "unknown",
+            task_deadline=deadline.astimezone(PORTAL_TZ).date().isoformat(),
+        )
 
     # Ход за контрагентом: он сам назвал, когда вернётся к разговору. Молчание
     # брокера тут не бездействие. #16798: агент сказал, что наберёт в начале
@@ -784,16 +869,9 @@ def assess_broker_work(
     # ожидание ничем не отличается от забытья, и это не обвинение, а повод
     # напомнить.
     if _ball_is_theirs(next_step_who, next_step_when, now):
-        return {
-            "proven": has_open_future_task(events, now),
-            "reason": (
-                PROVEN_BY_WAITING
-                if has_open_future_task(events, now)
-                else GAP_WAITING_NO_TASK
-            ),
-            "window_days": days,
-            "days_quiet": days_quiet,
-        }
+        return _finish(
+            PROVEN_BY_WAITING if on_control else GAP_WAITING_NO_TASK,
+        )
 
     # Ветка «комментарий» смотрит на комментарии и на текст дела. Пустое
     # дело — «Позвонить» — работой по-прежнему не считается: план, который
@@ -828,15 +906,9 @@ def assess_broker_work(
     else:
         reason = PROVEN_BY_COMMENT
 
-    result = {
-        "proven": reason in PROVEN,
-        "reason": reason,
-        "window_days": days,
-        "days_quiet": days_quiet,
-    }
     if reason == GAP_ONLY_PLANS and plan_text:
-        result["task_text"] = plan_text
-    return result
+        return _finish(reason, task_text=plan_text)
+    return _finish(reason)
 
 
 def open_future_deadline(
@@ -912,6 +984,7 @@ def next_action(
     state: dict[str, Any],
     events: list[dict[str, Any]],
     now: datetime | None = None,
+    task_authors: set[int] | None = None,
 ) -> str:
     """Что брокеру сделать по карточке прямо сейчас, или "" если нечего.
 
@@ -922,6 +995,9 @@ def next_action(
     с запланированным делом, иначе ожидание ничем не отличается от забытья.
     """
     now = now or datetime.now(timezone.utc)
+    # Тот же отбор, что и в оценке работы: иначе совет назовёт срок чужого
+    # дела, которого оценка не видела, и две строки одной карточки разойдутся.
+    events = tasks_of_the_broker(events, task_authors)
 
     work = state.get("work_evidence") if isinstance(
         state.get("work_evidence"), dict

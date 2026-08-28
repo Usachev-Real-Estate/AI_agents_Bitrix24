@@ -14,6 +14,7 @@ from broker_work import GAP_ABANDONED
 from broker_work import GAP_NO_TRACE
 from broker_work import GAP_NO_TRACE_IN_WINDOW
 from broker_work import GAP_PAUSE_TASK_TOO_LATE
+from broker_work import DUE_TASK_GAPS
 from broker_work import GAP_ONLY_PLANS
 from broker_work import GAP_PLAN_TOO_FAR
 from broker_work import PROVEN
@@ -297,17 +298,25 @@ def format_card(
         else:
             quiet_text = f", последний след {quiet:.0f} дн. назад"
         due = work.get("due_task") if isinstance(work.get("due_task"), dict) else None
+        reason_code = str(work.get("reason") or "")
+        due_tail = ""
         if due:
             # У наступившего срока своя арифметика: норма этапа тут ни при
             # чём, спрашивают за конкретное дело и конкретную дату.
             overdue = int(due.get("days_overdue") or 0)
-            tail = (
+            due_tail = (
                 f"срок {due.get('deadline')}, "
                 + (f"просрочено на {overdue} дн." if overdue else "срок сегодня")
             )
+        if due and reason_code in DUE_TASK_GAPS:
+            # Претензия и есть про это дело — довод в скобках только его.
+            tail = due_tail
         else:
+            # А тут дело идёт довеском: с 28.08 просрочка претензию не гасит,
+            # и в скобках должны стоять оба довода. Показать только срок дела
+            # значило бы подпереть претензию про норму этапа цифрой, которая
+            # к ней не относится, — читатель вычтет и не сойдётся.
             tail = f"норма {work.get('window_days')} дн.{quiet_text}"
-        reason_code = str(work.get("reason") or "")
         if reason_code == GAP_ONLY_PLANS and work.get("task_text"):
             # Порог, по которому дело признаётся планом, решает судьбу
             # карточки — а проверить его РОПу нечем: «в деле не сказано, что
@@ -357,6 +366,11 @@ def format_card(
         # Но у разрыва со своим доводом скобки и есть вся проверяемость —
         # «вернуться собрался позже» без двух дат оспорить нечем.
         drop_tail = reason_code in WORK_REMINDERS and reason_code not in SELF_ARGUED_GAPS
+        if due_tail and reason_code not in DUE_TASK_GAPS:
+            # Просрочку РОП должен видеть в любом случае: она конкретнее
+            # нормы этапа и по ней сразу видно, за что зацепиться.
+            tail = f"{tail}; {due_tail}" if tail and not drop_tail else due_tail
+            drop_tail = False
         tail = "" if drop_tail or not tail else f" ({tail})"
         lines.append(
             (

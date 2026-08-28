@@ -18,6 +18,7 @@ if str(_SRC) not in sys.path:
 
 from broker_work import (  # noqa: E402
     GAP_ABANDONED,
+    GAP_NO_TRACE_IN_WINDOW,
     GAP_ONLY_PLANS,
     GAP_PLAN_TOO_FAR,
     GAP_TASK_DUE_TODAY,
@@ -247,6 +248,38 @@ def test_the_alarm_puts_the_worst_abandoned_card_first():
     losing, abandoned, _n, _r, _w, _f = split_sections([card(1, 41.0), card(2, 107.0)])
     assert [r["deal_id"] for r in losing] == [2, 1]
     assert [r["deal_id"] for r in abandoned] == [2, 1]
+
+
+def test_an_overdue_task_does_not_silence_the_claim():
+    """Решение агентства: «претензия может быть только если дело просрочено».
+
+    Значит просрочка претензию не гасит, а стоит рядом с ней. Раньше самый
+    мягкий вердикт перебивал самый тяжёлый: карточка без единого следа
+    работы получала «напоминание: срок дела прошёл».
+    """
+    events = [_comment(10.0), _task(ago=10.0, ahead=-5.0)]
+    result = _assess(events)
+    assert result["reason"] == GAP_NO_TRACE_IN_WINDOW
+    assert result["due_task"]["days_overdue"] >= 1
+
+
+def test_the_card_shows_both_arguments_at_once():
+    """Скобки должны подпирать ту претензию, которая напечатана.
+
+    Показать только срок дела под строкой про норму этапа значит дать
+    читателю цифру, которая к претензии не относится: он вычтет и не сойдётся.
+    """
+    card = {"deal_id": 5, "skipped": False, "state": {
+        "temperature": "warm", "verdict": "poor", "next_step": {},
+        "work_evidence": {
+            "proven": False, "reason": GAP_NO_TRACE_IN_WINDOW,
+            "window_days": 3, "days_quiet": 9.0,
+            "due_task": {"deadline": "2026-08-20", "days_overdue": 8,
+                         "subject": "Позвонить", "due_today": False},
+        }}}
+    body = format_sections([card], {5: "Сделка"}, WEBHOOK)
+    assert "норма 3 дн., последний след 9 дн. назад" in body
+    assert "просрочено на 8 дн." in body
 
 
 def test_the_numerals_decline():

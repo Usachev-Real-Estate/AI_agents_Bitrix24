@@ -24,6 +24,7 @@ if str(_SRC) not in sys.path:
 
 from broker_work import (  # noqa: E402
     GAP_DUE_TASK_NO_RESULT,
+    GAP_TASK_DUE_TODAY,
     GAP_ONLY_PLANS,
     PROVEN,
     PROVEN_BY_PAUSE,
@@ -146,9 +147,22 @@ def test_a_task_written_before_the_window_buys_nothing():
 
 
 def test_a_due_task_outranks_the_plan_in_it():
-    """Срок наступил — спрашивают за результат, а не за намерение."""
+    """Срок наступил — спрашивают за результат, а не за намерение.
+
+    Срок в этот же день ещё не просрочка (решение агентства от 28.08:
+    «претензия может быть только если дело просрочено»), поэтому и разряд, и
+    формулировка — напоминание.
+    """
     overdue = _task(days_ago=1.0, days_ahead=-0.5, subject="Показ", description=PLAN)
-    assert _assess([overdue])["reason"] == GAP_DUE_TASK_NO_RESULT
+    assert _assess([overdue])["reason"] == GAP_TASK_DUE_TODAY
+
+
+def test_a_plan_whose_day_has_passed_becomes_an_overdue_reminder():
+    """А вот назавтра то же дело уже просрочено."""
+    stale = _task(days_ago=3.0, days_ahead=-2.0, subject="Показ", description=PLAN)
+    result = _assess([stale])
+    assert result["reason"] == GAP_DUE_TASK_NO_RESULT
+    assert result["due_task"]["days_overdue"] >= 1
 
 
 # ── Границы, которые правка не должна была сдвинуть ─────────────────────

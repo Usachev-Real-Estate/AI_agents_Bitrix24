@@ -20,6 +20,7 @@ from broker_work import (  # noqa: E402
     GAP_EMPTY_COMMENT,
     GAP_NO_TRACE,
     GAP_NO_TRACE_IN_WINDOW,
+    GAP_TASK_DUE_TODAY,
     GAP_ONLY_PLANS,
     GAP_OUT_OF_WINDOW,
     GAP_PAUSE_NO_TASK,
@@ -288,11 +289,16 @@ def _task(created_h: float, deadline: str, completed: str = "N") -> dict:
 
 
 def test_task_due_today_without_result_is_a_gap() -> None:
-    """Дело на сегодня, срок прошёл по часам, отписки нет."""
+    """Дело на сегодня, срок прошёл по часам, отписки нет.
+
+    Решение агентства от 28.08: «претензия может быть только если дело
+    просрочено». День срока ещё не кончился, поэтому это напоминание —
+    и называется оно своим кодом, а не тем, который говорит «срок прошёл».
+    """
     events = [_comment(72.0), _task(72.0, _ago(2.0))]
     result = _assess(events)
     assert result["proven"] is False
-    assert result["reason"] == GAP_DUE_TASK_NO_RESULT
+    assert result["reason"] == GAP_TASK_DUE_TODAY
     assert result["due_task"]["days_overdue"] == 0
 
 
@@ -314,24 +320,49 @@ def test_completed_task_is_not_owed() -> None:
 
 
 def test_overdue_task_counts_days() -> None:
+    """Просрочка считается в днях и доезжает до карточки доводом.
+
+    Претензию она при этом не отменяет: по этой карточке за норму этапа нет
+    ни звонка, ни комментария, и разговор об этом. Само дело названо в
+    скобках — решение агентства от 28.08.
+    """
     events = [_comment(200.0), _task(200.0, _ago(72.0))]
     result = _assess(events)
-    assert result["reason"] == GAP_DUE_TASK_NO_RESULT
+    assert result["reason"] == GAP_NO_TRACE_IN_WINDOW
     assert result["due_task"]["days_overdue"] == 3
+
+
+def test_an_overdue_task_on_a_card_nobody_can_blame_yet_is_a_reminder() -> None:
+    """Претензии нет — значит остаётся напомнить закрыть дело.
+
+    Карточка младше отсрочки этапа: спрашивать с брокера ещё не начали. Но
+    дело он назначил себе сам, и срок по нему прошёл.
+    """
+    events = [_comment(96.0), _task(96.0, _ago(48.0))]
+    result = _assess(events, hours_on_stage=20.0)
+    assert result["reason"] == GAP_DUE_TASK_NO_RESULT
+    assert result["due_task"]["days_overdue"] >= 1
+
+
+def test_a_call_after_the_deadline_day_closes_the_task() -> None:
+    """Отписка после срока — это и есть результат по делу."""
+    events = [_call(2.0), _task(72.0, _ago(72.0))]
+    assert _assess(events)["reason"] == PROVEN_BY_CALL
+    assert "due_task" not in _assess(events)
 
 
 def test_call_before_deadline_day_does_not_close_the_task() -> None:
     """Звонок трёхдневной давности не отчёт по делу со сроком вчера."""
     events = [_call(72.0), _task(72.0, _ago(30.0))]
     result = _assess(events)
-    assert result["reason"] == GAP_DUE_TASK_NO_RESULT
+    assert result["due_task"]["days_overdue"] >= 1
 
 
 def test_due_task_outranks_young_card_grace() -> None:
     """Обязательство брокер назначил себе сам — возраст карточки его не снимает."""
     events = [_comment(20.0), _task(20.0, _ago(2.0))]
     result = _assess(events, hours_on_stage=20.0)
-    assert result["reason"] == GAP_DUE_TASK_NO_RESULT
+    assert result["reason"] == GAP_TASK_DUE_TODAY
 
 
 def test_due_task_advice_names_the_deadline() -> None:

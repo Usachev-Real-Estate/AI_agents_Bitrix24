@@ -24,6 +24,7 @@ from broker_work import (
     has_open_future_task,
     next_action,
     open_future_deadline,
+    tasks_of_the_broker,
 )
 from counterparty import (
     WHO_CLIENT,
@@ -1073,6 +1074,27 @@ def reconcile_step_date(state: dict[str, Any]) -> str:
     return resolved
 
 
+def allowed_task_authors(
+    broker_id: int,
+    broker_dept_map: dict[int, int] | None,
+    rop_map: dict[int, int] | None,
+) -> set[int]:
+    """Чьи дела засчитываются: брокер и его РОП.
+
+    Пустое множество означает «правило не применяем»: карты не построились
+    или брокер неизвестен. Это сознательно — см. tasks_of_the_broker.
+    """
+    if not broker_id or not broker_dept_map or not rop_map:
+        return set()
+    allowed = {broker_id}
+    dept = broker_dept_map.get(broker_id)
+    if dept:
+        rop_id = rop_map.get(dept)
+        if rop_id:
+            allowed.add(rop_id)
+    return allowed
+
+
 def apply_derived_verdict(
     state: dict[str, Any],
     record: dict[str, Any],
@@ -1080,6 +1102,7 @@ def apply_derived_verdict(
     envelope: dict[str, Any] | None = None,
     events: list[dict[str, Any]] | None = None,
     settings: Settings | None = None,
+    task_authors: set[int] | None = None,
 ) -> dict[str, Any]:
     """Пересчитать температуру и вердикт по уже извлечённым фактам.
 
@@ -1119,7 +1142,11 @@ def apply_derived_verdict(
     # ниже «дело стоит на 2026-09-01». Кладём дату сюда, чтобы обе строки
     # говорили об одном. Считается до температуры: её формулировка про
     # несогласованный шаг тоже зависит от того, стоит ли дело.
-    _scheduled = open_future_deadline(events or [])
+    # Чужие дела не считаются нигде: если бы вердикт видел дело робота, а
+    # оценка работы — нет, карточка получила бы «шаг назначен» и «следов
+    # работы нет» разом.
+    own_events = tasks_of_the_broker(events or [], task_authors)
+    _scheduled = open_future_deadline(own_events)
     state["scheduled_task_at"] = (
         _scheduled.astimezone(PORTAL_TZ).date().isoformat()
         if _scheduled is not None else ""
@@ -1159,7 +1186,7 @@ def apply_derived_verdict(
         stage_id, state, profile,
         hours_on_stage=hours_on_stage,
         qualification_ok=qualification_ok,
-        task_scheduled=has_open_future_task(events or []),
+        task_scheduled=has_open_future_task(own_events),
     )
     state["verdict"] = verdict
     state["verdict_reason"] = verdict_reason
@@ -1280,12 +1307,17 @@ def apply_derived_verdict(
         # на контроле и только на тот срок, который причина покрывает.
         pause_explained=state["work_claims"]["pause_explained"],
         pause_until=str(work.get("pause_until") or ""),
+        # Дело засчитывается, только если его завёл брокер или его РОП
+        # (решение агентства от 28.08).
+        task_authors=task_authors,
     )
     envelope["work_proven"] = state["work_evidence"]["proven"]
 
     # Рецепт, а не только диагноз. Считается заново на каждом прогоне: дело
     # могли поставить уже после разбора, и тогда совет надо снять.
-    state["next_action"] = next_action(state, events or [])
+    state["next_action"] = next_action(
+        state, events or [], task_authors=task_authors,
+    )
     return state
 
 
@@ -1297,10 +1329,21 @@ def analyze_deal(
     llm: LLMClient | None = None,
     prepared: bool = False,
     force: bool = False,
+    rop_map: dict[int, int] | None = None,
+    broker_dept_map: dict[int, int] | None = None,
 ) -> dict[str, Any]:
     """Analyze one deal by its funnel profile; returns state or skip reason."""
     settings = settings or get_settings()
     deal_id = _coerce_int(deal.get("ID") or deal.get("id"))
+    # Чьи дела засчитываем: ответственного брокера и его РОПа (решение
+    # агентства от 28.08). Карты строит прогон один раз на всю выборку —
+    # если их не передали, множество пустое, и тогда правило не применяется
+    # вовсе: незнание автора не должно превращаться в претензию к брокеру.
+    task_authors = allowed_task_authors(
+        _coerce_int(deal.get("ASSIGNED_BY_ID") or deal.get("assigned_by_id")),
+        broker_dept_map,
+        rop_map,
+    )
     envelope: dict[str, Any] = {
         "deal_id": deal_id,
         "skipped": False,
@@ -1369,7 +1412,9 @@ def analyze_deal(
         cached = json.loads(stored.get("state_json") or "{}")
         # Факты берём из кэша, оценку считаем заново: этап успел постареть,
         # а правила могли поменяться с прошлого прогона.
-        apply_derived_verdict(cached, record, profile, envelope, events, settings)
+        apply_derived_verdict(
+            cached, record, profile, envelope, events, settings, task_authors,
+        )
         # В БД состояние лежит замаскированным — разворачиваем, иначе отчёт
         # покажет КЛИЕНТ_1 вместо имени всюду, где карточка взята из кэша.
         envelope["state"] = unmask_state(cached, mask_map, profile)
@@ -1410,6 +1455,7 @@ def analyze_deal(
         envelope["reason"] = "no_new_events"
         apply_derived_verdict(
             previous_state, record, profile, envelope, events, settings,
+            task_authors,
         )
         envelope["state"] = unmask_state(previous_state, mask_map, profile)
         if not settings.dry_run:
@@ -1511,7 +1557,9 @@ def analyze_deal(
         )
     envelope["stage_facts_dropped"] = unquoted
 
-    apply_derived_verdict(state, record, profile, envelope, events, settings)
+    apply_derived_verdict(
+        state, record, profile, envelope, events, settings, task_authors,
+    )
 
     # В БД уходит замаскированная копия: на следующем прогоне она вернётся
     # в модель как previous_state. Разворачиваем только то, что читают люди.
@@ -1720,6 +1768,27 @@ def run_client_state(
         "stages_without_rules": {},
         "results": [],
     }
+    # Карты авторов строятся один раз на всю выборку: два REST-запроса на
+    # прогон против двух на карточку. Сбой не роняет прогон — множество
+    # авторов останется пустым, и правило «дело брокера или его РОПа»
+    # просто не применится, а не заработает наоборот.
+    try:
+        from tools import _build_broker_dept_map, _build_rop_map
+
+        rop_map = _build_rop_map()
+        broker_ids = {
+            _coerce_int(d.get("ASSIGNED_BY_ID") or d.get("assigned_by_id"))
+            for d in deals
+        }
+        broker_dept_map = _build_broker_dept_map({b for b in broker_ids if b})
+    except Exception as exc:  # noqa: BLE001 — прогон важнее одного правила
+        logger.warning(
+            "Не удалось построить карту авторов дел (%s): "
+            "дела будут засчитываться независимо от того, кто их завёл",
+            exc,
+        )
+        rop_map, broker_dept_map = {}, {}
+
     for deal in deals:
         stage_code = _clean_str(deal.get("STAGE_ID") or deal.get("stage_id"))
         stats["stages"][stage_code or "(без этапа)"] = (
@@ -1728,6 +1797,7 @@ def run_client_state(
         try:
             result = analyze_deal(
                 deal, profile=profile, settings=settings, llm=llm, force=force,
+                rop_map=rop_map, broker_dept_map=broker_dept_map,
             )
         except Exception as exc:  # noqa: BLE001 — одна карточка не роняет батч
             logger.warning(

@@ -85,9 +85,15 @@ def test_the_wording_does_not_claim_the_deadline_has_passed():
     assert "прошёл" in REASON_RU[GAP_DUE_TASK_NO_RESULT]
 
 
-def test_a_task_due_earlier_today_is_named_differently():
+def test_a_task_due_earlier_today_is_still_only_a_reminder():
+    """Срок прошёл по часам, но день не кончился — это ещё не просрочка.
+
+    Решение агентства от 28.08: «претензия может быть только если дело
+    просрочено». Флаг due_today при этом честно говорит, что час миновал —
+    им и различаются формулировки совета.
+    """
     result = _assess([_task(_at(7))])
-    assert result["reason"] == GAP_DUE_TASK_NO_RESULT
+    assert result["reason"] == GAP_TASK_DUE_TODAY
     assert result["due_task"]["due_today"] is False
     assert result["due_task"]["days_overdue"] == 0
 
