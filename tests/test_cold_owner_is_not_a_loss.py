@@ -55,15 +55,25 @@ def test_a_cold_owner_does_not_raise_the_alarm():
 
 
 def test_a_cold_buyer_still_does():
+    """Отсрочка позади — холод у покупателя по-прежнему тревога."""
     losing, _ab, _n, _rem, _w, _fine = split_sections(
-        [_card(13512, cold_is_a_loss=True)],
+        [_card(13512, cold_is_a_loss=True, verdict="poor")],
     )
     assert [r["deal_id"] for r in losing] == [13512]
 
 
+def test_a_cold_buyer_inside_the_grace_waits():
+    """#17080: остывать ещё некогда — карточке 22 часа при отсрочке 72."""
+    losing, _ab, _n, _rem, waiting, _fine = split_sections(
+        [_card(17080, cold_is_a_loss=True, verdict="too_early")],
+    )
+    assert losing == []
+    assert [r["deal_id"] for r in waiting] == [17080]
+
+
 def test_an_old_cached_state_without_the_key_keeps_the_alarm():
     """Ключа нет — ведём себя как раньше, а не тише."""
-    card = _card(13512, cold_is_a_loss=True)
+    card = _card(13512, cold_is_a_loss=True, verdict="poor")
     del card["state"]["cold_is_a_loss"]
     losing, _ab, _n, _rem, _w, _fine = split_sections([card])
     assert [r["deal_id"] for r in losing] == [13512]

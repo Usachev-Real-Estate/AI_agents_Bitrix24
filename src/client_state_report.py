@@ -587,10 +587,21 @@ def _is_losing_client(state: dict[str, Any]) -> bool:
     выходит на связь» — обычное начало работы по холодной базе, а не потеря
     (#15594, решение агентства). Решает воронка, и она кладёт ответ в
     state["cold_is_a_loss"].
+
+    Внутри отсрочки остывания не бывает и у покупателей: клиенту не хватило
+    времени остыть. #17080 — карточке 22 часа при отсрочке 72, клиент один
+    раз не взял трубку и тем же комментарием договорился о показе в четверг,
+    а отчёт назвал это потерей. Обоснование правила («это событие, а не
+    отсутствие данных») на такой карточке не работает: событию неоткуда
+    взяться. Ярлык «холодный» остаётся, тревога снимается до конца отсрочки —
+    тот же принцип, что у собственников, только по возрасту карточки, а не
+    по воронке.
     """
+    too_early = str(state.get("verdict") or "") == "too_early"
     if (
         str(state.get("temperature") or "") == "cold"
         and state.get("cold_is_a_loss", True)
+        and not too_early
     ):
         return True
     work = state.get("work_evidence") or {}
@@ -600,7 +611,7 @@ def _is_losing_client(state: dict[str, Any]) -> bool:
         # три. Такая карточка не должна лежать вторым пунктом среди восьми
         # недоработок.
         return True
-    if str(state.get("verdict") or "") == "too_early":
+    if too_early:
         return False
     if state.get("recoverable") is not False:
         return False

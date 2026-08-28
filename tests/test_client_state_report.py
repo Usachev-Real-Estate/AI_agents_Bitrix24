@@ -416,12 +416,29 @@ def test_a_card_inside_its_grace_period_is_not_called_a_loss():
     assert [r["deal_id"] for r in waiting] == [20]
 
 
-def test_a_cold_client_inside_grace_is_still_a_loss():
-    """Клиент сказал «нет» — срок этому не оправдание."""
+def test_a_cold_client_inside_grace_is_not_a_loss_yet():
+    """Решение агентства по #17080: внутри отсрочки остывать ещё некогда.
+
+    Раньше холод заводил в «теряем» безусловно — «срок остыванию не
+    оправдание». На карточке 22 часов от роду это перестаёт держаться:
+    клиент один раз не взял трубку и тем же комментарием договорился о
+    показе. Ярлык «холодный» остаётся, тревога ждёт конца отсрочки.
+    """
+    from client_state_report import split_sections
+
+    fresh = _res(21, temperature="cold")
+    fresh["state"]["verdict"] = "too_early"
+    losing, _aband, _n, _rem, waiting, _f = split_sections([fresh])
+    assert losing == []
+    assert [r["deal_id"] for r in waiting] == [21]
+
+
+def test_a_cold_client_past_its_grace_is_a_loss():
+    """После отсрочки холод — событие, и правило прежнее."""
     from client_state_report import split_sections
 
     refused = _res(21, temperature="cold")
-    refused["state"]["verdict"] = "too_early"
+    refused["state"]["verdict"] = "poor"
     losing, _aband, _n, _rem, _w, _f = split_sections([refused])
     assert [r["deal_id"] for r in losing] == [21]
 
