@@ -34,7 +34,7 @@ from client_state_report import (  # noqa: E402
     set_source_names,
 )
 from config import get_settings, setup_logging  # noqa: E402
-from db import init_db  # noqa: E402
+from db import init_db, list_client_state_deal_ids  # noqa: E402
 from funnel_profiles import BUYER_PROFILE, SELLER_PROFILE, FunnelProfile  # noqa: E402
 from notify import send_chat_message_chunked  # noqa: E402
 from tools import (  # noqa: E402
@@ -57,6 +57,7 @@ def pick_deals(
     limit: int,
     order: str = "random",
     deal_ids: tuple[int, ...] = (),
+    cached_deal_ids: set[int] | None = None,
 ) -> list[dict]:
     """Открытые сделки воронки.
 
@@ -76,6 +77,9 @@ def pick_deals(
       не говорит.
     * "newest" — самые свежие. Почти все моложе отсрочки, поэтому годится
       только для отладки свежих лидов, не для оценки качества.
+    * "uncached" — открытые QC-сделки, которых ещё нет в client_states.
+      Сначала с большим ID (обычно свежее). Для живого прогона модели без
+      повторения закэшированной десятки random.
 
     deal_ids отменяет и порядок, и лимит: берутся ровно названные сделки той
     воронки, к которой они относятся. Нужно, чтобы проверить правку на той
@@ -83,6 +87,8 @@ def pick_deals(
     выпадет в случайную выборку. Этап вне контроля качества при этом не
     отсеивается: если карточку спросили по номеру, ответить надо про неё, а
     не промолчать.
+
+    cached_deal_ids — только для uncached в тестах; иначе читается из БД.
 
     UF-поля квалификации запрашиваются наравне с остальными: без них прямая
     проверка бюджета и района не видит данных и объявляет поля незаполненными.
@@ -136,6 +142,26 @@ def pick_deals(
         rng.shuffle(pool)
         return pool[:limit]
 
+    if order == "uncached":
+        cached = (
+            cached_deal_ids
+            if cached_deal_ids is not None
+            else list_client_state_deal_ids()
+        )
+        fresh = [
+            d for d in deals
+            if _coerce_int(d.get("ID")) not in cached
+        ]
+        fresh.sort(key=lambda d: _coerce_int(d.get("ID")), reverse=True)
+        if len(fresh) < limit:
+            logger.info(
+                "%s: без кэша только %s QC-сделок (запрошено %s)",
+                profile.label,
+                len(fresh),
+                limit,
+            )
+        return fresh[:limit]
+
     now = datetime.now(timezone.utc)
     # Карточки без известного возраста ставим в конец: по ним отсрочка не
     # применяется, и они дали бы завышенную строгость на ровном месте.
@@ -179,11 +205,12 @@ def main() -> None:
         help="Перечитать карточки моделью, даже если новых событий нет",
     )
     parser.add_argument(
-        "--order", choices=("random", "judgeable", "newest"), default="random",
+        "--order", choices=("random", "judgeable", "newest", "uncached"), default="random",
         help="random — представительная выборка (по умолчанию, только по ней "
              "можно судить о воронке); judgeable — дольше всего на этапах, "
              "которые QC судит (где хуже всего); newest — самые свежие "
-             "(отладка, почти все моложе отсрочки)",
+             "(отладка, почти все моложе отсрочки); uncached — QC-сделки, "
+             "которых ещё нет в client_states (живой прогон модели)",
     )
     parser.add_argument(
         "--deal-id", type=int, action="append", default=[], metavar="ID",
