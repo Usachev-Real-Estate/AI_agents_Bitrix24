@@ -282,6 +282,44 @@ def test_the_card_shows_both_arguments_at_once():
     assert "просрочено на 8 дн." in body
 
 
+def test_abandonment_outranks_a_task_due_today():
+    """Порядок веток съехал, когда я вводил общий выход.
+
+    Карточка, молчащая двести дней, получала «дело стоит на сегодня —
+    выполнить» вместо «брошена 200 дн.»: ранний return по сегодняшнему делу
+    оказался выше проверки заброшенности. По определению агентства «брошен
+    на этапе долгое время» — потеря, а потеря старше любого напоминания.
+    """
+    events = [_comment(200.0), _task(ago=200.0, ahead=-0.2)]
+    assert _assess(events)["reason"] == GAP_ABANDONED
+
+
+def test_a_young_card_with_a_task_due_today_is_still_a_reminder():
+    """Проверка границы: сама починка не должна съесть напоминание."""
+    events = [_comment(1.0), _task(ago=1.0, ahead=-0.2)]
+    assert _assess(events)["reason"] == GAP_TASK_DUE_TODAY
+
+
+def test_an_unknown_department_switches_the_rule_off():
+    """Не смогли прочитать отдел брокера — не судим, а не обвиняем.
+
+    Иначе множество выходит {брокер} без РОПа, комментарии РОПа перестают
+    считаться молча, и карточка получает «следов работы брокера или РОПа
+    нет вовсе» ровно потому, что мы не сумели прочитать карту отделов.
+    """
+    from client_state import allowed_task_authors
+
+    assert allowed_task_authors(11, {12: 5}, {5: 22}) == set()
+
+
+def test_a_department_without_a_rop_is_a_known_answer():
+    """Отдел известен, РОПа у него нет — тут мы знаем, что засчитывать некого."""
+    from client_state import allowed_task_authors
+
+    assert allowed_task_authors(11, {11: 7}, {5: 22}) == {11}
+    assert allowed_task_authors(11, {11: 5}, {5: 22}) == {11, 22}
+
+
 def test_the_numerals_decline():
     """«по 21 карточкам» и «21 брошенных» — там, где отчёт просят перепроверить."""
     assert cards_noun(1) == "карточке"

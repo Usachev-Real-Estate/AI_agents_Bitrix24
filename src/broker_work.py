@@ -832,8 +832,19 @@ def assess_broker_work(
     # напоминать о деле на карточке, брошенной сто дней назад, значит
     # говорить не о том.
     due = due_task_without_result(events, now)
-    due_today = due is not None and int(due.get("days_overdue") or 0) < 1
-    if due_today:
+    # Заброшенность — первой. Когда я вводил общий выход _finish, эта
+    # проверка съехала ниже дела на сегодня, и карточка, молчащая двести
+    # дней, получала «дело стоит на сегодня — выполнить» вместо «брошена
+    # 200 дн.». Дело со сроком сегодня утром живым не считается
+    # (open_future_deadline требует срок в будущем), поэтому от
+    # заброшенности оно карточку не спасает — и не должно: по определению
+    # агентства «брошен на этапе долгое время» это потеря, а потеря старше
+    # любого напоминания.
+    if abandoned:
+        return _finish(
+            GAP_ABANDONED, abandoned_days=round(float(silent or 0.0), 1),
+        )
+    if due is not None and int(due.get("days_overdue") or 0) < 1:
         return {
             "proven": False,
             "reason": GAP_TASK_DUE_TODAY,
@@ -841,10 +852,6 @@ def assess_broker_work(
             "days_quiet": days_quiet,
             "due_task": due,
         }
-    if abandoned:
-        return _finish(
-            GAP_ABANDONED, abandoned_days=round(float(silent or 0.0), 1),
-        )
 
     # Просроченное дело претензию НЕ гасит: оно разбирается в самом конце,
     # после того как цепочка сказала своё. Иначе самый мягкий вердикт

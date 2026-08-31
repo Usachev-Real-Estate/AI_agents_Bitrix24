@@ -257,3 +257,72 @@ def test_the_brokers_own_report_closes_it():
         _comment_by(BROKER, 0.1, "дозвонился, договорились на пятницу"),
     ]
     assert "due_task" not in _assess(events)
+
+
+# ── Обвинение ищем в словах брокера, оправдание — во всей карточке ─────
+def _probe(events: list[dict], claims: dict, authors: set[int] | None) -> dict:
+    """Прогнать карточку через apply_derived_verdict и вернуть work_claims."""
+    import client_state as cs
+    from funnel_profiles import BUYER_PROFILE
+
+    state = {
+        "work_claims": {}, "next_step": {}, "signals": {},
+        "recoverable": True, "broker_work": claims,
+    }
+    out = cs.apply_derived_verdict(
+        dict(state),
+        {"ID": 1, "STAGE_ID": STAGE, "ASSIGNED_BY_ID": BROKER},
+        BUYER_PROFILE, {}, events, None, authors,
+    )
+    return out["work_claims"]
+
+
+CLAIMS = {
+    "claims_messaged": True,
+    "claims_messaged_quote": "написал клиенту в вотсап",
+    "claims_no_answer": True,
+    "claims_no_answer_quote": "написал клиенту в вотсап",
+    "pause_explained": True,
+    "pause_reason_quote": "написал клиенту в вотсап",
+}
+
+
+def test_an_accusation_needs_the_brokers_own_words():
+    """«Брокер пишет, что написал клиенту» — про брокера, значит и цитата его.
+
+    Модель читает ВСЕ комментарии карточки, включая чужие. Без этого брокеру
+    предъявлялась бы фраза, которую написал бэк-офис, — и он справедливо
+    ответил бы «я такого не писал».
+    """
+    events = [
+        _comment_by(ROBOT, 1.0, "написал клиенту в вотсап"),
+        _comment_by(BROKER, 1.0, "жду ответа по подборке"),
+    ]
+    claims = _probe(events, CLAIMS, OURS)
+    assert claims["claims_messaged"] is False
+    assert claims["claims_no_answer"] is False
+
+
+def test_the_brokers_own_words_still_count():
+    events = [_comment_by(BROKER, 1.0, "написал клиенту в вотсап")]
+    claims = _probe(events, CLAIMS, OURS)
+    assert claims["claims_messaged"] is True
+
+
+def test_an_excuse_may_rest_on_anyone_s_words():
+    """Пауза брокера не обвиняет, а выгораживает.
+
+    «Клиент в отпуске до ноября» верно независимо от того, чья рука это
+    записала. Сузить корпус тут значило бы отнять у брокера оправдание за
+    чужую аккуратность.
+    """
+    events = [_comment_by(ROBOT, 1.0, "написал клиенту в вотсап")]
+    assert _probe(events, CLAIMS, OURS)["pause_explained"] is True
+
+
+def test_with_the_rule_off_nothing_changes():
+    events = [
+        _comment_by(ROBOT, 1.0, "написал клиенту в вотсап"),
+        _comment_by(BROKER, 1.0, "жду ответа"),
+    ]
+    assert _probe(events, CLAIMS, set())["claims_messaged"] is True

@@ -1079,19 +1079,30 @@ def allowed_task_authors(
     broker_dept_map: dict[int, int] | None,
     rop_map: dict[int, int] | None,
 ) -> set[int]:
-    """Чьи дела засчитываются: брокер и его РОП.
+    """Чьи следы засчитываются: брокер и его РОП.
 
     Пустое множество означает «правило не применяем»: карты не построились
     или брокер неизвестен. Это сознательно — см. evidence_of_the_broker.
+
+    Отдел брокера неизвестен — тоже отказываемся судить. Иначе множество
+    выходит {брокер} без РОПа, и комментарии РОПа перестают считаться
+    молча: карточка получает «следов работы брокера или РОПа нет вовсе»
+    ровно потому, что мы не сумели прочитать, в каком отделе брокер. Это то
+    же отсутствие данных, выданное за результат, — только теперь оно
+    обвиняет человека.
+
+    Отдел известен, а РОПа у него нет — другое дело: тут мы знаем, что
+    засчитывать некого, и {брокер} полное.
     """
     if not broker_id or not broker_dept_map or not rop_map:
         return set()
-    allowed = {broker_id}
     dept = broker_dept_map.get(broker_id)
-    if dept:
-        rop_id = rop_map.get(dept)
-        if rop_id:
-            allowed.add(rop_id)
+    if not dept:
+        return set()
+    allowed = {broker_id}
+    rop_id = rop_map.get(dept)
+    if rop_id:
+        allowed.add(rop_id)
     return allowed
 
 
@@ -1202,18 +1213,37 @@ def apply_derived_verdict(
     work = state.get("broker_work") or {}
     # Цитата ведёт к претензии, поэтому планка та же, что у evidence:
     # не нашли дословно — считаем, что утверждения не было.
-    corpus = (
-        _normalize_for_match(" ".join(str(e.get("text") or "") for e in events))
-        if events is not None else None
-    )
+    #
+    # Корпусов два, и разница между ними — разница между обвинением и
+    # оправданием. «Брокер пишет, что написал клиенту» и «брокер пишет, что
+    # клиент не отвечает» — это утверждения О БРОКЕРЕ, и искать их надо в
+    # ЕГО словах: модель читает все комментарии карточки, включая чужие, и
+    # без этого брокеру предъявляли бы фразу, которую написал бэк-офис.
+    # А объяснённая пауза брокера не обвиняет, а выгораживает: «клиент в
+    # отпуске до ноября» верно независимо от того, чья рука это записала,
+    # и сужать тут корпус значило бы отнимать у брокера оправдание за
+    # чужую аккуратность.
 
-    def _claimed(flag_key: str, quote_key: str, label: str) -> bool:
+    def _corpus(rows: list[dict[str, Any]] | None) -> str | None:
+        if rows is None:
+            return None
+        return _normalize_for_match(
+            " ".join(str(e.get("text") or "") for e in rows),
+        )
+
+    corpus = _corpus(events)
+    own_corpus = _corpus(own_events if events is not None else None)
+
+    def _claimed(
+        flag_key: str, quote_key: str, label: str, *, own: bool = True,
+    ) -> bool:
         if not work.get(flag_key):
             return False
-        if corpus is None:
+        haystack = own_corpus if own else corpus
+        if haystack is None:
             return True
         needle = _normalize_for_match(work.get(quote_key))
-        if not needle or needle not in corpus:
+        if not needle or needle not in haystack:
             logger.info(
                 "Deal %s: цитата «%s» не найдена в карточке — "
                 "утверждение не засчитано",
@@ -1238,8 +1268,10 @@ def apply_derived_verdict(
         "claims_no_answer": _claimed(
             "claims_no_answer", "claims_no_answer_quote", "клиент не отвечает",
         ),
+        # Единственное утверждение, которое ищем во всей карточке, а не
+        # только в словах брокера: оно его не обвиняет, а выгораживает.
         "pause_explained": _claimed(
-            "pause_explained", "pause_reason_quote", "причина паузы",
+            "pause_explained", "pause_reason_quote", "причина паузы", own=False,
         ),
     }
     # Молчит ли контрагент — и знаем ли мы это, или только предполагаем.
