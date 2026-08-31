@@ -828,6 +828,35 @@ def unmask_state(
     return out
 
 
+def mark_responsible(
+    events: list[dict[str, Any]],
+    authors: set[int] | None,
+) -> list[dict[str, Any]]:
+    """Пометить каждое событие полем by_responsible для модели.
+
+    Модель читает всю карточку, а три флага broker_work — claims_messaged,
+    comment_informative, claims_no_answer — это утверждения о работе
+    БРОКЕРА. Без пометки модель их не различает: у события есть author_id,
+    но кто из этих номеров ответственный по сделке, из карточки не видно.
+    Содержательный комментарий бэк-офиса при голой отметке брокера «в
+    работе» проходил как подтверждённая работа.
+
+    Список авторов пуст — правило не применяется, и все события помечаются
+    своими: незнание не должно превращаться в претензию.
+    """
+    marked: list[dict[str, Any]] = []
+    for event in events:
+        author = event.get("author_id")
+        own = (
+            not authors
+            or not isinstance(author, int)
+            or author <= 0
+            or author in authors
+        )
+        marked.append({**event, "by_responsible": own})
+    return marked
+
+
 def build_llm_payload(
     deal: dict[str, Any],
     previous_state: dict[str, Any] | None,
@@ -835,6 +864,7 @@ def build_llm_payload(
     all_events: list[dict[str, Any]],
     profile: FunnelProfile = BUYER_PROFILE,
     mask_map: MaskMap | None = None,
+    task_authors: set[int] | None = None,
 ) -> str:
     """Human message body for incremental state update.
 
@@ -866,7 +896,10 @@ def build_llm_payload(
             else _clean_str(deal.get("TITLE") or deal.get("title"))
         ),
         "previous_state": previous_state,
-        "new_events": new_events,
+        # by_responsible проставляется здесь, а не в событиях карточки:
+        # поле нужно только модели, и в отпечаток карточки (_event_identity)
+        # оно не входит — иначе смена РОПа переписала бы хэш всему портфелю.
+        "new_events": mark_responsible(new_events, task_authors),
         "event_count_total": len(all_events),
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
@@ -937,10 +970,12 @@ def analyze_with_llm(
     profile: FunnelProfile = BUYER_PROFILE,
     usage_sink: dict[str, int] | None = None,
     mask_map: MaskMap | None = None,
+    task_authors: set[int] | None = None,
 ) -> dict[str, Any] | None:
     """Call LLM and return normalized client state."""
     human = build_llm_payload(
         deal, previous_state, new_events, all_events, profile, mask_map,
+        task_authors,
     )
     response = llm.invoke([
         SystemMessage(content=profile.prompt),
@@ -1531,6 +1566,7 @@ def analyze_deal(
             state = analyze_with_llm(
                 record, previous_state, new_events, events, model, profile,
                 usage_sink=usage, mask_map=mask_map,
+                task_authors=task_authors,
             )
         except Exception as exc:  # noqa: BLE001 — одна карточка не роняет батч
             logger.warning("Client state LLM failed for deal %s: %s", deal_id, exc)

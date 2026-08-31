@@ -326,3 +326,62 @@ def test_with_the_rule_off_nothing_changes():
         _comment_by(BROKER, 1.0, "жду ответа"),
     ]
     assert _probe(events, CLAIMS, set())["claims_messaged"] is True
+
+
+# ── Модель тоже должна знать, чьи записи читает ────────────────────────
+def _payload(events: list[dict], authors: set[int] | None) -> dict:
+    import json
+
+    import client_state as cs
+    from funnel_profiles import BUYER_PROFILE
+
+    return json.loads(cs.build_llm_payload(
+        {"ID": 1, "STAGE_ID": STAGE, "TITLE": "Сделка"},
+        None, events, events, BUYER_PROFILE, None, authors,
+    ))
+
+
+def test_the_model_is_told_whose_records_these_are():
+    """Без пометки модель не различает автора: у события только номер.
+
+    Содержательный комментарий бэк-офиса при голой отметке брокера «в
+    работе» проходил как подтверждённая работа — модель ставила
+    comment_informative по всей карточке.
+    """
+    events = [
+        _comment_by(BROKER, 1.0, "в работе"),
+        _comment_by(ROBOT, 1.0, "клиент просил перезвонить в пятницу"),
+        _comment_by(None, 1.0, "автор неизвестен"),
+    ]
+    marks = [e["by_responsible"] for e in _payload(events, OURS)["new_events"]]
+    assert marks == [True, False, True]
+
+
+def test_with_the_rule_off_everything_is_marked_as_ours():
+    events = [_comment_by(ROBOT, 1.0, "чужой комментарий")]
+    assert _payload(events, set())["new_events"][0]["by_responsible"] is True
+
+
+def test_the_prompt_names_the_three_flags_and_the_exception():
+    """Правило должно быть в промпте, иначе пометка ни на что не влияет."""
+    from funnel_profiles import BUYER_PROFILE, SELLER_PROFILE
+
+    for profile in (BUYER_PROFILE, SELLER_PROFILE):
+        assert "by_responsible" in profile.prompt
+        assert "pause_explained" in profile.prompt
+        # Пауза — единственное исключение: причина верна независимо от того,
+        # кто её записал.
+        assert "ЛЮБЫХ комментариях" in profile.prompt
+
+
+def test_the_mark_stays_out_of_the_card_fingerprint():
+    """Смена РОПа не должна переписать хэш всему портфелю."""
+    import client_state as cs
+    from funnel_profiles import BUYER_PROFILE
+
+    events = [_comment_by(BROKER, 1.0, "созвонились")]
+    plain = cs.compute_content_hash(events, BUYER_PROFILE, STAGE)
+    marked = cs.compute_content_hash(
+        cs.mark_responsible(events, OURS), BUYER_PROFILE, STAGE,
+    )
+    assert plain == marked
