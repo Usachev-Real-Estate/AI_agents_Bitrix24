@@ -400,6 +400,27 @@ BUYER_KNOWN_UF_FIELDS: dict[str, str] = {
 }
 
 
+# Этапы, которые аудит разбирает. Решение агентства от 31.08: список стал
+# явным — раньше охват задавался вычитанием (все открытые этапы минус снятые
+# с контроля), и «Отложенный спрос», «Сделка проиграна», «Отложенная
+# продажа» попадали в него молча, просто потому что их никто не вычел.
+#
+# Вычитание отвечает на вопрос «что мы решили не смотреть», а список — на
+# вопрос «что мы смотрим». Второй вопрос и есть настоящий: по нему видно,
+# что именно РОП получит в отчёте.
+BUYER_AUDITED_STAGES = frozenset({
+    "C18:NEW",         # Подбор
+    "C18:UC_UFPFKK",   # Первый показ
+    "C18:UC_DVW1P9",   # Повторный показ
+})
+
+
+SELLER_AUDITED_STAGES = frozenset({
+    "NEW",             # Назначение встречи
+    "UC_KEOOG8",       # Переговоры — возвращён в аудит 31.08
+})
+
+
 BUYER_STAGES_OUT_OF_QC = frozenset({
     # Три этапа, где по регламенту обсуждение идёт В ЧАТЕ по сделке, а чаты
     # агент не читает. Пока это так, любая проверка здесь наказывает брокера
@@ -446,8 +467,17 @@ SELLER_STAGE_REQUIREMENTS: dict[str, tuple[tuple[str, str], ...]] = {
     "APOLOGY": (
         ("lost_reason", "причина проигрыша"),
     ),
+    # Переговоры. Возвращён в аудит решением агентства от 31.08 — до этого
+    # стоял «у руководства». Четыре факта названы агентством: адрес, тип,
+    # следующий шаг, цена. Срока продажи среди них нет намеренно — на
+    # «Подготовке объекта в рекламу» он спрашивался, здесь не спрашивается.
+    "UC_KEOOG8": (
+        ("property_address", "адрес объекта"),
+        ("property_type", "тип объекта"),
+        ("next_step", "следующий шаг с датой"),
+        ("listing_price", "цена выставления"),
+    ),
     # "Закрытая продажа (На сайт)" — ID Афины проверяет основной аудит
-    # "Переговоры" — вне QC (у руководства)
     # "Поиск клиента" — вне аудита
 }
 
@@ -456,7 +486,7 @@ SELLER_STAGE_CLOSED_SALE = "UC_A94BGF"
 
 
 SELLER_STAGES_OUT_OF_QC = frozenset({
-    "UC_KEOOG8",       # Переговоры — у руководства
+    # «Переговоры» отсюда убраны 31.08: агентство вернуло этап в аудит.
     "UC_FADPBF",       # Поиск клиента — вне аудита
     "WON",             # Договор закрыт
     # «Закрытая продажа (На сайт)» — клиента здесь не квалифицируем, значит и
@@ -562,6 +592,10 @@ class FunnelProfile:
     # — этапы вне контроля качества (ведёт руководство).
     grace_hours: dict[str, int]
     stages_out_of_qc: frozenset[str]
+    # Что аудит вообще берёт в выборку. Отдельно от stages_out_of_qc: тот
+    # набор говорит «этап снят с контроля качества» и определяет вердикт у
+    # карточки, которую спросили по номеру; этот — охват прогона.
+    audited_stages: frozenset[str]
     # Прямые проверки полей CRM по этапам: {этап: ((код UF, имя), ...)}.
     # Это НЕ задача модели — поле либо заполнено, либо нет.
     direct_field_checks: dict[str, tuple[tuple[str, str], ...]] = field(
@@ -599,6 +633,7 @@ BUYER_PROFILE = FunnelProfile(
     stage_requirements=BUYER_STAGE_REQUIREMENTS,
     grace_hours=BUYER_GRACE_HOURS,
     stages_out_of_qc=BUYER_STAGES_OUT_OF_QC,
+    audited_stages=BUYER_AUDITED_STAGES,
     direct_field_checks={BUYER_QUAL_STAGE: BUYER_QUALIFICATION_FIELDS},
     work_window_days=BUYER_WORK_WINDOW_DAYS,
 )
@@ -613,6 +648,7 @@ SELLER_PROFILE = FunnelProfile(
     stage_requirements=SELLER_STAGE_REQUIREMENTS,
     grace_hours=SELLER_GRACE_HOURS,
     stages_out_of_qc=SELLER_STAGES_OUT_OF_QC,
+    audited_stages=SELLER_AUDITED_STAGES,
     work_window_days=SELLER_WORK_WINDOW_DAYS,
     counterparty_can_be_agent=False,
 )

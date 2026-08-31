@@ -464,7 +464,8 @@ def test_seller_out_of_qc_stages_are_skipped_before_the_llm(monkeypatch):
     monkeypatch.setattr(cs, "prepare_deal_record", _boom)
     monkeypatch.setattr(cs, "make_llm", _boom)
 
-    for stage in ("UC_KEOOG8", "UC_FADPBF", "WON"):
+    # «Переговоры» (UC_KEOOG8) с 31.08 в аудите — агентство вернуло этап.
+    for stage in ("UC_FADPBF", "WON", "UC_A94BGF"):
         result = cs.analyze_deal({"ID": 78, "STAGE_ID": stage}, profile=cs.SELLER_PROFILE)
         assert result["reason"] == "stage_out_of_qc", stage
 

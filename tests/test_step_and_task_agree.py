@@ -81,8 +81,13 @@ def test_the_card_no_longer_denies_its_own_task():
     assert f"Шаг: {NO_STEP_RU}" not in card
 
 
-def test_the_one_liner_says_it_too():
-    """Раздел «в работе» печатается строкой — там та же беда была бы."""
+def test_a_questionless_card_is_not_printed_at_all():
+    """Раньше «в работе» печаталось строкой, и там была та же беда с датой.
+
+    С 31.08 раздела нет: к карточке нет вопроса — в отчёт она не идёт.
+    Значит и разойтись двум строкам негде; проверяем, что карточка учтена,
+    а не потеряна.
+    """
     fine = {
         "deal_id": 16204, "skipped": False,
         "state": _state(
@@ -92,4 +97,5 @@ def test_the_one_liner_says_it_too():
         ),
     }
     text = format_sections([fine], {16204: "Марьина роща"}, WEBHOOK)
-    assert "стоит дело на 2026-09-02" in text
+    assert "Марьина роща" not in text
+    assert "✅ Без вопросов: 1 в работе" in text

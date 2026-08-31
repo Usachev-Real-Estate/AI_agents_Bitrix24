@@ -16,9 +16,6 @@ from broker_work import GAP_PAUSE_TASK_TOO_LATE
 from broker_work import DUE_TASK_GAPS
 from broker_work import GAP_ONLY_PLANS
 from broker_work import GAP_PLAN_TOO_FAR
-from broker_work import PROVEN
-from broker_work import PROVEN_BY_PAUSE
-from broker_work import PROVEN_BY_TASK_PLAN
 from broker_work import REMINDERS as WORK_REMINDERS
 from broker_work import SELF_ARGUED_GAPS
 from broker_work import TIMELESS_GAPS
@@ -287,16 +284,20 @@ def format_card(
             verdict_line += f" — {verdict_reason}"
         lines.append(verdict_line)
 
-    lines.append(
-        f"Риск: {ru(state.get('risk'), RISK_RU)} | "
-        f"уверенность: {float(state.get('confidence') or 0.0):.2f}",
-    )
+    # Риск, уверенность и цель клиента убраны из печати 31.08: отчёт читает
+    # РОП, чтобы контролировать работу брокера, а эти три строки говорят о
+    # разборе и о клиенте. Что происходит с клиентом, целиком сказано в
+    # «Ситуации», и повторять её обрубком в «Цели» значит занимать первый
+    # экран тем, что читатель прочтёт строкой ниже.
+    #
+    # Из ответа модели поля НЕ убраны: они уходят в previous_state
+    # следующего разбора, а правка промпта стоит полного пересчёта портфеля.
+    # Перестать печатать — стоит ноль.
     party = state.get("counterparty") if isinstance(state.get("counterparty"), dict) else {}
     if str(party.get("who") or "") == "agent":
         why = str(party.get("why") or "").strip()
         lines.append("👤 Контрагент: агент" + (f" — {why}" if why else ""))
 
-    lines.append(f"Цель: {humanize(state.get('client_goal'))}")
     lines.append(f"Ситуация: {humanize(state.get('situation'))}")
     lines.append(f"Шаг: {describe_next_step(state)}")
 
@@ -1087,87 +1088,16 @@ def format_sections(
         # выговор за то, что клиент уехал до сентября.
         _block(f"🔔 НАПОМНИТЬ БРОКЕРУ — {len(reminders)}", reminders, "")
 
-    def _one_liners(header: str, rows: list[dict[str, Any]]) -> None:
-        """Карточки без претензий — строкой: клиент, температура, шаг.
-
-        Полный разбор по ним у РОПа не спрашивают, а четыре экрана текста
-        про здоровые сделки топят те две, ради которых отчёт открывали.
-        """
-        if not rows:
-            return
-        blocks.append(f"[B]{header} — {len(rows)}[/B]")
-        for row in rows:
-            deal_id = int(row.get("deal_id") or 0)
-            state = row.get("state") or {}
-            icon = TEMPERATURE_ICON.get(
-                str(state.get("temperature") or ""), "",
-            )
-            step = describe_next_step(state)
-            work = state.get("work_evidence") or {}
-            # Карточка молчит восемь дней и стоит с галочкой ✅ — без
-            # объяснения это выглядит как просмотренная недоработка. Пауза
-            # названа в карточке, значит её надо показать.
-            pause = (
-                f" · ⏸ пауза до {work.get('pause_until')}"
-                if str(work.get("reason") or "") == PROVEN_BY_PAUSE
-                and str(work.get("pause_until") or "unknown") != "unknown"
-                else (
-                    " · ⏸ пауза объяснена"
-                    if str(work.get("reason") or "") == PROVEN_BY_PAUSE
-                    else ""
-                )
-            )
-            # ✅ на карточке, которую тот же отчёт двумя разделами выше
-            # назвал «плохо», читается как одобрение. Раздел говорит о работе
-            # брокера, вердикт — о заполнении карточки; смешивать их в одну
-            # галочку нельзя. #15342: шага нет, цели нет, оценка «плохо».
-            poor = (
-                " · карточка заполнена плохо"
-                if str(state.get("verdict") or "") == "poor" else ""
-            )
-            # Карточка без единого разговора и без комментария не должна
-            # стоять с безмолвной зелёной галочкой: засчитали её по тексту
-            # дела, и это надо сказать — иначе ✅ читается как «звонили».
-            planned = (
-                " · 🗓 план описан в деле"
-                if str(work.get("reason") or "") == PROVEN_BY_TASK_PLAN else ""
-            )
-            # Полный разбор печатается только для проблемных разделов, а
-            # «⚠️ Карточка неинформативна» и «🚨 Работу видно, а клиента — нет»
-            # живут именно там. С 28.08 такая карточка уходит в ✅ (работа
-            # ведётся — значит не теряем) и уносила обе строки с собой: шапка
-            # считала неинформативные карточки, которых в теле было не найти,
-            # а сам пробел исчезал из отчёта. Пробел остался — он просто не
-            # тревога: сделку по такой карточке не подхватит никто.
-            blind = ""
-            if state.get("recoverable") is False:
-                blind = (
-                    " · ⚠️ сделку по карточке не подхватить"
-                    if str(work.get("reason") or "") in PROVEN
-                    else " · ⚠️ картину клиента не восстановить"
-                )
-            silent = " · 📵 без звонка" if state.get("no_call") else ""
-            # Шапка считает агентские карточки, а найти их в теле было
-            # нельзя: полный разбор метку печатает, однострочник — нет.
-            # Прогон 28.08 12:58: «👤 Карточек с агентом: 6», в теле видна
-            # одна, остальные пять — в «рано судить». Цифра, которую нечем
-            # проверить, ничем не лучше отсутствующей; к тому же агент
-            # судится другим правилом температуры, и знать, что перед
-            # тобой агент, нужно до чтения оценки.
-            party = state.get("counterparty")
-            agent = (
-                " · 👤 агент"
-                if isinstance(party, dict) and str(party.get("who") or "") == "agent"
-                else ""
-            )
-            blocks.append(
-                f"{icon} #{deal_id} {card_title(titles.get(deal_id))} — "
-                f"{step}{agent}{pause}{planned}{silent}{blind}{poor}".strip(),
-            )
-        blocks.append("")
-
-    _one_liners("⏳ РАНО СУДИТЬ", waiting)
-    _one_liners("✅ В РАБОТЕ", fine)
+    # ⏳ и ✅ в отчёт не выводятся (решение агентства от 31.08). Отчёт нужен
+    # РОПу, чтобы контролировать работу брокеров; карточка, к которой нет
+    # вопросов, места в нём не занимает. Число их печатается в шапке
+    # (см. quiet_line в format_summary) — иначе «Карточек: 10» над семью
+    # напечатанными читается как «три потерялись», и это была бы та же
+    # подмена: отсутствие вместо результата.
+    #
+    # Функция _one_liners оставлена: она собирает пометки (📵, ⚠️, ⏸, 👤),
+    # и если агентство вернёт какой-то из этих разделов, печатать его снова
+    # будет нечем переписывать.
 
     if unread:
         # Отдельный список, а не строка в шапке: РОПу нужно знать, какие
@@ -1181,6 +1111,27 @@ def format_sections(
                 f"{REASON_RU.get(reason, reason)}".strip(),
             )
         blocks.append("")
+
+    # Учёт того, что в отчёт не попало. Разделы ⏳ и ✅ убраны, и без этой
+    # строки «Карточек: 10» над семью напечатанными читается как «три
+    # потерялись». Напечатанное плюс это число равно всему прогону — цифру
+    # можно сверить, а иначе она ничем не лучше отсутствующей.
+    quiet = [
+        (len(fine), "в работе"),
+        (len(waiting), "рано судить"),
+    ]
+    tail = " · ".join(f"{n} {name}" for n, name in quiet if n)
+    if tail:
+        blocks.append(
+            f"✅ Без вопросов: {tail} — в отчёт не выводятся."
+        )
+        blocks.append("")
+
+    # Пустые разделы остаются: «ни одной с признаками потери» и «работа
+    # подтверждена по всем прочитанным» — это учёт, а не украшение. Именно
+    # они несут оговорки про непрочитанные карточки и про те, судить о
+    # которых ещё рано; убрав их вместе с ⏳ и ✅, отчёт снова начал бы
+    # обещать больше, чем видел.
     return "\n".join(blocks).strip()
 
 
