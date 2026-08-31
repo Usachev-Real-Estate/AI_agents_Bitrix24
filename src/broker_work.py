@@ -941,6 +941,12 @@ def assess_broker_work(
     if abandoned:
         return _finish(
             GAP_ABANDONED, abandoned_days=round(float(silent or 0.0), 1),
+            # Откуда взялось число, отчёт обязан различать. Когда следов нет
+            # вовсе, days_quiet пуст и срок считается от возраста карточки на
+            # этапе — а фраза «ни звонка, ни комментария 31 дн.» звучит так,
+            # будто до этого что-то было. #8870: рядом с ней стояло
+            # «просрочено на 116 дн.», и две цифры в одной строке спорили.
+            no_trace_at_all=days_quiet is None,
         )
     if due is not None and int(due.get("days_overdue") or 0) < 1:
         return {
@@ -1128,8 +1134,13 @@ def next_action(
         # иначе строка карточки скажет «брошена», а совет — «выполните дело».
         quiet = work.get("abandoned_days")
         span = f"{float(quiet):.0f} дн." if isinstance(quiet, (int, float)) else "месяцы"
+        head = (
+            f"Следов работы по карточке нет вовсе, на этапе {span}"
+            if work.get("no_trace_at_all")
+            else f"Карточка брошена {span}"
+        )
         return (
-            f"Карточка брошена {span} — решить: возвращать клиента в работу "
+            f"{head} — решить: возвращать клиента в работу "
             f"или закрывать сделку"
         )
 
