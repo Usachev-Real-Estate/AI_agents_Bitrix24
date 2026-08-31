@@ -320,6 +320,22 @@ def test_a_department_without_a_rop_is_a_known_answer():
     assert allowed_task_authors(11, {11: 5}, {5: 22}) == {11, 22}
 
 
+def test_the_advice_and_the_line_speak_in_one_register():
+    """Час внутри дня срока ничего не меняет — ни в строке, ни в совете.
+
+    Отдельная формулировка для «час уже прошёл» ставила под строкой «дело
+    стоит на сегодня» совет «срок дела сегодня уже прошёл»: два регистра об
+    одном и том же на одной карточке.
+    """
+    state = {"next_step": {}, "work_evidence": {
+        "proven": False, "reason": GAP_TASK_DUE_TODAY, "window_days": 3,
+    }}
+    before = next_action(state, [_task(ago=1.0, ahead=0.2)], NOW)
+    after = next_action(state, [_task(ago=1.0, ahead=-0.2)], NOW)
+    assert "выполнить" in before and "выполнить" in after
+    assert "прошёл" not in before and "прошёл" not in after
+
+
 def test_the_numerals_decline():
     """«по 21 карточкам» и «21 брошенных» — там, где отчёт просят перепроверить."""
     assert cards_noun(1) == "карточке"
