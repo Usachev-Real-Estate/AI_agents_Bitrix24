@@ -71,17 +71,41 @@ def test_it_still_says_whose_traces_are_missing():
     assert "от брокера или РОПа" in card
 
 
-def test_they_get_their_own_list():
+def test_they_get_their_own_section_with_the_full_write_up():
+    """С 31.08 разбор печатается здесь: в тревоге этих карточек больше нет.
+
+    Раньше 🆕 был свёрнутой строкой под тревогой, и прогон 14:01 показал
+    предел: у продавцов 🚨 и 🆕 совпали шестью карточками из шести —
+    тревога печатала разбор, а список ниже повторял её состав слово в
+    слово. «Не дублировать, оставить что работу не начинали».
+    """
     body = format_sections(
         [_card(16570, GAP_NO_TRACE), _card(16550, GAP_NO_TRACE)],
         TITLES,
         WEBHOOK,
     )
-    assert "🆕 РАБОТУ НЕ НАЧИНАЛИ — 2[/B]: #16570, #16550 (разбор выше)" in body
+    assert "🆕 РАБОТУ НЕ НАЧИНАЛИ — 2" in body
+    assert "разбор выше" not in body
+    assert body.count("Работу по карточке не начинали") == 2
+    # И из тревоги они ушли целиком.
+    assert "🚨 ТЕРЯЕМ КЛИЕНТА — 0" in body
 
 
-def test_the_alarm_header_names_both_overlaps():
-    """🚨 считает и брошенные, и не начатые — цифру надо уметь сверить."""
+def test_the_empty_alarm_does_not_claim_more_than_it_saw():
+    """«Ни одной с признаками потери» над шестью пустыми карточками — ложь."""
+    body = format_sections(
+        [_card(16570, GAP_NO_TRACE), _card(16550, GAP_NO_TRACE)],
+        TITLES,
+        WEBHOOK,
+    )
+    assert (
+        "Ни одной карточки с признаками потери; "
+        "по 2 карточкам работу не начинали — ниже."
+    ) in body
+
+
+def test_the_alarm_counts_only_what_it_still_holds():
+    """Не начатые из тревоги вышли — и из её цифры тоже."""
     body = format_sections(
         [
             _card(8870, GAP_ABANDONED, 31.0, abandoned_days=31.0),
@@ -91,10 +115,10 @@ def test_the_alarm_header_names_both_overlaps():
         TITLES,
         WEBHOOK,
     )
-    assert "🚨 ТЕРЯЕМ КЛИЕНТА — 3" in body
-    assert (
-        "Из них 1 брошенная и 2 без начатой работы — отдельными списками ниже."
-    ) in body
+    assert "🚨 ТЕРЯЕМ КЛИЕНТА — 1" in body
+    assert "Из них 1 брошенная — отдельным списком ниже." in body
+    assert "без начатой работы" not in body
+    assert "🆕 РАБОТУ НЕ НАЧИНАЛИ — 2" in body
 
 
 def test_one_overlap_reads_in_the_singular():

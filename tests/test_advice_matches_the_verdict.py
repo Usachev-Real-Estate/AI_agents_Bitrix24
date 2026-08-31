@@ -48,13 +48,21 @@ def _state(reason: str, proven: bool, window: float | None = 1) -> dict:
 
 
 def test_a_standing_task_does_not_answer_an_unproven_card():
+    """Дело в будущем претензию к темпу не снимает — совет отвечает ей.
+
+    Формулировку правили 31.08 по #16510: «связаться не удалось, номер
+    временно заблокирован, брокер запланировал повторный звонок» — и совет
+    «записать в карточке, что сейчас с клиентом». Что сейчас с клиентом,
+    как раз записано; не сходятся норма этапа и срок дела. Совет теперь
+    зовёт сделать шаг раньше срока, а не переписать уже написанное.
+    """
     advice = next_action(
         _state(GAP_NO_TRACE_IN_WINDOW, proven=False), [_task(3)], NOW,
     )
     assert "ждём" not in advice
     assert "Дело стоит на 2026-08-31" in advice
     assert "следов работы за норму этапа (1 дн.) нет" in advice
-    assert "записать в карточке" in advice
+    assert "связаться с клиентом раньше срока и записать результат" in advice
 
 
 def test_the_same_holds_when_the_task_is_due_today():
