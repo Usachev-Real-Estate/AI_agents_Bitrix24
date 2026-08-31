@@ -61,8 +61,13 @@ def _section(reason: str, **over: Any) -> str:
 
 # ── Определение по буквам ──────────────────────────────────────────────
 def test_no_trace_at_all_is_a_loss():
-    """Ни комментария, ни дела, ни звонка — все три условия сразу."""
-    assert _section(broker_work.GAP_NO_TRACE) == "теряем+недоработка"
+    """Ни комментария, ни дела, ни звонка — все три условия сразу.
+
+    Недоработкой такая карточка с 31.08 не считается: у неё свой раздел
+    «работу не начинали», и повторять ту же претензию третьим заголовком
+    нечем (#17100 стоял разом в трёх).
+    """
+    assert _section(broker_work.GAP_NO_TRACE) == "теряем"
 
 
 def test_lagging_behind_the_stage_norm_is_not_a_loss():
@@ -111,7 +116,7 @@ def test_the_temperature_never_decides_the_alarm():
     for temperature in TEMPERATURES:
         assert _section(
             broker_work.GAP_NO_TRACE, temperature=temperature,
-        ) == "теряем+недоработка", temperature
+        ) == "теряем", temperature
         assert _section(
             broker_work.GAP_EMPTY_COMMENT, temperature=temperature,
         ) == "недоработка", temperature

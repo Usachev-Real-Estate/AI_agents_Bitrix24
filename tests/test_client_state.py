@@ -704,18 +704,52 @@ def test_broken_fingerprint_column_falls_back_to_full_reread():
     assert parse_analyzed_events('["a", "b"]') == {"a", "b"}
 
 
-def test_content_hash_unchanged_by_the_fingerprint_refactor():
-    """Хэш карточки — ключ кэша в БД; менять его формат нельзя."""
+def test_content_hash_is_two_halves_rules_and_events():
+    """Хэш карточки — ключ кэша в БД; менять его формат нельзя случайно.
+
+    Формат менялся один раз, 31.08, и намеренно: слитный отпечаток не
+    выполнял того, что обещал. Смена промпта его меняла, но новых событий в
+    карточке не появлялось, и ветка no_new_events считала это удалённым
+    событием — модель не звали, хэш переписывали. Прогон 12:55 отдал из
+    кэша всех десятерых продавцов через минуту после смены правил.
+
+    Половины сравниваются по отдельности: расхождение по правилам — повод
+    перечитать карточку целиком, расхождение по событиям — обычный разбор
+    нового. Пин остаётся: если значение разъедется случайно, весь портфель
+    уйдёт в модель заново.
+    """
     from client_state import compute_content_hash
 
     events = [_ev(id=1), _ev(id=2, text="показ")]
-    # Значение снято с реализации ДО выделения _event_identity. Если оно
-    # разъедется, кэш в БД инвалидируется целиком и весь портфель уйдёт в
-    # модель заново — поэтому пин, а не «лишь бы стабильно».
-    assert compute_content_hash(events) == (
-        "3df524ace164b0dc6f9ac5e4ebeb5e3b76c19b97ff06039656da5ae8e715eb56"
+    got = compute_content_hash(events)
+    assert got == (
+        "e3b0c44298fc1c149afbf4c8996fb924:3df524ace164b0dc6f9ac5e4ebeb5e3b"
     )
+    # События по-прежнему решают: вторая половина — прежний отпечаток.
+    assert got.split(":")[1] == "3df524ace164b0dc6f9ac5e4ebeb5e3b"
     assert compute_content_hash(events) != compute_content_hash(events[:1])
+
+
+def test_the_rules_half_is_told_apart_from_the_events_half():
+    from client_state import compute_content_hash, rules_part
+    from funnel_profiles import PROFILES
+
+    events = [_ev(id=1)]
+    plain = compute_content_hash(events)
+    with_rules = compute_content_hash(events, PROFILES["buyers"], "C1:NEW")
+    assert rules_part(plain) != rules_part(with_rules)
+    # Событийная половина от смены правил не зависит — иначе «что именно
+    # изменилось» по хэшу не прочитать.
+    assert plain.split(":")[1] == with_rules.split(":")[1]
+
+
+def test_a_hash_saved_before_the_split_counts_as_other_rules():
+    """Строка из БД без двоеточия — карточка, разобранная по старым правилам."""
+    from client_state import rules_part
+
+    assert rules_part("3df524ace164b0dc" * 4) == "<pre-split>"
+    assert rules_part(None) == "<pre-split>"
+    assert rules_part("aaaa:bbbb") == "aaaa"
 
 
 def test_analyzed_events_round_trip_through_the_db(tmp_path, monkeypatch):

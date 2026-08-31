@@ -138,8 +138,10 @@ def test_a_problem_card_from_cache_is_shown_in_full(pilot):
     cached = _stats("Покупатели", analyzed=0, skipped_unchanged=1)
     cached["results"][0]["skipped"] = True
     cached["results"][0]["reason"] = "no_new_events"
+    # Разрыв «за норму этапа ничего не сделал»: у «работу не начинали» с
+    # 31.08 свой раздел, и проверять на нём именно недоработку больше нечем.
     cached["results"][0]["state"]["work_evidence"] = {
-        "proven": False, "reason": "no_trace", "window_days": 3,
+        "proven": False, "reason": "no_trace_in_window", "window_days": 3,
         "days_quiet": 12.0,
     }
     report = pilot.format_report(

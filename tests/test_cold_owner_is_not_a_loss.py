@@ -105,7 +105,9 @@ def test_a_cold_owner_nobody_works_is_a_loss():
     })
     losing, _ab, neglected, _rem, _w, _fine = split_sections([card])
     assert [r["deal_id"] for r in losing] == [15594]
-    assert [r["deal_id"] for r in neglected] == [15594]
+    # В недоработку такая карточка с 31.08 не идёт: у неё свой раздел
+    # «работу не начинали».
+    assert neglected == []
 
 
 def test_a_cold_owner_lagging_the_norm_is_only_a_shortfall():

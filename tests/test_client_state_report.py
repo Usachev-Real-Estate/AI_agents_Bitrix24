@@ -273,7 +273,9 @@ def test_losing_and_neglected_are_separate_lists():
         [nothing, weak, ok],
     )
     assert [r["deal_id"] for r in losing] == [1]
-    assert [r["deal_id"] for r in neglect] == [1, 2]
+    # #1 — «работу не начинали»: с 31.08 у неё свой раздел, и недоработкой
+    # её больше не называют вторым заголовком.
+    assert [r["deal_id"] for r in neglect] == [2]
     assert [r["deal_id"] for r in fine] == [3]
 
 
@@ -282,9 +284,12 @@ def test_a_card_can_be_in_both_sections():
     from client_state_report import split_sections
 
     both = _res(4, temperature="cold")
-    both["state"]["work_evidence"] = _work(False)
+    # Разрыв тут «за норму этапа ничего не сделал»: работа была, она просто
+    # старше нормы. У «работу не начинали» с 31.08 свой раздел, и в
+    # недоработку она не идёт — на пересечении двух списков стоит эта.
+    both["state"]["work_evidence"] = _work(False, "no_trace_in_window")
     losing, _aband, neglect, _rem, _wait, fine = split_sections([both])
-    assert [r["deal_id"] for r in losing] == [4]
+    assert [r["deal_id"] for r in losing] == []
     assert [r["deal_id"] for r in neglect] == [4]
     assert fine == []
 
@@ -359,7 +364,7 @@ def test_a_card_in_both_sections_is_printed_once():
     # Раздел, целиком напечатанный выше, сворачивается в строку: заголовок
     # с числом и состав. Столбик «— см. выше» под своим заголовком отчёт
     # больше не печатает (решение агентства от 31.08).
-    assert "НЕДОРАБОТКА БРОКЕРА — 1[/B]: #10 (разбор выше)" in body
+    assert "РАБОТУ НЕ НАЧИНАЛИ — 1[/B]: #10 (разбор выше)" in body
     assert "см. выше" not in body
     assert "ТЕРЯЕМ КЛИЕНТА — 1" in body
 
@@ -549,7 +554,9 @@ def test_a_hot_client_nobody_works_is_a_loss():
     hot["state"]["work_evidence"] = _work(False)
     losing, _aband, neglect, _rem, _w, _f = split_sections([hot])
     assert [r["deal_id"] for r in losing] == [16066]
-    assert [r["deal_id"] for r in neglect] == [16066]
+    # Недоработкой её больше не называют: с 31.08 «работу не начинали» —
+    # свой раздел, и он же её претензия.
+    assert neglect == []
 
 
 def test_a_hot_client_being_worked_is_not_a_loss():
