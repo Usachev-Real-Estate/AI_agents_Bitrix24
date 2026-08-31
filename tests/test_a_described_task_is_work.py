@@ -33,6 +33,7 @@ from broker_work import (  # noqa: E402
     RECORD_FIXES,
     TASK_PLAN_MIN_LEN,
     assess_broker_work,
+    next_action,
 )
 from funnel_profiles import BUYER_PROFILE  # noqa: E402
 
@@ -145,20 +146,36 @@ def test_a_task_written_before_the_window_buys_nothing():
     assert _assess([old])["reason"] != PROVEN_BY_TASK_PLAN
 
 
-def test_the_brokers_own_words_close_the_deadline_of_their_task():
-    """#16602: запись о сделанном лежит в самом деле.
+def test_the_text_in_a_task_does_not_close_its_own_deadline():
+    """Час эта отмена прожила, и её пришлось откатить.
 
-    Брокер позвонил, номер оказался чужим, и он записал это в НАЗВАНИЕ дела:
-    «неверный телефон котегарически отрицает». Комментария нет, дело
-    открыто — и отчёт советовал ему это дело «выполнить», то есть сделать
-    сделанное. Решение агентства от 31.08: текст в деле засчитывается
-    работой брокера, плана от отчёта не отличаем.
+    #16602 она чинила: брокер записал результат в НАЗВАНИЕ дела, а совет
+    требовал это дело «выполнить». Но «Связаться с клиентом-обратная связь»
+    — обычное имя дела, тридцать пять символов, и оно точно так же гасило
+    собственный срок. #16230 потеряла напоминание о деле на сегодня, а
+    решение агентства от 28.08 велит его давать.
+
+    Отличить отчёт от имени дела можно только разбором наклонения глагола,
+    от которого агентство отказалось. Значит развилки нет, и вопрос решает
+    не оценка, а формулировка совета — см. test_the_advice_does_not_ask_to
+    _redo_what_is_done.
     """
     reported = _task(days_ago=1.0, days_ahead=-0.5, subject="Показ",
                      description=PLAN)
     result = _assess([reported])
-    assert result["reason"] == PROVEN_BY_TASK_PLAN
-    assert "due_task" not in result
+    assert result["reason"] == GAP_TASK_DUE_TODAY
+    assert result["due_task"]["days_overdue"] == 0
+
+
+def test_the_advice_does_not_ask_to_redo_what_is_done():
+    """Обе половины совета верны, брокер сам знает, которая про него."""
+    advice = next_action(
+        {"next_step": {}},
+        [_task(days_ago=1.0, days_ahead=-0.5, subject="Показ", description=PLAN)],
+        NOW,
+    )
+    assert "выполнить" in advice
+    assert "если уже сделано, закрыть дело" in advice
 
 
 def test_a_bare_task_still_gets_its_reminder():

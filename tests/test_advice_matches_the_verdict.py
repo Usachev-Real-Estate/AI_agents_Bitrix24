@@ -108,7 +108,8 @@ def test_a_task_due_today_is_a_reminder_even_when_work_was_proven():
     advice = next_action(_state(PROVEN_BY_CALL, proven=True), [_task(0.4)], NOW)
     assert advice == (
         "Дело стоит на сегодня (2026-08-28) — "
-        "выполнить и написать в карточке результат"
+        "выполнить и написать в карточке результат; "
+        "если уже сделано, закрыть дело"
     )
 
 
