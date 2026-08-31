@@ -49,3 +49,8 @@
 
 # 14. Первый перенос в Общую базу: 13.08.2026 19:05 МСК (16:05 UTC). После этой даты перенос идёт на штатных 10:00/17:00.
 5 16 13 8 * cd /home/Ai_agents_crm && scripts/cron_job.sh general-base-first-move docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest >> logs/cron.log 2>&1
+
+# 15. QC-агент «состояние клиентов»: ежедневно в 12:00 МСК (09:00 UTC), пн–пт.
+#     Каждому РОПу — лично его отдел; подразделение Волковой и карточки без
+#     определённого РОПа — в чат 22358 отдельными сообщениями.
+0 9 * * 1-5 cd /home/Ai_agents_crm && scripts/cron_job.sh client-state-qc docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python scripts/run_client_state_qc_pilot.py >> logs/cron.log 2>&1

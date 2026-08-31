@@ -36,8 +36,19 @@ from client_state_report import (  # noqa: E402
 from config import get_settings, setup_logging  # noqa: E402
 from db import init_db, list_client_state_deal_ids  # noqa: E402
 from funnel_profiles import BUYER_PROFILE, SELLER_PROFILE, FunnelProfile  # noqa: E402
-from notify import send_chat_message_chunked  # noqa: E402
+from buyer_commission_reminder import build_commission_rop_map  # noqa: E402
+from notify import (  # noqa: E402
+    send_chat_message_chunked,
+    send_user_chat_message_chunked,
+)
+from qc_delivery import (  # noqa: E402
+    ROP_SURNAMES,
+    Rop,
+    build_rop_directory,
+    group_deals_by_rop,
+)
 from tools import (  # noqa: E402
+    _build_broker_dept_map,
     _as_list,
     _bx_get_all_sync,
     _clean_str,
@@ -49,6 +60,31 @@ logger = logging.getLogger(__name__)
 
 MSK = ZoneInfo("Europe/Moscow")
 OUT_PATH = Path("data/client_state_qc_pilot.json")
+
+
+def load_rop_directory() -> dict[int, Rop]:
+    """Справочник РОПов из портала по списку фамилий агентства.
+
+    Один запрос на прогон. Пустой справочник — не «РОПов нет», а «мы их не
+    прочитали»: тогда все карточки уйдут в общий чат, и это видно в логе, а
+    не выглядит как тихий успех.
+    """
+    try:
+        users = _bx_get_all_sync("user.get", {"FILTER": {"ACTIVE": True}})
+    except Exception:
+        logger.exception(
+            "Не удалось прочитать пользователей — отчёт уйдёт целиком в чат",
+        )
+        return {}
+    directory = build_rop_directory(
+        [u for u in _as_list(users) if isinstance(u, dict)],
+    )
+    logger.info(
+        "РОПов найдено %d из %d: %s",
+        len(directory), len(ROP_SURNAMES),
+        ", ".join(sorted(r.full_name for r in directory.values())) or "—",
+    )
+    return directory
 
 
 def pick_deals(
@@ -125,11 +161,23 @@ def pick_deals(
             )
         return sorted(named, key=lambda d: _coerce_int(d.get("ID")))
 
+    # Охват задаётся списком этапов, а не вычитанием снятых с контроля
+    # (решение агентства от 31.08). Вычитание отвечало на вопрос «что мы
+    # решили не смотреть», и в выборку молча попадали «Отложенный спрос»,
+    # «Отложенная продажа» и «Сделка проиграна» — просто потому, что их
+    # никто не вычел. Список отвечает на настоящий вопрос: что РОП увидит.
     deals = [
         d for d in _as_list(raw)
         if isinstance(d, dict)
-        and _clean_str(d.get("STAGE_ID")) not in profile.stages_out_of_qc
+        and _clean_str(d.get("STAGE_ID")) in profile.audited_stages
     ]
+    if order == "all":
+        # Весь отдел целиком — решение агентства от 31.08: «надо брать в
+        # аудит все карточки, которые есть у отдела этого РОПа». Лимит тут
+        # не применяется: срезав выборку, мы бы решили за РОПа, каких его
+        # брокеров он сегодня не проверит.
+        return sorted(deals, key=lambda d: _coerce_int(d.get("ID")))
+
     if order == "newest":
         deals.sort(key=lambda d: _coerce_int(d.get("ID")), reverse=True)
         return deals[:limit]
@@ -205,12 +253,16 @@ def main() -> None:
         help="Перечитать карточки моделью, даже если новых событий нет",
     )
     parser.add_argument(
-        "--order", choices=("random", "judgeable", "newest", "uncached"), default="random",
-        help="random — представительная выборка (по умолчанию, только по ней "
-             "можно судить о воронке); judgeable — дольше всего на этапах, "
-             "которые QC судит (где хуже всего); newest — самые свежие "
-             "(отладка, почти все моложе отсрочки); uncached — QC-сделки, "
-             "которых ещё нет в client_states (живой прогон модели)",
+        "--order",
+        choices=("all", "random", "judgeable", "newest", "uncached"),
+        default="all",
+        help="all — все карточки на этапах аудита (боевой режим: РОП должен "
+             "видеть весь свой отдел, --limit не применяется); random — "
+             "представительная выборка, по ней можно судить о воронке; "
+             "judgeable — дольше всего на этапах, которые QC судит (где "
+             "хуже всего); newest — самые свежие (отладка, почти все моложе "
+             "отсрочки); uncached — QC-сделки, которых ещё нет в "
+             "client_states (живой прогон модели)",
     )
     parser.add_argument(
         "--deal-id", type=int, action="append", default=[], metavar="ID",
@@ -227,7 +279,13 @@ def main() -> None:
     chat_id = args.chat_id or settings.report_chat_id
     # Один запрос на прогон: «источник 26» РОПу ничего не говорит.
     set_source_names(fetch_source_names())
-    sections: list[tuple[dict[str, Any], dict[int, str]]] = []
+
+    # Кому что уходит — решается до разбора: отчёт РОПа собирается из его
+    # карточек, а не режется из общего постфактум.
+    directory = load_rop_directory()
+    rop_map = build_commission_rop_map()
+
+    picked: list[tuple[FunnelProfile, list[dict[str, Any]]]] = []
     for profile, category_id in (
         (BUYER_PROFILE, settings.buyers_category_id),
         (SELLER_PROFILE, settings.sellers_category_id),
@@ -236,16 +294,75 @@ def main() -> None:
             profile, category_id, args.limit, args.order,
             deal_ids=tuple(args.deal_id),
         )
-        titles = {
-            _coerce_int(d.get("ID")): _clean_str(d.get("TITLE")) for d in deals
-        }
-        print(f"{profile.label}: {[d.get('ID') for d in deals]}")
-        stats = run_client_state(
-            profile, deals, settings=settings, force=args.force,
-        )
-        sections.append((stats, titles))
+        print(f"{profile.label}: {len(deals)} карточек")
+        picked.append((profile, deals))
 
-    report = format_report(sections, settings.b24_webhook_url)
+    broker_ids = {
+        _coerce_int(d.get("ASSIGNED_BY_ID"))
+        for _profile, deals in picked for d in deals
+    }
+    broker_dept_map = _build_broker_dept_map({b for b in broker_ids if b})
+
+    # Адресат → воронка → его карточки. Оба списка вместе: РОП получает одно
+    # сообщение про обе воронки, а не два про одну.
+    plan: dict[int, dict[str, list[dict[str, Any]]]] = {}
+    for profile, deals in picked:
+        groups = group_deals_by_rop(deals, broker_dept_map, rop_map, directory)
+        for key, group in groups.items():
+            plan.setdefault(key, {})[profile.key] = group
+
+    personal_keys = sorted(
+        (k for k in plan if k in directory and directory[k].personal),
+        key=lambda k: directory[k].surname,
+    )
+    chat_keys = [k for k in plan if k not in personal_keys]
+
+    def _report_for(
+        keys: list[int],
+    ) -> tuple[str, list[tuple[dict[str, Any], dict[int, str]]]]:
+        """Отчёт по карточкам этих адресатов и разбор, из которого он собран."""
+        sections: list[tuple[dict[str, Any], dict[int, str]]] = []
+        for profile, _all_deals in picked:
+            deals = [
+                d for key in keys for d in plan[key].get(profile.key, [])
+            ]
+            if not deals:
+                continue
+            titles = {
+                _coerce_int(d.get("ID")): _clean_str(d.get("TITLE"))
+                for d in deals
+            }
+            stats = run_client_state(
+                profile, deals, settings=settings, force=args.force,
+            )
+            sections.append((stats, titles))
+        if not sections:
+            return "", []
+        return format_report(sections, settings.b24_webhook_url), sections
+
+    Delivery = tuple[str, str, str, list[tuple[dict[str, Any], dict[int, str]]]]
+    deliveries: list[Delivery] = []
+    for key in personal_keys:
+        rop = directory[key]
+        text, sections = _report_for([key])
+        if text:
+            deliveries.append(
+                ("user", str(rop.user_id), rop.full_name, sections),
+            )
+    if chat_keys:
+        # Подразделение Волковой и всё, чей РОП не определился, — одним
+        # сообщением: в чате их распределяют руками, и делить их между собой
+        # незачем.
+        text, sections = _report_for(chat_keys)
+        if text:
+            deliveries.append(("chat", str(chat_id), f"чат {chat_id}", sections))
+
+    texts: dict[str, str] = {}
+    for kind, addr, name, sections in deliveries:
+        text = format_report(sections, settings.b24_webhook_url)
+        texts[f"{kind}:{addr}"] = text
+        cards = sum(len(stats.get("results") or []) for stats, _t in sections)
+        print(f"{name}: {cards} карточек")
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUT_PATH.write_text(
@@ -253,18 +370,31 @@ def main() -> None:
             {
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "chat_id": chat_id,
-                "funnels": [
+                "deliveries": [
                     {
-                        # results выкидываем: там развёрнутые состояния с
-                        # именами и суммами. Вместо них — построчная выжимка
-                        # из кодов и чисел: по ней два прогона сравниваются
-                        # машиной, а персональных данных в файле не остаётся.
-                        **{k: v for k, v in stats.items() if k != "results"},
-                        "cards": [
-                            card_digest(r) for r in stats.get("results") or []
+                        "kind": kind,
+                        "to": addr,
+                        "name": name,
+                        "funnels": [
+                            {
+                                # results выкидываем: там развёрнутые
+                                # состояния с именами и суммами. Вместо них —
+                                # построчная выжимка из кодов и чисел: по ней
+                                # два прогона сравниваются машиной, а
+                                # персональных данных в файле не остаётся.
+                                **{
+                                    k: v for k, v in stats.items()
+                                    if k != "results"
+                                },
+                                "cards": [
+                                    card_digest(r)
+                                    for r in stats.get("results") or []
+                                ],
+                            }
+                            for stats, _titles in sections
                         ],
                     }
-                    for stats, _titles in sections
+                    for kind, addr, name, sections in deliveries
                 ],
             },
             ensure_ascii=False,
@@ -273,14 +403,23 @@ def main() -> None:
         encoding="utf-8",
     )
 
-    print("\n" + report)
-
-    if settings.dry_run or args.dry_run:
-        print(f"\nDRY_RUN: отчёт не отправлен ({len(report)} символов)")
+    if not deliveries:
+        print("Ни одной карточки на этапах аудита — отправлять нечего")
         return
 
-    chunks = send_chat_message_chunked(chat_id, report)
-    print(f"\nОтчёт отправлен в чат {chat_id} ({chunks} сообщ.)")
+    if settings.dry_run or args.dry_run:
+        for kind, addr, name, _sections in deliveries:
+            size = len(texts[f"{kind}:{addr}"])
+            print(f"DRY_RUN: {name} — {size} символов, не отправлено")
+        return
+
+    for kind, addr, name, _sections in deliveries:
+        text = texts[f"{kind}:{addr}"]
+        if kind == "user":
+            chunks = send_user_chat_message_chunked(int(addr), text)
+        else:
+            chunks = send_chat_message_chunked(int(addr), text)
+        print(f"Отправлено: {name} ({chunks} сообщ.)")
 
 
 if __name__ == "__main__":

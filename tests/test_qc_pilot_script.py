@@ -53,7 +53,9 @@ def test_newest_order_is_still_available_for_debugging(pilot, monkeypatch):
     from funnel_profiles import SELLER_PROFILE
 
     monkeypatch.setattr(pilot, "_bx_get_all_sync", lambda m, p: [
-        {"ID": "10"}, {"ID": "30"}, {"ID": "20"},
+        {"ID": "10", "STAGE_ID": "NEW"},
+        {"ID": "30", "STAGE_ID": "NEW"},
+        {"ID": "20", "STAGE_ID": "NEW"},
     ])
     picked = pilot.pick_deals(SELLER_PROFILE, 0, 2, "newest")
     assert [d["ID"] for d in picked] == ["30", "20"]
@@ -64,9 +66,12 @@ def test_default_order_takes_the_cards_that_can_be_judged(pilot, monkeypatch):
     from funnel_profiles import SELLER_PROFILE
 
     monkeypatch.setattr(pilot, "_bx_get_all_sync", lambda m, p: [
-        {"ID": "30", "DATE_CREATE": "2026-08-24T11:00:00+00:00"},   # час назад
-        {"ID": "20", "DATE_CREATE": "2026-07-01T10:00:00+00:00"},   # давно
-        {"ID": "25", "DATE_CREATE": "2026-08-01T10:00:00+00:00"},   # три недели
+        {"ID": "30", "STAGE_ID": "NEW",
+         "DATE_CREATE": "2026-08-24T11:00:00+00:00"},   # час назад
+        {"ID": "20", "STAGE_ID": "NEW",
+         "DATE_CREATE": "2026-07-01T10:00:00+00:00"},   # давно
+        {"ID": "25", "STAGE_ID": "NEW",
+         "DATE_CREATE": "2026-08-01T10:00:00+00:00"},   # три недели
     ])
     picked = pilot.pick_deals(SELLER_PROFILE, 0, 2, "judgeable")
     assert [d["ID"] for d in picked] == ["20", "25"]
@@ -77,8 +82,9 @@ def test_cards_of_unknown_age_go_last(pilot, monkeypatch):
     from funnel_profiles import SELLER_PROFILE
 
     monkeypatch.setattr(pilot, "_bx_get_all_sync", lambda m, p: [
-        {"ID": "30"},
-        {"ID": "20", "DATE_CREATE": "2026-07-01T10:00:00+00:00"},
+        {"ID": "30", "STAGE_ID": "NEW"},
+        {"ID": "20", "STAGE_ID": "NEW",
+         "DATE_CREATE": "2026-07-01T10:00:00+00:00"},
     ])
     picked = pilot.pick_deals(SELLER_PROFILE, 0, 2, "judgeable")
     assert [d["ID"] for d in picked] == ["20", "30"]
@@ -198,9 +204,11 @@ def test_judgeable_order_excludes_stages_qc_will_not_judge(pilot, monkeypatch):
     from funnel_profiles import SELLER_PROFILE
 
     monkeypatch.setattr(pilot, "_bx_get_all_sync", lambda m, p: [
-        # Стоят дольше всех, но сняты с контроля качества.
-        {"ID": "1", "STAGE_ID": "UC_KEOOG8", "DATE_CREATE": "2026-01-01T10:00:00+00:00"},
-        {"ID": "2", "STAGE_ID": "UC_FADPBF", "DATE_CREATE": "2026-01-02T10:00:00+00:00"},
+        # Стоят дольше всех, но в аудит эти этапы не входят.
+        {"ID": "1", "STAGE_ID": "UC_FADPBF",
+         "DATE_CREATE": "2026-01-01T10:00:00+00:00"},
+        {"ID": "2", "STAGE_ID": "FINAL_INVOICE",
+         "DATE_CREATE": "2026-01-02T10:00:00+00:00"},
         # А эта — та, ради которой прогон и запускают.
         {"ID": "3", "STAGE_ID": "NEW", "DATE_CREATE": "2026-05-01T10:00:00+00:00"},
     ])
@@ -224,26 +232,35 @@ def test_random_order_is_the_default_and_reproducible(pilot, monkeypatch):
     assert first != ["1", "2", "3", "4", "5"]
 
 
-@pytest.mark.parametrize("order", ["random", "judgeable", "newest", "uncached"])
-def test_out_of_qc_stages_never_take_a_slot_in_the_sample(pilot, monkeypatch, order):
-    """По ним вердикта не будет в любом режиме, а место в выборке они занимают."""
+@pytest.mark.parametrize(
+    "order", ["all", "random", "judgeable", "newest", "uncached"],
+)
+def test_only_audited_stages_take_a_slot_in_the_sample(pilot, monkeypatch, order):
+    """Охват задан списком этапов, а не вычитанием снятых с контроля.
+
+    Решение агентства от 31.08: продавцы аудируются на «Назначении встречи»
+    и «Переговорах». «Подготовка объекта в рекламу» из аудита вышла,
+    «Переговоры» — вернулись; вычитание об этом сказать не умело, потому что
+    отвечало на другой вопрос — «что мы решили не смотреть».
+    """
     from funnel_profiles import SELLER_PROFILE
 
     monkeypatch.setattr(pilot, "_bx_get_all_sync", lambda m, p: [
-        {"ID": "1", "STAGE_ID": "UC_KEOOG8"},   # Переговоры — вне QC
-        {"ID": "2", "STAGE_ID": "UC_FADPBF"},   # Поиск клиента — вне QC
-        {"ID": "3", "STAGE_ID": "NEW"},
-        {"ID": "4", "STAGE_ID": "FINAL_INVOICE"},
+        {"ID": "1", "STAGE_ID": "UC_KEOOG8"},     # Переговоры — в аудите
+        {"ID": "2", "STAGE_ID": "UC_FADPBF"},     # Поиск клиента — нет
+        {"ID": "3", "STAGE_ID": "NEW"},           # Назначение встречи — да
+        {"ID": "4", "STAGE_ID": "FINAL_INVOICE"},  # Подготовка в рекламу — нет
+        {"ID": "5", "STAGE_ID": "APOLOGY"},       # Сделка проиграна — нет
     ])
     picked = pilot.pick_deals(SELLER_PROFILE, 0, 10, order)
-    assert sorted(d["ID"] for d in picked) == ["3", "4"]
+    assert sorted(d["ID"] for d in picked) == ["1", "3"]
 
 
 def test_a_funnel_entirely_out_of_qc_yields_an_empty_sample(pilot, monkeypatch):
     from funnel_profiles import SELLER_PROFILE
 
     monkeypatch.setattr(pilot, "_bx_get_all_sync", lambda m, p: [
-        {"ID": str(i), "STAGE_ID": "UC_KEOOG8"} for i in range(1, 6)
+        {"ID": str(i), "STAGE_ID": "UC_FADPBF"} for i in range(1, 6)
     ])
     assert pilot.pick_deals(SELLER_PROFILE, 0, 5) == []
 
