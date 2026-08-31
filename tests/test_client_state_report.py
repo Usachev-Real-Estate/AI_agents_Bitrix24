@@ -254,18 +254,26 @@ def _work(proven: bool, reason: str = "no_trace") -> dict[str, Any]:
 
 
 def test_losing_and_neglected_are_separate_lists():
+    """Не всякая недоработка — потеря.
+
+    По определению агентства от 28.08 теряем того, с кем работа не ведётся
+    вовсе. Слабый комментарий — это работа, записанная плохо: претензия к
+    брокеру есть, а клиента мы не теряем.
+    """
     from client_state_report import split_sections
 
-    cold = _res(1, temperature="cold")
-    cold["state"]["work_evidence"] = _work(True, "call")
-    neglected = _res(2, temperature="warm")
-    neglected["state"]["work_evidence"] = _work(False)
+    nothing = _res(1, temperature="warm")
+    nothing["state"]["work_evidence"] = _work(False, "no_trace")
+    weak = _res(2, temperature="warm")
+    weak["state"]["work_evidence"] = _work(False, "comment_says_nothing")
     ok = _res(3, temperature="warm")
     ok["state"]["work_evidence"] = _work(True, "call")
 
-    losing, _aband, neglect, _rem, _wait, fine = split_sections([cold, neglected, ok])
+    losing, _aband, neglect, _rem, _wait, fine = split_sections(
+        [nothing, weak, ok],
+    )
     assert [r["deal_id"] for r in losing] == [1]
-    assert [r["deal_id"] for r in neglect] == [2]
+    assert [r["deal_id"] for r in neglect] == [1, 2]
     assert [r["deal_id"] for r in fine] == [3]
 
 
@@ -281,13 +289,22 @@ def test_a_card_can_be_in_both_sections():
     assert fine == []
 
 
-def test_an_uninformative_card_counts_as_losing_the_client():
+def test_an_uninformative_card_where_work_was_proven_is_not_a_loss():
+    """Карточку не восстановить, но с клиентом говорили — это не потеря.
+
+    До 28.08 такая карточка шла в 🚨: «работу видно, а клиента — нет».
+    Определение агентства говорит о другом — о том, что работа НЕ ведётся:
+    не пишутся комментарии, не планируются дела, нет звонков. Здесь звонок
+    есть. Пробел никуда не делся и виден на самой карточке строкой «Работу
+    видно, а клиента — нет», но тревожный раздел не про него.
+    """
     from client_state_report import split_sections
 
     blind = _res(5, recoverable=False)
     blind["state"]["work_evidence"] = _work(True, "call")
-    losing, _aband, _neglect, _rem, _w, _f = split_sections([blind])
-    assert [r["deal_id"] for r in losing] == [5]
+    losing, _aband, _neglect, _rem, _w, fine = split_sections([blind])
+    assert losing == []
+    assert [r["deal_id"] for r in fine] == [5]
 
 
 def test_unproven_work_is_spelled_out_on_the_card():
@@ -312,7 +329,7 @@ def test_a_timing_gap_still_shows_the_norm():
         "window_days": 3, "days_quiet": 9.0,
     }
     card = format_card(result, "ЖК «Will Towers»", WEBHOOK)
-    assert "норма 3 дн., последний след 9 дн. назад" in card
+    assert "норма 3 дн., последний след брокера 9 дн. назад" in card
 
 
 def test_proven_work_adds_no_noise():
@@ -392,7 +409,7 @@ def test_a_trace_from_today_is_not_called_zero_days_ago():
         "window_days": 1, "days_quiet": 0.3,
     }
     card = format_card(result, "диспозл excel", WEBHOOK)
-    assert "последний след сегодня" in card
+    assert "последний след брокера сегодня" in card
     assert "0 дн. назад" not in card
 
 
@@ -433,13 +450,30 @@ def test_a_cold_client_inside_grace_is_not_a_loss_yet():
     assert [r["deal_id"] for r in waiting] == [21]
 
 
-def test_a_cold_client_past_its_grace_is_a_loss():
-    """После отсрочки холод — событие, и правило прежнее."""
+def test_a_cold_client_being_worked_is_not_a_loss():
+    """Температура из тревоги ушла: она про клиента, тревога — про брокера.
+
+    Решение агентства от 28.08. До него холод сам по себе заводил карточку
+    в 🚨, и объяснить РОПу, почему сделка с тремя звонками за неделю стоит
+    в «теряем клиента», было нечем. Ярлык «холодный» в отчёте остался.
+    """
     from client_state_report import split_sections
 
     refused = _res(21, temperature="cold")
     refused["state"]["verdict"] = "poor"
+    refused["state"]["work_evidence"] = _work(True, "call")
     losing, _aband, _n, _rem, _w, _f = split_sections([refused])
+    assert losing == []
+
+
+def test_a_cold_client_nobody_works_is_a_loss():
+    """А вот холодный клиент без единого следа работы — теряем."""
+    from client_state_report import split_sections
+
+    dropped = _res(21, temperature="cold")
+    dropped["state"]["verdict"] = "poor"
+    dropped["state"]["work_evidence"] = _work(False, "no_trace")
+    losing, _aband, _n, _rem, _w, _f = split_sections([dropped])
     assert [r["deal_id"] for r in losing] == [21]
 
 
@@ -449,6 +483,7 @@ def test_an_empty_card_past_its_grace_is_still_a_loss():
 
     stale = _res(23, recoverable=False, temperature="unknown")
     stale["state"]["verdict"] = "poor"
+    stale["state"]["work_evidence"] = _work(False, "no_trace")
     losing, _aband, _n, _rem, _w, _f = split_sections([stale])
     assert [r["deal_id"] for r in losing] == [23]
 
@@ -478,7 +513,13 @@ def test_the_waiting_section_comes_before_the_healthy_one():
 
 
 def test_the_two_sections_stop_being_identical_lists():
-    """Прошлый прогон: 10 карточек и там, и там. Разделение не разделяло."""
+    """Прошлый прогон: 10 карточек и там, и там. Разделение не разделяло.
+
+    Пересечение 🚨 и 🔧 осталось намеренным — карточка без следов работы
+    честно принадлежит обоим, — но оно больше не полное: недоработки по
+    записи (пустой комментарий, дело-заглушка, «написал» без скриншота) в
+    тревогу не идут.
+    """
     from client_state_report import split_sections
 
     unworked = [
@@ -486,7 +527,7 @@ def test_the_two_sections_stop_being_identical_lists():
     ]
     for card in unworked:
         card["state"]["verdict"] = "poor"
-        card["state"]["work_evidence"] = _work(False)
+        card["state"]["work_evidence"] = _work(False, "comment_says_nothing")
     losing, _aband, neglect, _rem, _w, _f = split_sections(unworked)
     assert losing == []
     assert len(neglect) == 10
@@ -495,7 +536,9 @@ def test_the_two_sections_stop_being_identical_lists():
 def test_a_hot_client_nobody_works_is_a_loss():
     """#16066: бюджет 130 млн, согласован шаг, 8 дней тишины при норме 3.
 
-    Такая карточка лежала вторым пунктом среди восьми недоработок.
+    Такая карточка лежала вторым пунктом среди восьми недоработок. С 28.08
+    в тревогу её заводит не температура, а отсутствие работы: следов нет
+    вовсе. Проверка от этого не ослабла — та же карточка, тот же раздел.
     """
     from client_state_report import split_sections
 
@@ -516,15 +559,23 @@ def test_a_hot_client_being_worked_is_not_a_loss():
     assert [r["deal_id"] for r in fine] == [1]
 
 
-def test_a_warm_client_unworked_stays_a_broker_matter():
-    """Правило добавлено только для горячих — иначе разделы снова сольются."""
+def test_a_weak_record_stays_a_broker_matter_at_any_temperature():
+    """Претензия к записи — недоработка, а не потеря, и температура тут ни при чём.
+
+    Раньше судьбу такой карточки решал ярлык: тёплая оставалась
+    недоработкой, горячая уезжала в тревогу. Теперь решает то, что в
+    карточке: комментарий написан, значит работа ведётся — плохо записанная,
+    но ведётся.
+    """
     from client_state_report import split_sections
 
     warm = _res(2, temperature="warm")
-    warm["state"]["work_evidence"] = _work(False)
-    losing, _aband, neglect, _rem, _w, _f = split_sections([warm])
+    warm["state"]["work_evidence"] = _work(False, "comment_says_nothing")
+    hot = _res(3, temperature="hot")
+    hot["state"]["work_evidence"] = _work(False, "comment_says_nothing")
+    losing, _aband, neglect, _rem, _w, _f = split_sections([warm, hot])
     assert losing == []
-    assert [r["deal_id"] for r in neglect] == [2]
+    assert [r["deal_id"] for r in neglect] == [2, 3]
 
 
 def test_due_task_line_shows_the_deadline_not_the_stage_norm():
@@ -610,7 +661,7 @@ def test_a_gap_at_the_norm_boundary_shows_the_decimal():
         "window_days": 7, "days_quiet": 7.2,
     }
     card = format_card(res, "ЖК «Воробьев дом»", WEBHOOK)
-    assert "последний след 7.2 дн. назад" in card
+    assert "последний след брокера 7.2 дн. назад" in card
 
 
 def test_a_gap_far_from_the_norm_stays_whole():
@@ -622,7 +673,7 @@ def test_a_gap_far_from_the_norm_stays_whole():
         "proven": False, "reason": GAP_NO_TRACE_IN_WINDOW,
         "window_days": 2, "days_quiet": 16.4,
     }
-    assert "последний след 16 дн. назад" in format_card(res, "ЖК «Hide»", WEBHOOK)
+    assert "последний след брокера 16 дн. назад" in format_card(res, "ЖК «Hide»", WEBHOOK)
 
 
 def test_field_codes_from_the_model_are_shown_in_russian():
@@ -656,15 +707,23 @@ def test_a_poor_card_in_the_fine_list_says_so():
     assert "карточка заполнена плохо" in body
 
 
-def test_an_unrecoverable_card_says_why_it_is_losing():
-    """#16886 стояла в «теряем клиента» без единой строки о причине."""
-    from client_state_report import format_card, split_sections
+def test_an_unrecoverable_card_still_says_the_picture_is_lost():
+    """#16886 стояла в «теряем клиента» без единой строки о причине.
+
+    С 28.08 такая карточка в тревожный раздел не идёт: определение агентства
+    про то, что работа не ведётся, а тут звонок был. Но пробел никуда не
+    делся, и строка о нём осталась на самой карточке — иначе мы бы просто
+    перестали о нём говорить.
+    """
+    from client_state_report import format_sections, split_sections
 
     res = _res(16, recoverable=False)
+    res["state"]["verdict"] = "good"
     res["state"]["work_evidence"] = {"proven": True, "reason": "call"}
     losing, _aband, _n, _rem, _w, _f = split_sections([res])
-    assert [r["deal_id"] for r in losing] == [16]
-    assert "так и теряют молча" in format_card(res, "Пентхаус", WEBHOOK)
+    assert losing == []
+    body = format_sections([res], {16: "Пентхаус"}, WEBHOOK)
+    assert "сделку по карточке не подхватить" in body
 
 
 def test_an_unproven_card_does_not_repeat_the_note():
@@ -815,12 +874,19 @@ def test_abandoned_cards_get_their_own_section_worst_first():
     rows = [_card(1, 41.0), _card(2, 107.0)]
     losing, abandoned, neglect, _rem, _wait, fine = split_sections(rows)
     assert [r["deal_id"] for r in abandoned] == [2, 1]
-    assert neglect == [] and fine == [] and losing == []
+    assert neglect == [] and fine == []
+    # «Брошен на этапе долгое время» — половина определения потери, данного
+    # агентством 28.08. Своя секция у брошенных остаётся: сто дней тишины не
+    # должны стоять в одном списке с тремя. Печатается карточка один раз —
+    # за этим следит test_a_card_in_both_sections_is_printed_once, — и
+    # полный разбор достаётся 🚨, потому что он идёт первым. Значит и там
+    # худшее должно стоять первым, иначе сортировка брошенных не видна.
+    assert [r["deal_id"] for r in losing] == [2, 1]
 
     body = format_sections(rows, {1: "х", 2: "у"}, WEBHOOK)
     assert "🕸 БРОШЕНЫ — 2" in body
     assert body.index("🕸 БРОШЕНЫ") < body.index("🔧 НЕДОРАБОТКА")
-    assert "🕸 Карточка брошена (ни звонка, ни комментария 107 дн.)" in body
+    assert "🕸 Карточка брошена (ни звонка, ни комментария брокера 107 дн.)" in body
     assert "Работа не подтверждена" not in body
 
 

@@ -85,7 +85,42 @@ def test_an_empty_card_counts_from_its_age_on_the_stage():
 
 
 def test_an_explained_pause_is_not_abandonment():
-    """Объяснённое молчание — не забвение, даже долгое."""
+    """Объяснённое молчание — не забвение, пока брокер к нему возвращается."""
+    events = [
+        _comment(5.0, "клиент вернётся из-за границы в ноябре"),
+        _task(5.0, (NOW + timedelta(days=20)).isoformat()),
+    ]
+    result = _assess(
+        events, pause_explained=True,
+        pause_until=(NOW + timedelta(days=19)).date().isoformat(),
+    )
+    assert result["reason"] == PROVEN_BY_PAUSE
+
+
+def test_a_pause_without_a_task_becomes_abandonment():
+    """Объяснение без дела, к которому не вернулись, перестаёт объяснять.
+
+    До 28.08 заброшенность проверялась последней, и пауза закрывала её
+    навсегда: карточка с записанной когда-то паузой оставалась мягким
+    напоминанием при любом сроке тишины — то есть не поднималась ничем.
+    Решение агентства называет «брошен на этапе долгое время» потерей
+    клиента, а потеря старше напоминания.
+    """
+    events = [_comment(200.0, "клиент вернётся из-за границы в ноябре")]
+    result = _assess(events, pause_explained=True, pause_until="unknown")
+    assert result["reason"] == GAP_ABANDONED
+    assert result["abandoned_days"] == 200.0
+
+
+def test_a_pause_with_a_task_on_control_is_not_abandonment():
+    """Дело на контроле — карточку держат, даже если разговор отложен.
+
+    Границу пришлось поправить в тот же день: сначала заброшенность встала
+    выше паузы безусловно, и карточка, где брокер записал причину И поставил
+    дело, получала «брошена». То есть назвать причину было бы хуже, чем
+    промолчать, — ровно то перевёрнутое правило, которое агентство уже
+    просило не строить. Срок самого дела проверяет ветка паузы.
+    """
     events = [
         _comment(40.0, "клиент вернётся из-за границы в ноябре"),
         _task(40.0, (NOW + timedelta(days=20)).isoformat()),
@@ -97,10 +132,32 @@ def test_an_explained_pause_is_not_abandonment():
     assert result["reason"] == PROVEN_BY_PAUSE
 
 
-def test_a_due_task_still_names_its_date():
-    """Просроченное дело называет дату — это конкретнее, чем «брошена»."""
+def test_waiting_on_the_counterparty_without_a_task_still_ends():
+    """У ожидания тоже нет часов — и двести дней его прекращают."""
+    result = _assess(
+        [_comment(200.0, "агент обещал набрать в сентябре")],
+        next_step_who="client", next_step_when="unknown",
+    )
+    assert result["reason"] == GAP_ABANDONED
+
+
+def test_abandonment_outranks_the_due_task_reminder():
+    """Напоминать о деле на карточке, брошенной два месяца, — не о том.
+
+    С 28.08 просроченное дело — напоминание (решение агентства), а
+    брошенная карточка — потеря. Самый мягкий вердикт не должен перебивать
+    самый тяжёлый: сначала решают, ведём ли мы сделку вообще.
+    """
     events = [_comment(60.0), _task(60.0, _ago(50.0))]
-    assert _assess(events)["reason"] == GAP_DUE_TASK_NO_RESULT
+    assert _assess(events)["reason"] == GAP_ABANDONED
+
+
+def test_a_due_task_still_names_its_date_while_the_card_is_alive():
+    """Пока карточка не брошена, просроченное дело называет свою дату."""
+    events = [_comment(2.0), _task(2.0, _ago(1.5))]
+    result = _assess(events)
+    assert result["reason"] == GAP_DUE_TASK_NO_RESULT
+    assert result["due_task"]["days_overdue"] >= 1
 
 
 def test_the_advice_is_a_decision_not_a_reminder():

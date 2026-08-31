@@ -24,6 +24,7 @@ from broker_work import (
     has_open_future_task,
     next_action,
     open_future_deadline,
+    evidence_of_the_broker,
 )
 from counterparty import (
     WHO_CLIENT,
@@ -110,6 +111,14 @@ def _normalize_activity_item(item: dict[str, Any]) -> dict[str, Any]:
         # Срок дела нужен рекомендации: если по карточке уже стоит живое дело
         # на будущее, советовать «запланируйте дело» бессмысленно.
         "deadline": _clean_str(item.get("DEADLINE") or item.get("deadline")),
+        # Кто завёл дело. В отпечаток карточки не входит (_event_identity),
+        # поэтому поле ничего не стоит и портфель заново в модель не уедет.
+        # Правила его пока не читают — см. открытый вопрос про дела, которые
+        # заводит бизнес-процесс, в plans/qc-client-state-rules.md.
+        "author_id": _coerce_int(
+            item.get("AUTHOR_ID") or item.get("author_id")
+            or item.get("RESPONSIBLE_ID") or item.get("responsible_id"),
+        ),
     }
 
 
@@ -798,6 +807,13 @@ def unmask_state(
         due = evidence.get("due_task")
         if isinstance(due, dict):
             due["subject"] = unmask(str(due.get("subject") or ""), mask_map)
+        # Текст дела-заглушки печатается РОПу как довод: по нему видно, за
+        # что карточка получила претензию. Без разворота там будет
+        # «в деле только: „Позвонить КЛИЕНТ_1"».
+        if evidence.get("task_text"):
+            evidence["task_text"] = unmask(
+                str(evidence.get("task_text") or ""), mask_map,
+            )
 
     work = out.get("broker_work")
     if isinstance(work, dict):
@@ -812,6 +828,35 @@ def unmask_state(
     return out
 
 
+def mark_responsible(
+    events: list[dict[str, Any]],
+    authors: set[int] | None,
+) -> list[dict[str, Any]]:
+    """Пометить каждое событие полем by_responsible для модели.
+
+    Модель читает всю карточку, а три флага broker_work — claims_messaged,
+    comment_informative, claims_no_answer — это утверждения о работе
+    БРОКЕРА. Без пометки модель их не различает: у события есть author_id,
+    но кто из этих номеров ответственный по сделке, из карточки не видно.
+    Содержательный комментарий бэк-офиса при голой отметке брокера «в
+    работе» проходил как подтверждённая работа.
+
+    Список авторов пуст — правило не применяется, и все события помечаются
+    своими: незнание не должно превращаться в претензию.
+    """
+    marked: list[dict[str, Any]] = []
+    for event in events:
+        author = event.get("author_id")
+        own = (
+            not authors
+            or not isinstance(author, int)
+            or author <= 0
+            or author in authors
+        )
+        marked.append({**event, "by_responsible": own})
+    return marked
+
+
 def build_llm_payload(
     deal: dict[str, Any],
     previous_state: dict[str, Any] | None,
@@ -819,6 +864,7 @@ def build_llm_payload(
     all_events: list[dict[str, Any]],
     profile: FunnelProfile = BUYER_PROFILE,
     mask_map: MaskMap | None = None,
+    task_authors: set[int] | None = None,
 ) -> str:
     """Human message body for incremental state update.
 
@@ -850,7 +896,10 @@ def build_llm_payload(
             else _clean_str(deal.get("TITLE") or deal.get("title"))
         ),
         "previous_state": previous_state,
-        "new_events": new_events,
+        # by_responsible проставляется здесь, а не в событиях карточки:
+        # поле нужно только модели, и в отпечаток карточки (_event_identity)
+        # оно не входит — иначе смена РОПа переписала бы хэш всему портфелю.
+        "new_events": mark_responsible(new_events, task_authors),
         "event_count_total": len(all_events),
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
@@ -921,10 +970,12 @@ def analyze_with_llm(
     profile: FunnelProfile = BUYER_PROFILE,
     usage_sink: dict[str, int] | None = None,
     mask_map: MaskMap | None = None,
+    task_authors: set[int] | None = None,
 ) -> dict[str, Any] | None:
     """Call LLM and return normalized client state."""
     human = build_llm_payload(
         deal, previous_state, new_events, all_events, profile, mask_map,
+        task_authors,
     )
     response = llm.invoke([
         SystemMessage(content=profile.prompt),
@@ -1058,6 +1109,38 @@ def reconcile_step_date(state: dict[str, Any]) -> str:
     return resolved
 
 
+def allowed_task_authors(
+    broker_id: int,
+    broker_dept_map: dict[int, int] | None,
+    rop_map: dict[int, int] | None,
+) -> set[int]:
+    """Чьи следы засчитываются: брокер и его РОП.
+
+    Пустое множество означает «правило не применяем»: карты не построились
+    или брокер неизвестен. Это сознательно — см. evidence_of_the_broker.
+
+    Отдел брокера неизвестен — тоже отказываемся судить. Иначе множество
+    выходит {брокер} без РОПа, и комментарии РОПа перестают считаться
+    молча: карточка получает «следов работы брокера или РОПа нет вовсе»
+    ровно потому, что мы не сумели прочитать, в каком отделе брокер. Это то
+    же отсутствие данных, выданное за результат, — только теперь оно
+    обвиняет человека.
+
+    Отдел известен, а РОПа у него нет — другое дело: тут мы знаем, что
+    засчитывать некого, и {брокер} полное.
+    """
+    if not broker_id or not broker_dept_map or not rop_map:
+        return set()
+    dept = broker_dept_map.get(broker_id)
+    if not dept:
+        return set()
+    allowed = {broker_id}
+    rop_id = rop_map.get(dept)
+    if rop_id:
+        allowed.add(rop_id)
+    return allowed
+
+
 def apply_derived_verdict(
     state: dict[str, Any],
     record: dict[str, Any],
@@ -1065,6 +1148,7 @@ def apply_derived_verdict(
     envelope: dict[str, Any] | None = None,
     events: list[dict[str, Any]] | None = None,
     settings: Settings | None = None,
+    task_authors: set[int] | None = None,
 ) -> dict[str, Any]:
     """Пересчитать температуру и вердикт по уже извлечённым фактам.
 
@@ -1104,7 +1188,11 @@ def apply_derived_verdict(
     # ниже «дело стоит на 2026-09-01». Кладём дату сюда, чтобы обе строки
     # говорили об одном. Считается до температуры: её формулировка про
     # несогласованный шаг тоже зависит от того, стоит ли дело.
-    _scheduled = open_future_deadline(events or [])
+    # Чужие дела не считаются нигде: если бы вердикт видел дело робота, а
+    # оценка работы — нет, карточка получила бы «шаг назначен» и «следов
+    # работы нет» разом.
+    own_events = evidence_of_the_broker(events or [], task_authors)
+    _scheduled = open_future_deadline(own_events)
     state["scheduled_task_at"] = (
         _scheduled.astimezone(PORTAL_TZ).date().isoformat()
         if _scheduled is not None else ""
@@ -1119,10 +1207,6 @@ def apply_derived_verdict(
     )
     state["temperature"] = level
     state["temperature_reason"] = why
-    # Считать ли «холодный» потерей — свойство воронки, а не карточки, и
-    # знает его только профиль. Кладём решение в состояние: разделы отчёта
-    # собираются из него, профиля там уже нет.
-    state["cold_is_a_loss"] = profile.cold_means_losing
     envelope["temperature"] = level
     hours_on_stage = _stage_hours(record, datetime.now(timezone.utc))
     envelope["stage_age_known"] = hours_on_stage is not None
@@ -1148,7 +1232,7 @@ def apply_derived_verdict(
         stage_id, state, profile,
         hours_on_stage=hours_on_stage,
         qualification_ok=qualification_ok,
-        task_scheduled=has_open_future_task(events or []),
+        task_scheduled=has_open_future_task(own_events),
     )
     state["verdict"] = verdict
     state["verdict_reason"] = verdict_reason
@@ -1164,18 +1248,37 @@ def apply_derived_verdict(
     work = state.get("broker_work") or {}
     # Цитата ведёт к претензии, поэтому планка та же, что у evidence:
     # не нашли дословно — считаем, что утверждения не было.
-    corpus = (
-        _normalize_for_match(" ".join(str(e.get("text") or "") for e in events))
-        if events is not None else None
-    )
+    #
+    # Корпусов два, и разница между ними — разница между обвинением и
+    # оправданием. «Брокер пишет, что написал клиенту» и «брокер пишет, что
+    # клиент не отвечает» — это утверждения О БРОКЕРЕ, и искать их надо в
+    # ЕГО словах: модель читает все комментарии карточки, включая чужие, и
+    # без этого брокеру предъявляли бы фразу, которую написал бэк-офис.
+    # А объяснённая пауза брокера не обвиняет, а выгораживает: «клиент в
+    # отпуске до ноября» верно независимо от того, чья рука это записала,
+    # и сужать тут корпус значило бы отнимать у брокера оправдание за
+    # чужую аккуратность.
 
-    def _claimed(flag_key: str, quote_key: str, label: str) -> bool:
+    def _corpus(rows: list[dict[str, Any]] | None) -> str | None:
+        if rows is None:
+            return None
+        return _normalize_for_match(
+            " ".join(str(e.get("text") or "") for e in rows),
+        )
+
+    corpus = _corpus(events)
+    own_corpus = _corpus(own_events if events is not None else None)
+
+    def _claimed(
+        flag_key: str, quote_key: str, label: str, *, own: bool = True,
+    ) -> bool:
         if not work.get(flag_key):
             return False
-        if corpus is None:
+        haystack = own_corpus if own else corpus
+        if haystack is None:
             return True
         needle = _normalize_for_match(work.get(quote_key))
-        if not needle or needle not in corpus:
+        if not needle or needle not in haystack:
             logger.info(
                 "Deal %s: цитата «%s» не найдена в карточке — "
                 "утверждение не засчитано",
@@ -1200,8 +1303,10 @@ def apply_derived_verdict(
         "claims_no_answer": _claimed(
             "claims_no_answer", "claims_no_answer_quote", "клиент не отвечает",
         ),
+        # Единственное утверждение, которое ищем во всей карточке, а не
+        # только в словах брокера: оно его не обвиняет, а выгораживает.
         "pause_explained": _claimed(
-            "pause_explained", "pause_reason_quote", "причина паузы",
+            "pause_explained", "pause_reason_quote", "причина паузы", own=False,
         ),
     }
     # Молчит ли контрагент — и знаем ли мы это, или только предполагаем.
@@ -1239,7 +1344,10 @@ def apply_derived_verdict(
     # карточке не видно. Считается отдельно от оценки работы и на разделы
     # отчёта не влияет.
     state["no_call"] = comment_without_a_call(
-        events or [],
+        # Пометка про комментарий без звонка считается по тем же
+        # комментариям, что и оценка работы: иначе «работа описана
+        # комментарием» стояло бы на карточке, где комментарий чужой.
+        own_events,
         profile=profile,
         stage_id=stage_id,
         comment_informative=state["work_claims"]["comment_informative"],
@@ -1269,12 +1377,17 @@ def apply_derived_verdict(
         # на контроле и только на тот срок, который причина покрывает.
         pause_explained=state["work_claims"]["pause_explained"],
         pause_until=str(work.get("pause_until") or ""),
+        # Дело засчитывается, только если его завёл брокер или его РОП
+        # (решение агентства от 28.08).
+        task_authors=task_authors,
     )
     envelope["work_proven"] = state["work_evidence"]["proven"]
 
     # Рецепт, а не только диагноз. Считается заново на каждом прогоне: дело
     # могли поставить уже после разбора, и тогда совет надо снять.
-    state["next_action"] = next_action(state, events or [])
+    state["next_action"] = next_action(
+        state, events or [], task_authors=task_authors,
+    )
     return state
 
 
@@ -1286,10 +1399,21 @@ def analyze_deal(
     llm: LLMClient | None = None,
     prepared: bool = False,
     force: bool = False,
+    rop_map: dict[int, int] | None = None,
+    broker_dept_map: dict[int, int] | None = None,
 ) -> dict[str, Any]:
     """Analyze one deal by its funnel profile; returns state or skip reason."""
     settings = settings or get_settings()
     deal_id = _coerce_int(deal.get("ID") or deal.get("id"))
+    # Чьи дела засчитываем: ответственного брокера и его РОПа (решение
+    # агентства от 28.08). Карты строит прогон один раз на всю выборку —
+    # если их не передали, множество пустое, и тогда правило не применяется
+    # вовсе: незнание автора не должно превращаться в претензию к брокеру.
+    task_authors = allowed_task_authors(
+        _coerce_int(deal.get("ASSIGNED_BY_ID") or deal.get("assigned_by_id")),
+        broker_dept_map,
+        rop_map,
+    )
     envelope: dict[str, Any] = {
         "deal_id": deal_id,
         "skipped": False,
@@ -1358,7 +1482,9 @@ def analyze_deal(
         cached = json.loads(stored.get("state_json") or "{}")
         # Факты берём из кэша, оценку считаем заново: этап успел постареть,
         # а правила могли поменяться с прошлого прогона.
-        apply_derived_verdict(cached, record, profile, envelope, events, settings)
+        apply_derived_verdict(
+            cached, record, profile, envelope, events, settings, task_authors,
+        )
         # В БД состояние лежит замаскированным — разворачиваем, иначе отчёт
         # покажет КЛИЕНТ_1 вместо имени всюду, где карточка взята из кэша.
         envelope["state"] = unmask_state(cached, mask_map, profile)
@@ -1399,6 +1525,7 @@ def analyze_deal(
         envelope["reason"] = "no_new_events"
         apply_derived_verdict(
             previous_state, record, profile, envelope, events, settings,
+            task_authors,
         )
         envelope["state"] = unmask_state(previous_state, mask_map, profile)
         if not settings.dry_run:
@@ -1439,6 +1566,7 @@ def analyze_deal(
             state = analyze_with_llm(
                 record, previous_state, new_events, events, model, profile,
                 usage_sink=usage, mask_map=mask_map,
+                task_authors=task_authors,
             )
         except Exception as exc:  # noqa: BLE001 — одна карточка не роняет батч
             logger.warning("Client state LLM failed for deal %s: %s", deal_id, exc)
@@ -1500,7 +1628,9 @@ def analyze_deal(
         )
     envelope["stage_facts_dropped"] = unquoted
 
-    apply_derived_verdict(state, record, profile, envelope, events, settings)
+    apply_derived_verdict(
+        state, record, profile, envelope, events, settings, task_authors,
+    )
 
     # В БД уходит замаскированная копия: на следующем прогоне она вернётся
     # в модель как previous_state. Разворачиваем только то, что читают люди.
@@ -1709,6 +1839,27 @@ def run_client_state(
         "stages_without_rules": {},
         "results": [],
     }
+    # Карты авторов строятся один раз на всю выборку: два REST-запроса на
+    # прогон против двух на карточку. Сбой не роняет прогон — множество
+    # авторов останется пустым, и правило «дело брокера или его РОПа»
+    # просто не применится, а не заработает наоборот.
+    try:
+        from tools import _build_broker_dept_map, _build_rop_map
+
+        rop_map = _build_rop_map()
+        broker_ids = {
+            _coerce_int(d.get("ASSIGNED_BY_ID") or d.get("assigned_by_id"))
+            for d in deals
+        }
+        broker_dept_map = _build_broker_dept_map({b for b in broker_ids if b})
+    except Exception as exc:  # noqa: BLE001 — прогон важнее одного правила
+        logger.warning(
+            "Не удалось построить карту авторов дел (%s): "
+            "дела будут засчитываться независимо от того, кто их завёл",
+            exc,
+        )
+        rop_map, broker_dept_map = {}, {}
+
     for deal in deals:
         stage_code = _clean_str(deal.get("STAGE_ID") or deal.get("stage_id"))
         stats["stages"][stage_code or "(без этапа)"] = (
@@ -1717,6 +1868,7 @@ def run_client_state(
         try:
             result = analyze_deal(
                 deal, profile=profile, settings=settings, llm=llm, force=force,
+                rop_map=rop_map, broker_dept_map=broker_dept_map,
             )
         except Exception as exc:  # noqa: BLE001 — одна карточка не роняет батч
             logger.warning(

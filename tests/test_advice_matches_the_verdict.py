@@ -58,12 +58,19 @@ def test_a_standing_task_does_not_answer_an_unproven_card():
 
 
 def test_the_same_holds_when_the_task_is_due_today():
+    """Дело на сегодня отвечает напоминанием, а не ожиданием.
+
+    Решение агентства от 28.08: «если дело запланировано на тот же день
+    когда идёт аудит, то тоже надо просто напомнить что необходимо его
+    выполнить». Совет «ждать результата» на карточке, по которой работы не
+    видно, — это совет не делать ничего.
+    """
     advice = next_action(
         _state(GAP_NO_TRACE_IN_WINDOW, proven=False), [_task(0.4)], NOW,
     )
     assert "ждать результата" not in advice
     assert "на сегодня (2026-08-28)" in advice
-    assert "следов работы" in advice
+    assert "выполнить" in advice
 
 
 def test_without_the_window_the_reproach_still_reads():
@@ -89,6 +96,23 @@ def test_a_card_without_an_assessment_keeps_the_old_wording():
     assert advice == "Дело стоит на 2026-08-31 — ждём"
 
 
-def test_today_wording_for_proven_work_is_unchanged():
+def test_a_task_due_today_is_a_reminder_even_when_work_was_proven():
+    """Звонок вчера не отменяет дела, поставленного на сегодня.
+
+    Раньше такая карточка получала «ждать результата»: дело со сроком в
+    19:57, прочитанное в 10:21, вообще не рассматривалось. По решению
+    агентства день срока — повод напомнить, а не ждать. Напоминание при
+    этом остаётся напоминанием: в отчёте карточка уходит в 🔔, а не в
+    претензии.
+    """
     advice = next_action(_state(PROVEN_BY_CALL, proven=True), [_task(0.4)], NOW)
-    assert advice == "Дело стоит на сегодня (2026-08-28) — ждать результата"
+    assert advice == (
+        "Дело стоит на сегодня (2026-08-28) — "
+        "выполнить и написать в карточке результат"
+    )
+
+
+def test_the_wait_wording_survives_for_a_task_on_another_day():
+    """Дело на послезавтра — ждём: срок не сегодня, напоминать не о чем."""
+    advice = next_action(_state(PROVEN_BY_CALL, proven=True), [_task(3)], NOW)
+    assert advice == "Дело стоит на 2026-08-31 — ждём"

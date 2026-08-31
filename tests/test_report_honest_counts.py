@@ -103,25 +103,38 @@ def test_the_no_call_marker_names_its_window():
 # --- «работу видно, а клиента — нет» -------------------------------------
 
 
-def _unrecoverable(reason: str) -> str:
-    return format_card(
-        _result(102, state={
-            "temperature": "unknown", "verdict": "too_early",
-            "recoverable": False,
+def _unrecoverable(reason: str, verdict: str = "good") -> str:
+    """Отчёт целиком: карточка с подтверждённой работой печатается строкой.
+
+    С 28.08 такая карточка не тревога (работа ведётся — клиента не теряем),
+    а значит полного разбора у неё нет: она стоит в ⏳ или ✅ однострочником.
+    Пробел от этого не исчез, и проверяем мы именно его.
+    """
+    return format_sections(
+        [_result(102, state={
+            "temperature": "unknown", "verdict": verdict,
+            "recoverable": False, "next_step": {},
             "work_evidence": {"proven": True, "reason": reason, "window_days": 7},
-        }),
-        "Сделка",
+        })],
+        {102: "Сделка"},
         WEBHOOK,
     )
 
 
 def test_work_seen_only_when_the_work_was_actually_found():
-    assert "Работу видно" in _unrecoverable(PROVEN_BY_COMMENT)
+    """Работа была, а подхватить сделку по карточке некому."""
+    assert "сделку по карточке не подхватить" in _unrecoverable(PROVEN_BY_COMMENT)
 
 
 def test_too_early_is_not_work_seen():
-    """proven=True из-за отсрочки этапа — это «не смотрели», а не «видно»."""
-    assert "Работу видно" not in _unrecoverable(GAP_OUT_OF_WINDOW)
+    """proven=True из-за отсрочки этапа — это «не смотрели», а не «видно».
+
+    Такой карточке говорим то, что верно: картину клиента не восстановить.
+    Утверждать, что работу видели, нельзя — её не искали.
+    """
+    card = _unrecoverable(GAP_OUT_OF_WINDOW, verdict="too_early")
+    assert "сделку по карточке не подхватить" not in card
+    assert "картину клиента не восстановить" in card
 
 
 # --- непрочитанные карточки ----------------------------------------------

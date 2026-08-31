@@ -18,6 +18,7 @@ from broker_work import (  # noqa: E402
 )
 from client_state_report import (  # noqa: E402
     format_card,
+    format_sections,
     format_source_mix,
     split_sections,
 )
@@ -112,14 +113,21 @@ def test_an_unworked_contact_is_not_also_called_a_loss():
     assert [r["deal_id"] for r in neglect] == [16306]
 
 
-def test_an_uninformative_card_where_work_was_proven_is_a_loss():
-    """Брокер говорил с клиентом, а в карточке этого не видно — картина уходит."""
-    worked = _card(16886)
+def test_an_uninformative_card_where_work_was_proven_is_not_a_loss():
+    """Брокер говорил с клиентом — клиента мы не теряем, теряем картину.
+
+    До 28.08 такая карточка шла в 🚨. По определению агентства тревога — про
+    то, что работа не ведётся, а тут звонок был. Пробел остаётся виден
+    строкой на самой карточке: «Работу видно, а клиента — нет».
+    """
+    worked = _card(16886, verdict="good")
     worked["state"]["work_evidence"] = {
         "proven": True, "reason": "call", "window_days": 1, "days_quiet": 0.2,
     }
     losing, _aband, _n, _rem, _w, _f = split_sections([worked])
-    assert [r["deal_id"] for r in losing] == [16886]
+    assert losing == []
+    body = format_sections([worked], {16886: "Lucky"}, WEBHOOK)
+    assert "сделку по карточке не подхватить" in body
 
 
 def test_the_card_names_the_failure_plainly():
