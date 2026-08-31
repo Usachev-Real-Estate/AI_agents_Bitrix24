@@ -516,6 +516,7 @@ BUYER_WORK_WINDOW_DAYS: dict[str, int] = {
 
 SELLER_WORK_WINDOW_DAYS: dict[str, int] = {
     "NEW": 1,               # Назначение встречи — каденс 24 часа
+    "UC_KEOOG8": 3,         # Переговоры — каденс 3 дня
     "FINAL_INVOICE": 7,     # Подготовка в рекламу
     "LOSE": 7,              # Отложенная продажа
     "APOLOGY": 7,           # Проиграна
