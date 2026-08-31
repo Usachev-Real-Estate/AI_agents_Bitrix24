@@ -53,7 +53,19 @@ def _result(deal_id: int, **over) -> dict:
 
 def test_calls_are_counted_over_the_cards_we_read():
     text = format_summary(_stats(cards_with_call=3, cards_read=4))
-    assert "у 3 из 4 прочитанных (всего 10)" in text
+    assert "у 3 из 4 прочитанных за всё время (всего 10)" in text
+
+
+def test_the_counter_names_its_time_frame():
+    """Шапка считает по всей истории, карточка — по норме этапа.
+
+    Прогон 31.08: «📞 Звонки есть у 1 из 10» и в теле #10994 «ни звонка, ни
+    комментария брокера 106 дн.». Оба утверждения верны — разговор был
+    раньше, чем сто шесть дней назад, — но без названного срока читаются
+    как спор отчёта с самим собой.
+    """
+    text = format_summary(_stats(cards_with_call=1, cards_read=10))
+    assert "за всё время" in text
 
 
 def test_all_cards_read_reads_plainly():
