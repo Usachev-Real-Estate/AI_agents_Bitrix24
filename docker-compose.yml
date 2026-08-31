@@ -9,3 +9,26 @@ services:
       - ./logs:/app/logs
       - ./data:/app/data
     command: ["python", "src/main.py"]
+
+  # Веб-дашборд аналитики. Слушает только localhost: наружу его выставляет
+  # nginx, он же терминирует TLS. Публикация как "8080:8080" пробила бы порт
+  # мимо ufw через цепочку DOCKER-USER — дашборд оказался бы в интернете
+  # без шифрования.
+  dashboard:
+    build: .
+    container_name: b24-dashboard
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Внутри контейнера слушать надо 0.0.0.0: 127.0.0.1 — это петля самого
+      # контейнера, и проброс порта до неё не достаёт. Приватность
+      # обеспечивает публикация на хосте строго на 127.0.0.1 (ниже), а не
+      # адрес привязки внутри.
+      DASHBOARD_HOST: "0.0.0.0"
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+    command: ["python", "src/web/server.py"]

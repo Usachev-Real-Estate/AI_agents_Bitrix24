@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>{% block title %}Аналитика{% endblock %} · Афина CRM</title>
+  <link rel="stylesheet" href="{{ base_path }}/static/css/app.css">
+  <link rel="icon" href="data:,">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="{{ base_path }}/">Аналитика Bitrix24</a>
+  <nav class="nav">
+    {% for slug, label in nav %}
+      <a href="{{ base_path }}/{{ slug }}?{{ qs(request,
+             department=department_id if slug in department_aware_pages else None) }}"
+         class="{{ 'active' if active == slug else '' }}">{{ label }}</a>
+    {% endfor %}
+  </nav>
+  <div class="topbar-right">
+    {% if etl_lag_minutes is not none %}
+      <span title="Сколько прошло с последней успешной загрузки из Bitrix">
+        данные {{ etl_lag_minutes | int_ru }} мин назад</span>
+    {% else %}
+      <span class="muted">данные не загружались</span>
+    {% endif %}
+    <span title="Что вам видно: {{ scope_label }}">
+      {{ user.display_name if user else '' }}{% if not is_admin %}
+        <span class="badge">только свой отдел</span>{% endif %}</span>
+    <a class="btn" href="{{ base_path }}/logout">Выйти</a>
+  </div>
+</header>
+
+{% block filters %}
+<form class="filters" method="get" action="" data-autosubmit>
+  <div class="chips">
+    {% for key, label in period_presets.items() %}
+      <a class="chip {{ 'active' if period.preset == key else '' }}"
+         href="?{{ qs(request, period=key, start=None, end=None) }}">{{ label }}</a>
+    {% endfor %}
+  </div>
+  <label class="field">с
+    <input type="date" name="start" value="{{ period.start }}"></label>
+  <label class="field">по
+    <input type="date" name="end" value="{{ period.end }}"></label>
+  {% block extra_filters %}
+  <label class="field">Воронка
+    <select name="category">
+      <option value="all" {{ 'selected' if category_id is none else '' }}>Все</option>
+      {% for pipeline in pipelines %}
+        <option value="{{ pipeline.category_id }}"
+          {{ 'selected' if category_id == pipeline.category_id else '' }}>
+          {{ pipeline.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  {% endblock %}
+</form>
+{% endblock %}
+
+<main>
+  {% if etl_lag_minutes is none %}
+    <div class="notice notice-bad">
+      <span>⚠</span>
+      <span>Витрина пуста: ETL ещё ни разу не отработал успешно. Запустите
+        <code>python src/analytics/etl.py --backfill</code> и проверьте страницу
+        «Качество данных».</span>
+    </div>
+  {% elif etl_lag_minutes > 120 %}
+    <div class="notice notice-warn">
+      <span>⚠</span>
+      <span>Данные загружались {{ etl_lag_minutes | int_ru }} минут назад.
+        Штатный интервал — 15 минут; похоже, задача ETL не работает.</span>
+    </div>
+  {% endif %}
+  {% block content %}{% endblock %}
+</main>
+
+<script src="{{ base_path }}/static/js/charts.js"></script>
+<script src="{{ base_path }}/static/js/app.js"></script>
+</body>
+</html>

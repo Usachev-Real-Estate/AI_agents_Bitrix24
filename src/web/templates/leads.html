@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}Лиды{% endblock %}
+
+{% block extra_filters %}{% endblock %}
+
+{% block content %}
+<h1 class="section-title">Лиды · {{ period.label }}</h1>
+
+<div class="grid grid-kpi">
+  {{ ui.tile('Создано лидов', funnel.total | int_ru) }}
+  {{ ui.tile('Дошли до сделки', funnel.converted | int_ru) }}
+  {{ ui.tile('Конверсия в сделку', funnel.conversion | pct) }}
+  {% if first_move.supported %}
+    {{ ui.tile('Лид лежит до первой обработки', first_move.median | days,
+               hint='медиана; 90-й перцентиль ' ~ (first_move.p90 | days)) }}
+  {% else %}
+    {{ ui.tile('Скорость обработки', '—',
+               hint='портал не ведёт историю статусов лидов') }}
+  {% endif %}
+</div>
+
+<div class="grid grid-2 mt-16">
+  <div class="card">
+    <div class="card-head">
+      <div>
+        <h2>Лиды по статусам</h2>
+        <p class="card-sub">Когорта: лиды, созданные в выбранном периоде</p>
+      </div>
+    </div>
+    <div data-chart="funnel" data-source="lead-funnel-data"></div>
+    <script type="application/json" id="lead-funnel-data">{{ charts.funnel | tojson }}</script>
+    {{ ui.definition('Считаются только лиды, созданные внутри периода. Так статусы
+      сравниваются на одинаковом сроке дозревания: у лидов, пришедших вчера,
+      просто не было времени дойти до квалификации.') }}
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div>
+        <h2>Статусы: числа</h2>
+        <p class="card-sub">Разложение до карточек по ссылке</p>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Статус</th><th class="num">Лидов</th><th class="num">Доля</th><th></th></tr>
+        </thead>
+        <tbody>
+          {% for row in funnel.by_status %}
+          <tr>
+            <td>{{ row.name }}</td>
+            <td class="num">{{ row.count | int_ru }}</td>
+            <td class="num">{{ row.share | pct }}</td>
+            <td class="num nowrap">
+              <a href="{{ base_path }}/table?{{ qs(request, entity='lead', stage=row.status_id) }}">карточки →</a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<h2 class="section-title">Источники</h2>
+<div class="card">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Источник</th>
+          <th class="num">Лидов</th>
+          <th class="num">Дошли до сделки</th>
+          <th class="num">Конверсия</th>
+          <th class="num" title="Красным — источники с долей мусора выше средней">Спам / нецелевые</th>
+          <th class="num">Выиграно денег</th>
+          <th class="num">Денег на лид</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in sources %}
+        <tr>
+          <td>{{ row.name }}</td>
+          <td class="num">{{ row.leads | int_ru }}</td>
+          <td class="num">{{ row.converted | int_ru }}</td>
+          <td class="num">{{ row.conversion | pct }}</td>
+          <td class="num {{ 'delta-down' if row.junk_above_average else 'muted' }}"
+              title="{{ 'Доля мусора выше средней по всем источникам' if row.junk_above_average
+                        else 'Доля мусора не выше средней' }}">{{ row.junk_share | pct }}</td>
+          <td class="num">{{ row.won_amount | money }}</td>
+          <td class="num">{{ row.amount_per_lead | money }}</td>
+          <td class="num nowrap">
+            <a href="{{ base_path }}/table?{{ qs(request, entity='lead', source=row.source_id) }}">карточки →</a>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="8" class="empty">За период лидов нет</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {{ ui.definition('«Денег на лид» — выигранная сумма по сделкам, выросшим из лидов
+    источника, делённая на число лидов источника. Это выручка на лид, а не
+    прибыль: расходы на рекламу в Bitrix не заводятся, поэтому окупаемость
+    канала по этой таблице не считается — только сравнение источников между
+    собой.') }}
+</div>
+{% endblock %}

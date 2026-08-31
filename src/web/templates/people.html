@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}Люди{% endblock %}
+
+{% block content %}
+<h1 class="section-title">Сотрудники и отделы · {{ period.label }}</h1>
+
+<div class="grid grid-2">
+  <div class="card">
+    <div class="card-head">
+      <div>
+        <h2>Выиграно денег</h2>
+        <p class="card-sub">Топ по сделкам, закрытым успешно</p>
+      </div>
+    </div>
+    <div data-chart="bars" data-source="people-data"></div>
+    <script type="application/json" id="people-data">{{ charts.people | tojson }}</script>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div>
+        <h2>Отделы</h2>
+        <p class="card-sub">Свёрнуто по подразделениям</p>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Отдел</th><th class="num">Людей</th><th class="num">Сделок</th>
+            <th class="num">Открытых</th><th class="num">Выиграно</th>
+            <th class="num">Доля побед</th><th class="num">Денег</th></tr>
+        </thead>
+        <tbody>
+          {% for row in departments %}
+          <tr>
+            <td>{{ row.department }}</td>
+            <td class="num">{{ row.people | int_ru }}</td>
+            <td class="num">{{ row.deals_created | int_ru }}</td>
+            <td class="num">{{ row.deals_open | int_ru }}</td>
+            <td class="num">{{ row.won | int_ru }}</td>
+            <td class="num">{{ row.win_rate | pct }}</td>
+            <td class="num">{{ row.won_amount | money }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="7" class="empty">Нет данных за период</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<h2 class="section-title">Сотрудники</h2>
+<div class="card">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Сотрудник</th><th>Отдел</th><th class="num">Сделок создано</th>
+          <th class="num">Открыто сейчас</th><th class="num">Выиграно</th>
+          <th class="num">Проиграно</th><th class="num">Доля побед</th>
+          <th class="num">Выиграно денег</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for row in people %}
+        <tr>
+          <td>{{ row.name }}</td>
+          <td class="muted">{{ row.department }}</td>
+          <td class="num">{{ row.deals_created | int_ru }}</td>
+          <td class="num">{{ row.deals_open | int_ru }}</td>
+          <td class="num">{{ row.won | int_ru }}</td>
+          <td class="num">{{ row.lost | int_ru }}</td>
+          <td class="num">{{ row.win_rate | pct }}</td>
+          <td class="num">{{ row.won_amount | money }}</td>
+          <td class="num nowrap">
+            <a href="{{ base_path }}/table?{{ qs(request, assignee=row.user_id) }}">карточки →</a>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="9" class="empty">Нет данных за период</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {{ ui.definition('«Доля побед» считается только среди закрытых сделок сотрудника.
+    Брать в знаменатель все сделки, включая открытые, значит занижать показатель
+    тем сильнее, чем больше у человека работы в процессе.') }}
+</div>
+{% endblock %}
