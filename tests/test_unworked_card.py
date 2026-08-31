@@ -126,8 +126,12 @@ def test_an_uninformative_card_where_work_was_proven_is_not_a_loss():
     }
     losing, _aband, _n, _rem, _w, _f = split_sections([worked])
     assert losing == []
+    # Строка о пробеле жила в однострочнике ✅; раздел убран 31.08, и в тело
+    # такая карточка больше не идёт. Пробел остался на самой карточке и в
+    # счётчике шапки — тревогой он от этого не становится.
+    assert "Карточка неинформативна" in format_card(worked, "Lucky", WEBHOOK)
     body = format_sections([worked], {16886: "Lucky"}, WEBHOOK)
-    assert "сделку по карточке не подхватить" in body
+    assert "✅ Без вопросов: 1 в работе" in body
 
 
 def test_the_card_names_the_failure_plainly():

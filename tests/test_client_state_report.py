@@ -61,9 +61,13 @@ def test_no_service_codes_leak_into_the_report():
 def test_translations_are_used():
     card = format_card(_result(), "ЖК «Will Towers»", WEBHOOK)
     assert "Температура: [B]тёплый[/B]" in card
-    assert "Риск: средний" in card
     assert "Оценка карточки: плохо" in card
     assert "брокер" in card
+    # Риск, уверенность и цель клиента с 31.08 не печатаются: отчёт про
+    # работу брокера, а эти три строки — про разбор и про клиента.
+    assert "Риск:" not in card
+    assert "уверенность:" not in card
+    assert "Цель:" not in card
 
 
 def test_every_enum_value_has_a_translation():
@@ -108,7 +112,7 @@ def test_cached_card_shows_the_previous_analysis():
     )
     assert "Пропуск" not in card
     assert "Температура: [B]тёплый[/B]" in card
-    assert "Цель: Покупка квартиры" in card
+    assert "Ситуация: Обращение с Циан" in card
     assert "↻ без изменений с прошлого разбора" in card
 
 
@@ -506,8 +510,10 @@ def test_an_empty_fresh_card_is_never_marked_as_in_progress():
     fresh = _res(16918, recoverable=False, temperature="unknown")
     fresh["state"]["verdict"] = "too_early"
     body = format_sections([fresh], {16918: "Анна СК"}, WEBHOOK)
-    assert "РАНО СУДИТЬ — 1" in body
+    # С 31.08 обоих разделов в отчёте нет. Проверка остаётся о том же:
+    # свежая пустая карточка не выдаётся за работающую.
     assert "В РАБОТЕ" not in body
+    assert "✅ Без вопросов: 1 рано судить" in body
 
 
 def test_the_waiting_section_comes_before_the_healthy_one():
@@ -520,7 +526,10 @@ def test_the_waiting_section_comes_before_the_healthy_one():
     healthy["state"]["verdict"] = "good"
     healthy["state"]["work_evidence"] = _work(True, "call")
     body = format_sections([waiting, healthy], {1: "Свежий", 2: "Живой"}, WEBHOOK)
-    assert body.index("РАНО СУДИТЬ") < body.index("В РАБОТЕ")
+    # Порядок разделов больше не проверить — с 31.08 ни один из них не
+    # печатается. Обе карточки учтены строкой, и учёт сходится.
+    assert "✅ Без вопросов: 1 в работе · 1 рано судить" in body
+    assert "#1" not in body and "#2" not in body
 
 
 def test_the_two_sections_stop_being_identical_lists():
@@ -716,8 +725,11 @@ def test_a_poor_card_in_the_fine_list_says_so():
     res["state"]["verdict"] = "poor"
     res["state"]["work_evidence"] = {"proven": True, "reason": "call"}
     body = format_sections([res], {15: "Виктори парк"}, WEBHOOK)
-    assert "✅ В РАБОТЕ" in body
-    assert "карточка заполнена плохо" in body
+    # Раздел ✅ убран (31.08), и оговорка «заполнена плохо» ушла вместе с
+    # ним: она жила в его однострочнике. Вердикт по-прежнему виден в шапке
+    # прогона, а в теле такой карточки просто нет.
+    assert "✅ В РАБОТЕ" not in body
+    assert "✅ Без вопросов: 1 в работе" in body
 
 
 def test_an_unrecoverable_card_still_says_the_picture_is_lost():
@@ -728,15 +740,22 @@ def test_an_unrecoverable_card_still_says_the_picture_is_lost():
     делся, и строка о нём осталась на самой карточке — иначе мы бы просто
     перестали о нём говорить.
     """
-    from client_state_report import format_sections, split_sections
+    from client_state_report import (
+        format_card, format_sections, split_sections,
+    )
 
     res = _res(16, recoverable=False)
     res["state"]["verdict"] = "good"
     res["state"]["work_evidence"] = {"proven": True, "reason": "call"}
     losing, _aband, _n, _rem, _w, _f = split_sections([res])
     assert losing == []
+    # Строка о пробеле живёт на самой карточке — это и проверяем. В теле
+    # отчёта такой карточки с 31.08 нет: работа подтверждена, вопросов к
+    # брокеру нет, и раздел ✅ убран. Цифра «неинформативных» осталась в
+    # шапке прогона, имя карточки — нет; это принятая цена решения.
+    assert "Карточка неинформативна" in format_card(res, "Пентхаус", WEBHOOK)
     body = format_sections([res], {16: "Пентхаус"}, WEBHOOK)
-    assert "сделку по карточке не подхватить" in body
+    assert "✅ Без вопросов: 1 в работе" in body
 
 
 def test_an_unproven_card_does_not_repeat_the_note():
@@ -821,12 +840,15 @@ def test_the_marker_shows_on_the_card_and_in_the_short_list():
     res["state"]["work_evidence"] = {"proven": False, "reason": "comment"}
     assert "📵 Работа описана комментарием" in format_card(res, "х", WEBHOOK)
 
+    # Раздел ✅ убран 31.08, и метка «📵 без звонка» ушла вместе с его
+    # однострочником. Счётчик остался в шапке — см.
+    # test_the_summary_counts_cards_without_a_call.
     fine = _res(31, temperature="warm")
     fine["state"]["no_call"] = True
     fine["state"]["work_evidence"] = {"proven": True, "reason": "comment"}
     body = format_sections([fine], {31: "х"}, WEBHOOK)
-    assert "✅ В РАБОТЕ" in body
-    assert "📵 без звонка" in body
+    assert "✅ В РАБОТЕ" not in body
+    assert "✅ Без вопросов: 1 в работе" in body
 
 
 def test_the_summary_counts_cards_without_a_call():

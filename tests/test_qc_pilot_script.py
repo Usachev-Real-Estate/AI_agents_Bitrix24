@@ -84,6 +84,14 @@ def test_cards_of_unknown_age_go_last(pilot, monkeypatch):
     assert [d["ID"] for d in picked] == ["20", "30"]
 
 
+def _unproven() -> dict[str, Any]:
+    """Претензия к работе — иначе карточка в тело отчёта не попадёт."""
+    return {
+        "proven": False, "reason": "no_trace_in_window",
+        "window_days": 3, "days_quiet": 12.0,
+    }
+
+
 def _stats(label: str, **over: Any) -> dict[str, Any]:
     stats = {
         "funnel_label": label,
@@ -110,10 +118,15 @@ def _stats(label: str, **over: Any) -> dict[str, Any]:
 
 
 def test_report_covers_both_funnels_and_sums_the_cost(pilot):
+    # Карточке нужен вопрос: с 31.08 в тело отчёта попадают только такие.
+    buyers = _stats("Покупатели")
+    buyers["results"][0]["state"]["work_evidence"] = _unproven()
+    sellers = _stats("Продавцы", cost_rub=0.75)
+    sellers["results"][0]["state"]["work_evidence"] = _unproven()
     report = pilot.format_report(
         [
-            (_stats("Покупатели"), {16858: "ЖК «Will Towers»"}),
-            (_stats("Продавцы", cost_rub=0.75), {16858: "Собственник"}),
+            (buyers, {16858: "ЖК «Will Towers»"}),
+            (sellers, {16858: "Собственник"}),
         ],
         "https://b24-po7frr.bitrix24.ru/rest/1/t/",
     )
@@ -149,12 +162,19 @@ def test_a_problem_card_from_cache_is_shown_in_full(pilot):
         "https://b24-po7frr.bitrix24.ru/rest/1/t/",
     )
     assert "НЕДОРАБОТКА БРОКЕРА — 1" in report
-    assert "Цель: Покупка" in report
+    assert "Ситуация: Обращение с Циан" in report
     assert "без изменений с прошлого разбора" in report
 
 
-def test_a_healthy_card_is_compressed_to_one_line(pilot):
-    """Четыре экрана про здоровые сделки топят те две, ради которых открывали."""
+def test_a_healthy_card_is_left_out_of_the_report(pilot):
+    """Отчёт читает РОП, чтобы контролировать работу брокеров.
+
+    Сначала здоровую сделку сжали до однострочника — четыре экрана про них
+    топили те две, ради которых отчёт открывали. С 31.08 её нет и строкой:
+    к карточке нет вопроса, и места в отчёте она не занимает. Число таких
+    карточек печатается — иначе «Карточек: 10» над семью напечатанными
+    читалось бы как «три потерялись».
+    """
     healthy = _stats("Покупатели")
     healthy["results"][0]["state"]["work_evidence"] = {
         "proven": True, "reason": "call", "window_days": 3, "days_quiet": 1.0,
@@ -163,9 +183,10 @@ def test_a_healthy_card_is_compressed_to_one_line(pilot):
         [(healthy, {16858: "Михаил Лужники"})],
         "https://b24-po7frr.bitrix24.ru/rest/1/t/",
     )
-    assert "В РАБОТЕ — 1" in report
-    assert "#16858 Михаил Лужники — Позвонить" in report
+    assert "В РАБОТЕ" not in report
+    assert "Михаил Лужники" not in report
     assert "Ситуация:" not in report
+    assert "✅ Без вопросов: 1 в работе — в отчёт не выводятся." in report
 
 
 def test_judgeable_order_excludes_stages_qc_will_not_judge(pilot, monkeypatch):
