@@ -268,11 +268,21 @@ def compute_content_hash(
     поэтому его отпечаток и есть версия правил. Смена правил стоит одного
     повторного разбора по каждой карточке — ровно столько, сколько стоит
     честный ответ вместо устаревшего.
+
+    Отпечаток составной: «правила:события». Слитный не работал — обещание
+    выше нарушала следующая же проверка. Смена промпта меняла хэш, новых
+    событий в карточке при этом не появлялось, и ветка no_new_events решала,
+    что «событие удалили из таймлайна, прошлое состояние остаётся верным»:
+    модель не звали, а хэш переписывали на новый. Прогон 31.08 12:55 —
+    десять продавцов из десяти пришли из кэша сразу после смены правил,
+    и отказ клиента на #14992 остался непрочитанным. По двум половинам
+    видно, ЧТО изменилось, и ветка ниже спрашивает именно об этом.
     """
     payload = [_event_identity(e) for e in events]
-    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    events_raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    rules_raw = ""
     if profile is not None:
-        raw += "\n" + profile.prompt
+        rules_raw = profile.prompt
         # Набор фактов, которые мы спрашиваем, задаётся этапом. Сделка,
         # переехавшая на другой этап без единого нового события, отдавалась
         # из кэша — и её судили по требованиям нового этапа теми фактами,
@@ -282,8 +292,23 @@ def compute_content_hash(
         keys = sorted(
             key for key, _name, _req in all_facts_for_stage(profile.key, stage_id)
         )
-        raw += "\n" + json.dumps(keys, ensure_ascii=False)
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        rules_raw += "\n" + json.dumps(keys, ensure_ascii=False)
+    return "{}:{}".format(
+        hashlib.sha256(rules_raw.encode("utf-8")).hexdigest()[:32],
+        hashlib.sha256(events_raw.encode("utf-8")).hexdigest()[:32],
+    )
+
+
+def rules_part(content_hash: str | None) -> str:
+    """Половина отпечатка, отвечающая за версию правил.
+
+    Старые строки в БД составными не были — у них половины нет, и вернуть
+    тут надо не «пустые правила», а заведомо чужое значение: карточку,
+    сохранённую до этой правки, правила точно ждут другие.
+    """
+    text = str(content_hash or "")
+    head, sep, _tail = text.partition(":")
+    return head if sep else "<pre-split>"
 
 
 def parse_analyzed_events(stored: str | None) -> set[str]:
@@ -1549,6 +1574,13 @@ def analyze_deal(
         # force — это «перечитай карточку целиком», а не «пропусти проверку
         # хэша»: иначе ручной перезапуск упирался в отпечатки событий и
         # выходил через no_new_events, ничего не перечитав.
+        new_events = events
+    elif rules_part(stored.get("content_hash")) != rules_part(content_hash):
+        # Хэш разошёлся из-за ПРАВИЛ, а не из-за событий. Тогда перечитывать
+        # надо всю карточку: новый факт мы спрашиваем впервые, и в старых
+        # событиях он ровно там же, где был. Без этой ветки смена промпта
+        # ничего не стоила и ничего не меняла — прогон 31.08 12:55 отдал из
+        # кэша всех десятерых продавцов через минуту после смены правил.
         new_events = events
     elif not new_events:
         # Хэш карточки поменялся, а новых событий нет — значит событие удалили
