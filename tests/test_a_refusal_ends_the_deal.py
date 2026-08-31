@@ -184,3 +184,41 @@ def test_a_refusal_without_a_quote_does_not_count():
         state, _record(), PROFILES["sellers"], {}, _card_events(REFUSAL),
     )
     assert state["work_evidence"]["reason"] != GAP_CLIENT_REFUSED
+
+
+# --- граница отказа: отказ работать с нами ------------------------------
+
+
+def test_refusing_to_work_with_us_is_a_refusal_too():
+    """#14992: «отказывается оплачивать комиссию и обсуждать параметры».
+
+    Решение агентства от 31.08. Сделка может быть жива — собственник
+    что-то продаёт, — но нашей она уже не будет, и держать её в воронке
+    не за что. Флаг ставит модель по цитате; код лишь обязан довести
+    такой ответ до того же исхода, что и «не продаю».
+    """
+    work = _assess([_comment(4)], client_refused=True)
+    assert work["reason"] == GAP_CLIENT_REFUSED
+
+
+def test_the_prompt_draws_the_line_between_haggling_and_refusal():
+    """Торг об условиях — не отказ, и промпт обязан это различать.
+
+    Проверяем не модель, а текст правила: если из него исчезнет граница,
+    «завышенная цена» начнёт хоронить живые сделки, а цена спора этой
+    ошибки — вся карточка целиком.
+    """
+    import re
+
+    from funnel_profiles import PROFILES as _P
+
+    for profile in (_P["buyers"], _P["sellers"]):
+        # Правило переносится по строкам, а проверяем мы формулировки —
+        # схлопываем пробелы, иначе тест ловит вёрстку, а не смысл.
+        rules = re.sub(r"\s+", " ", profile.prompt)
+        assert "не платит комиссию" in rules
+        assert "не подписывает договор" in rules
+        assert "ушёл к другому агентству" in rules
+        # И обратная половина — без неё правило становится ловушкой.
+        assert "торг об условиях" in rules
+        assert "«подумаем»" in rules

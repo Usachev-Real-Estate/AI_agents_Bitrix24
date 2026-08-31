@@ -237,8 +237,11 @@ def test_the_wording_says_whose_trace_is_missing():
     Претензия от уточнения не слабеет: она о том, что ответственный по
     сделке ничего не написал.
     """
-    assert "брокера или РОПа" in REASON_RU[GAP_NO_TRACE]
-    assert "брокера или РОПа" in REASON_RU[GAP_NO_TRACE_IN_WINDOW]
+    for code in (GAP_NO_TRACE, GAP_NO_TRACE_IN_WINDOW):
+        phrase = REASON_RU[code]
+        # Падеж свободный — обе фразы переписывались, — но и брокер, и РОП
+        # должны быть названы: без этого претензия звучит про всю карточку.
+        assert "брокер" in phrase and "РОП" in phrase, phrase
 
 
 def test_someone_elses_comment_is_not_a_report_on_the_due_task():

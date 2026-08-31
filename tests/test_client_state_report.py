@@ -889,7 +889,7 @@ def test_abandoned_cards_get_their_own_section_worst_first():
     body = format_sections(rows, {1: "х", 2: "у"}, WEBHOOK)
     assert "🕸 БРОШЕНЫ — 2" in body
     assert body.index("🕸 БРОШЕНЫ") < body.index("🔧 НЕДОРАБОТКА")
-    assert "🕸 Карточка брошена (ни звонка, ни комментария брокера 107 дн.)" in body
+    assert "🕸 Карточка брошена (последнее действие брокера 107 дн. назад)" in body
     assert "Работа не подтверждена" not in body
 
 
