@@ -27,7 +27,7 @@ if str(_SRC) not in sys.path:
 from broker_work import (  # noqa: E402
     GAP_ABANDONED,
     GAP_DUE_TASK_NO_RESULT,
-    GAP_NO_TRACE_IN_WINDOW,
+    GAP_NO_TRACE,
     GAP_TASK_DUE_TODAY,
 )
 from client_state_report import split_sections  # noqa: E402
@@ -78,9 +78,15 @@ def test_an_overdue_task_is_a_reminder_too():
 
 
 def test_eight_days_of_silence_still_raises_it():
-    """#16066, ради которой правило и написано."""
+    """#16066, ради которой правило и написано.
+
+    Разрыв здесь no_trace: с 31.08 в тревогу ведёт «нет вообще ничего» и
+    «брошена», а отставание за норму этапа осталось недоработкой. Смысл
+    теста от этого не меняется — он про то, что дело на сегодня спасает
+    карточку, а тишина нет.
+    """
     losing, _ab, _n, _rem, _w, _f = split_sections(
-        [_hot(16066, GAP_NO_TRACE_IN_WINDOW)],
+        [_hot(16066, GAP_NO_TRACE)],
     )
     assert [r["deal_id"] for r in losing] == [16066]
 

@@ -72,15 +72,25 @@ def _sections(card: dict[str, Any]) -> str:
 
 
 def test_a_standing_task_turns_a_loss_into_a_shortfall():
-    """#16304: следов за норму этапа нет, но дело стоит на 1 сентября."""
-    assert _sections(_card(GAP_NO_TRACE_IN_WINDOW)) == "теряем+недоработка"
+    """Следов нет вовсе, но дело стоит на 1 сентября — это недоработка."""
+    assert _sections(_card(GAP_NO_TRACE)) == "теряем+недоработка"
     assert _sections(
-        _card(GAP_NO_TRACE_IN_WINDOW, scheduled="2026-09-01"),
+        _card(GAP_NO_TRACE, scheduled="2026-09-01"),
     ) == "недоработка"
 
 
-def test_the_same_holds_when_there_is_no_trace_at_all():
-    assert _sections(_card(GAP_NO_TRACE, scheduled="2026-09-01")) == "недоработка"
+def test_lagging_behind_the_norm_needs_no_task_to_leave_the_alarm():
+    """#16734: с 31.08 отставание по темпу в тревогу не ведёт вовсе.
+
+    Раньше эту карточку из «теряем» вытаскивало только стоящее дело —
+    #16304 и был тот случай. Потом агентство прочитало своё определение
+    строже: след есть, он просто старше нормы, и потерей это не считается
+    ни с делом, ни без.
+    """
+    assert _sections(_card(GAP_NO_TRACE_IN_WINDOW)) == "недоработка"
+    assert _sections(
+        _card(GAP_NO_TRACE_IN_WINDOW, scheduled="2026-09-01"),
+    ) == "недоработка"
 
 
 def test_an_abandoned_card_has_no_task_by_construction():

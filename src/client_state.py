@@ -737,6 +737,11 @@ def _normalize_state(
         "blockers": [_clean_str(x) for x in blockers if _clean_str(x)],
         "risk": risk,
         "recoverable": bool(raw.get("recoverable", True)),
+        # Контрагент отказался от сделки как таковой. Не «объект не
+        # подошёл» и не пауза: предмет работы исчез, и единственное, что
+        # по такой карточке нужно, — перенести её в проигранные.
+        "client_refused": bool(raw.get("client_refused")),
+        "client_refused_quote": _clean_str(raw.get("client_refused_quote")),
         "missing": [_clean_str(x) for x in missing if _clean_str(x)],
         "confidence": max(0.0, min(1.0, _coerce_float(raw.get("confidence"), 0.0))),
         "evidence": [_clean_str(x) for x in evidence if _clean_str(x)],
@@ -815,6 +820,12 @@ def unmask_state(
             evidence["task_text"] = unmask(
                 str(evidence.get("task_text") or ""), mask_map,
             )
+
+    # Цитата отказа лежит рядом с recoverable, а не в broker_work: это
+    # состояние клиента. Разворачиваем по той же причине — её читают люди.
+    out["client_refused_quote"] = unmask(
+        str(out.get("client_refused_quote") or ""), mask_map,
+    )
 
     work = out.get("broker_work")
     if isinstance(work, dict):
@@ -1272,13 +1283,19 @@ def apply_derived_verdict(
 
     def _claimed(
         flag_key: str, quote_key: str, label: str, *, own: bool = True,
+        source: dict[str, Any] | None = None,
     ) -> bool:
-        if not work.get(flag_key):
+        # source нужен отказу клиента: он лежит не в broker_work, а рядом с
+        # recoverable — это состояние клиента, а не запись брокера. Планка
+        # цитаты та же самая, и переписывать её ради одного флага нельзя:
+        # именно единственная копия правила и держит его одинаковым.
+        holder = work if source is None else source
+        if not holder.get(flag_key):
             return False
         haystack = own_corpus if own else corpus
         if haystack is None:
             return True
-        needle = _normalize_for_match(work.get(quote_key))
+        needle = _normalize_for_match(holder.get(quote_key))
         if not needle or needle not in haystack:
             logger.info(
                 "Deal %s: цитата «%s» не найдена в карточке — "
@@ -1308,6 +1325,14 @@ def apply_derived_verdict(
         # только в словах брокера: оно его не обвиняет, а выгораживает.
         "pause_explained": _claimed(
             "pause_explained", "pause_reason_quote", "причина паузы", own=False,
+        ),
+        # Отказ ищем во всей карточке: «не продаю» сказал клиент, а записать
+        # мог кто угодно. Планка та же — без дословной цитаты утверждения
+        # нет: этот флаг снимает с карточки все требования к темпу, и
+        # ошибиться в нём значит выдать живую сделку за похороненную.
+        "client_refused": _claimed(
+            "client_refused", "client_refused_quote", "отказ клиента",
+            own=False, source=state,
         ),
     }
     # Молчит ли контрагент — и знаем ли мы это, или только предполагаем.
@@ -1378,6 +1403,8 @@ def apply_derived_verdict(
         # на контроле и только на тот срок, который причина покрывает.
         pause_explained=state["work_claims"]["pause_explained"],
         pause_until=str(work.get("pause_until") or ""),
+        # Отказ контрагента снимает вопрос о темпе целиком.
+        client_refused=state["work_claims"]["client_refused"],
         # Дело засчитывается, только если его завёл брокер или его РОП
         # (решение агентства от 28.08).
         task_authors=task_authors,

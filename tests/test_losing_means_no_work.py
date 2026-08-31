@@ -65,8 +65,16 @@ def test_no_trace_at_all_is_a_loss():
     assert _section(broker_work.GAP_NO_TRACE) == "теряем+недоработка"
 
 
-def test_nothing_within_the_stage_norm_is_a_loss():
-    assert _section(broker_work.GAP_NO_TRACE_IN_WINDOW) == "теряем+недоработка"
+def test_lagging_behind_the_stage_norm_is_not_a_loss():
+    """След есть, он просто старше нормы этапа — это темп, а не потеря.
+
+    Решение агентства от 31.08, по #16734: брокер писал четыре дня назад
+    при норме два и дело поставил. Два звена конъюнкции целы — комментарии
+    пишутся, дела планируются, — а карточка стояла в «теряем». Норма этапа
+    отвечает на вопрос «свежая ли работа», раздел — на вопрос «ведём ли мы
+    клиента вообще».
+    """
+    assert _section(broker_work.GAP_NO_TRACE_IN_WINDOW) == "недоработка"
 
 
 def test_a_card_abandoned_for_long_is_a_loss():

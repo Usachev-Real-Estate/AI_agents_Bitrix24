@@ -356,9 +356,12 @@ def test_a_card_in_both_sections_is_printed_once():
     both["state"]["work_evidence"] = _work(False)
     body = format_sections([both], {10: "ЖК «Hide»"}, WEBHOOK)
     assert body.count("Ситуация:") == 1
-    assert "#10 ЖК «Hide» — см. выше" in body
+    # Раздел, целиком напечатанный выше, сворачивается в строку: заголовок
+    # с числом и состав. Столбик «— см. выше» под своим заголовком отчёт
+    # больше не печатает (решение агентства от 31.08).
+    assert "НЕДОРАБОТКА БРОКЕРА — 1[/B]: #10 (разбор выше)" in body
+    assert "см. выше" not in body
     assert "ТЕРЯЕМ КЛИЕНТА — 1" in body
-    assert "НЕДОРАБОТКА БРОКЕРА — 1" in body
 
 
 # ── Пробел в правилах ≠ решение агентства ──────────────────────────────
