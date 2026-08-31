@@ -110,7 +110,7 @@ def test_the_claim_itself_does_not_soften():
         [_card(GAP_NO_TRACE_IN_WINDOW, scheduled="2026-09-01")],
         {16304: "диспозл excel Lucky"}, WEBHOOK,
     )
-    assert "ни звонка, ни комментария брокера или РОПа" in body
+    assert "за норму этапа брокер или РОП ничего не сделал" in body
     assert "ТЕРЯЕМ КЛИЕНТА — 0" in body
     assert "НЕДОРАБОТКА БРОКЕРА — 1" in body
 

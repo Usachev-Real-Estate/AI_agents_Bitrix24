@@ -77,8 +77,8 @@ def test_an_empty_card_says_there_was_never_a_trace():
     assert work["reason"] == GAP_ABANDONED
     assert work["no_trace_at_all"] is True
     card = _card(work)
-    assert "следов брокера нет вовсе, карточка на этапе 31 дн." in card
-    assert "ни звонка, ни комментария" not in card
+    assert "работу по карточке не начинали, она на этапе 31 дн." in card
+    assert "последнее действие брокера" not in card
 
 
 def test_a_card_with_an_old_trace_still_counts_the_silence():
@@ -87,7 +87,7 @@ def test_a_card_with_an_old_trace_still_counts_the_silence():
     assert work["reason"] == GAP_ABANDONED
     assert work["no_trace_at_all"] is False
     card = _card(work)
-    assert "ни звонка, ни комментария брокера 45 дн." in card
+    assert "последнее действие брокера 45 дн. назад" in card
 
 
 def test_the_advice_says_the_same_thing_as_the_card():
@@ -96,7 +96,9 @@ def test_the_advice_says_the_same_thing_as_the_card():
     advice = next_action(
         {"work_evidence": work, "next_step": {}}, [], now=NOW,
     )
-    assert advice.startswith("Следов работы по карточке нет вовсе, на этапе 31 дн.")
+    assert advice.startswith(
+        "Следов работы по карточке нет вовсе, на этапе 31 дн."
+    )
     assert "возвращать клиента в работу или закрывать сделку" in advice
 
 
