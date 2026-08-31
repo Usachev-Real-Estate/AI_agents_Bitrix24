@@ -93,12 +93,28 @@ def test_a_hot_client_is_not_spared_either():
 
 
 def test_a_cold_owner_nobody_works_is_a_loss():
-    """Решает не ярлык, а то, что за норму этапа в карточке ничего нет."""
+    """Решает не ярлык, а то, что в карточке нет ничего вовсе.
+
+    Разрыв здесь именно no_trace, а не no_trace_in_window: с 31.08
+    отставание за норму этапа потерей не считается — след есть, он просто
+    старше нормы. Ярлык «холодный» при этом по-прежнему ничего не решает,
+    и проверяем мы это.
+    """
+    card = _card(15594, verdict="poor", work={
+        "proven": False, "reason": "no_trace", "window_days": 1,
+    })
+    losing, _ab, neglected, _rem, _w, _fine = split_sections([card])
+    assert [r["deal_id"] for r in losing] == [15594]
+    assert [r["deal_id"] for r in neglected] == [15594]
+
+
+def test_a_cold_owner_lagging_the_norm_is_only_a_shortfall():
+    """Тот же холодный собственник, но след за норму этапа был."""
     card = _card(15594, verdict="poor", work={
         "proven": False, "reason": "no_trace_in_window", "window_days": 1,
     })
     losing, _ab, neglected, _rem, _w, _fine = split_sections([card])
-    assert [r["deal_id"] for r in losing] == [15594]
+    assert losing == []
     assert [r["deal_id"] for r in neglected] == [15594]
 
 
