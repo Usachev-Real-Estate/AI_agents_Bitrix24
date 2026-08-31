@@ -23,7 +23,6 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from broker_work import (  # noqa: E402
-    GAP_DUE_TASK_NO_RESULT,
     GAP_TASK_DUE_TODAY,
     GAP_ONLY_PLANS,
     PROVEN,
@@ -146,23 +145,40 @@ def test_a_task_written_before_the_window_buys_nothing():
     assert _assess([old])["reason"] != PROVEN_BY_TASK_PLAN
 
 
-def test_a_due_task_outranks_the_plan_in_it():
-    """Срок наступил — спрашивают за результат, а не за намерение.
+def test_the_brokers_own_words_close_the_deadline_of_their_task():
+    """#16602: запись о сделанном лежит в самом деле.
 
-    Срок в этот же день ещё не просрочка (решение агентства от 28.08:
-    «претензия может быть только если дело просрочено»), поэтому и разряд, и
-    формулировка — напоминание.
+    Брокер позвонил, номер оказался чужим, и он записал это в НАЗВАНИЕ дела:
+    «неверный телефон котегарически отрицает». Комментария нет, дело
+    открыто — и отчёт советовал ему это дело «выполнить», то есть сделать
+    сделанное. Решение агентства от 31.08: текст в деле засчитывается
+    работой брокера, плана от отчёта не отличаем.
     """
-    overdue = _task(days_ago=1.0, days_ahead=-0.5, subject="Показ", description=PLAN)
-    assert _assess([overdue])["reason"] == GAP_TASK_DUE_TODAY
+    reported = _task(days_ago=1.0, days_ahead=-0.5, subject="Показ",
+                     description=PLAN)
+    result = _assess([reported])
+    assert result["reason"] == PROVEN_BY_TASK_PLAN
+    assert "due_task" not in result
 
 
-def test_a_plan_whose_day_has_passed_becomes_an_overdue_reminder():
-    """А вот назавтра то же дело уже просрочено."""
-    stale = _task(days_ago=3.0, days_ahead=-2.0, subject="Показ", description=PLAN)
-    result = _assess([stale])
-    assert result["reason"] == GAP_DUE_TASK_NO_RESULT
-    assert result["due_task"]["days_overdue"] >= 1
+def test_a_bare_task_still_gets_its_reminder():
+    """Граница: закрывает срок ЗАПИСЬ, а не сам факт дела.
+
+    Иначе напоминание «выполни и отпишись» исчезло бы вовсе — достаточно
+    было бы поставить дело и молчать.
+    """
+    bare = _task(days_ago=1.0, days_ahead=-0.5, subject="Позвонить")
+    assert _assess([bare])["reason"] == GAP_TASK_DUE_TODAY
+
+
+def test_the_credit_lasts_only_one_window():
+    """Запись в деле не покупает брокеру месяц: окно этапа её отпускает.
+
+    Дело написано семь дней назад при норме этапа три — в окно оно уже не
+    попадает, и карточка возвращается в отчёт.
+    """
+    old = _task(days_ago=7.0, days_ahead=-6.0, subject="Показ", description=PLAN)
+    assert _assess([old])["reason"] != PROVEN_BY_TASK_PLAN
 
 
 # ── Границы, которые правка не должна была сдвинуть ─────────────────────
@@ -200,11 +216,14 @@ def test_the_new_reason_is_in_the_tables():
     """Код без перевода уезжает РОПу как «task_plan»."""
     assert PROVEN_BY_TASK_PLAN in PROVEN
     assert PROVEN_BY_TASK_PLAN in REASON_RU
-    assert "почему" in REASON_RU[PROVEN_BY_TASK_PLAN]
+    # Формулировка не должна обещать «что сделает и почему»: с 31.08 та же
+    # причина покрывает и отчёт о сделанном.
+    assert "сделает" not in REASON_RU[PROVEN_BY_TASK_PLAN]
+    assert "записано" in REASON_RU[PROVEN_BY_TASK_PLAN]
 
 
 def test_the_bare_task_gets_an_answerable_advice():
     """Дело стоит — советовать «поставить дело» нечего."""
     fix = RECORD_FIXES[GAP_ONLY_PLANS]
     assert "Запланировать" not in fix
-    assert "почему" in fix
+    assert "Дописать в деле" in fix
