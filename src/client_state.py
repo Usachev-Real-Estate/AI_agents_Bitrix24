@@ -20,6 +20,7 @@ from broker_work import (
     _extract_date,
     assess_broker_work,
     comment_without_a_call,
+    has_a_conversation,
     has_any_call,
     has_open_future_task,
     next_action,
@@ -1471,7 +1472,12 @@ def analyze_deal(
     # расшифровки. До кэша: событий это не меняет, а цифра нужна и по
     # карточкам из кэша.
     envelope["transcripts"] = _transcript_counts(events)
-    envelope["has_call"] = has_any_call(events)
+    # Счётчик шапки «звонки есть у N карточек» отвечает на тот же вопрос,
+    # что и строка внутри карточки: состоялся ли разговор. Непринятый вызов
+    # — не разговор, и считать его здесь значит спорить с собственным
+    # отчётом (#10994, прогон 31.08). Для «клиент не отвечает» есть
+    # отдельная проверка has_any_call — там непринятый вызов как раз довод.
+    envelope["has_call"] = has_a_conversation(events)
 
     # Кэш читается и в DRY_RUN: чтение ничего не меняет, а без него тестовый
     # прогон заново гоняет модель по всем карточкам. Повторный разбор — по force.
