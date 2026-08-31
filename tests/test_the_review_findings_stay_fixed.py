@@ -278,7 +278,7 @@ def test_the_card_shows_both_arguments_at_once():
                          "subject": "Позвонить", "due_today": False},
         }}}
     body = format_sections([card], {5: "Сделка"}, WEBHOOK)
-    assert "норма 3 дн., последний след 9 дн. назад" in body
+    assert "норма 3 дн., последний след брокера 9 дн. назад" in body
     assert "просрочено на 8 дн." in body
 
 

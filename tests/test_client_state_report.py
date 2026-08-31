@@ -329,7 +329,7 @@ def test_a_timing_gap_still_shows_the_norm():
         "window_days": 3, "days_quiet": 9.0,
     }
     card = format_card(result, "ЖК «Will Towers»", WEBHOOK)
-    assert "норма 3 дн., последний след 9 дн. назад" in card
+    assert "норма 3 дн., последний след брокера 9 дн. назад" in card
 
 
 def test_proven_work_adds_no_noise():
@@ -409,7 +409,7 @@ def test_a_trace_from_today_is_not_called_zero_days_ago():
         "window_days": 1, "days_quiet": 0.3,
     }
     card = format_card(result, "диспозл excel", WEBHOOK)
-    assert "последний след сегодня" in card
+    assert "последний след брокера сегодня" in card
     assert "0 дн. назад" not in card
 
 
@@ -661,7 +661,7 @@ def test_a_gap_at_the_norm_boundary_shows_the_decimal():
         "window_days": 7, "days_quiet": 7.2,
     }
     card = format_card(res, "ЖК «Воробьев дом»", WEBHOOK)
-    assert "последний след 7.2 дн. назад" in card
+    assert "последний след брокера 7.2 дн. назад" in card
 
 
 def test_a_gap_far_from_the_norm_stays_whole():
@@ -673,7 +673,7 @@ def test_a_gap_far_from_the_norm_stays_whole():
         "proven": False, "reason": GAP_NO_TRACE_IN_WINDOW,
         "window_days": 2, "days_quiet": 16.4,
     }
-    assert "последний след 16 дн. назад" in format_card(res, "ЖК «Hide»", WEBHOOK)
+    assert "последний след брокера 16 дн. назад" in format_card(res, "ЖК «Hide»", WEBHOOK)
 
 
 def test_field_codes_from_the_model_are_shown_in_russian():
@@ -886,7 +886,7 @@ def test_abandoned_cards_get_their_own_section_worst_first():
     body = format_sections(rows, {1: "х", 2: "у"}, WEBHOOK)
     assert "🕸 БРОШЕНЫ — 2" in body
     assert body.index("🕸 БРОШЕНЫ") < body.index("🔧 НЕДОРАБОТКА")
-    assert "🕸 Карточка брошена (ни звонка, ни комментария 107 дн.)" in body
+    assert "🕸 Карточка брошена (ни звонка, ни комментария брокера 107 дн.)" in body
     assert "Работа не подтверждена" not in body
 
 
