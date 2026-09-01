@@ -803,7 +803,7 @@ def test_deleted_event_does_not_trigger_a_paid_call(tmp_path, monkeypatch):
         return cs._normalize_state({"client_goal": "2к", "confidence": 0.7}, profile)
 
     monkeypatch.setattr(cs, "analyze_with_llm", _fake_llm)
-    monkeypatch.setattr(cs, "make_llm", lambda s: object())
+    monkeypatch.setattr(cs, "make_llm", lambda s, **_kw: object())
 
     settings = cs.get_settings()
     monkeypatch.setattr(settings, "dry_run", False, raising=False)
@@ -849,7 +849,7 @@ def test_second_run_sends_only_the_new_comment(tmp_path, monkeypatch):
         return cs._normalize_state({"client_goal": "2к", "confidence": 0.7}, profile)
 
     monkeypatch.setattr(cs, "analyze_with_llm", _fake_llm)
-    monkeypatch.setattr(cs, "make_llm", lambda s: object())
+    monkeypatch.setattr(cs, "make_llm", lambda s, **_kw: object())
     settings = cs.get_settings()
     monkeypatch.setattr(settings, "dry_run", False, raising=False)
 
@@ -1071,7 +1071,7 @@ def test_cached_state_is_unmasked_before_it_reaches_the_report(tmp_path, monkeyp
         }, profile)
 
     monkeypatch.setattr(cs, "analyze_with_llm", _fake_llm)
-    monkeypatch.setattr(cs, "make_llm", lambda s: object())
+    monkeypatch.setattr(cs, "make_llm", lambda s, **_kw: object())
     settings = cs.get_settings()
     monkeypatch.setattr(settings, "dry_run", False, raising=False)
 
@@ -1110,7 +1110,7 @@ def test_force_actually_re_reads_a_card_with_no_new_events(tmp_path, monkeypatch
         return cs._normalize_state({"client_goal": "2к", "confidence": 0.7}, profile)
 
     monkeypatch.setattr(cs, "analyze_with_llm", _fake_llm)
-    monkeypatch.setattr(cs, "make_llm", lambda s: object())
+    monkeypatch.setattr(cs, "make_llm", lambda s, **_kw: object())
     settings = cs.get_settings()
     monkeypatch.setattr(settings, "dry_run", False, raising=False)
 
@@ -1245,7 +1245,7 @@ def test_fresh_empty_card_is_too_early_not_poor(tmp_path, monkeypatch):
         "evidence_incomplete": False,
     }
     monkeypatch.setattr(cs, "prepare_deal_record", lambda d, **k: dict(empty))
-    monkeypatch.setattr(cs, "make_llm", lambda s: (_ for _ in ()).throw(
+    monkeypatch.setattr(cs, "make_llm", lambda s, **_kw: (_ for _ in ()).throw(
         AssertionError("модель не должна вызываться"),
     ))
     settings = cs.get_settings()
@@ -1280,7 +1280,7 @@ def test_a_card_with_one_comment_still_goes_to_the_model(tmp_path, monkeypatch):
         return cs._normalize_state({"client_goal": "2к", "confidence": 0.6}, profile)
 
     monkeypatch.setattr(cs, "analyze_with_llm", _fake)
-    monkeypatch.setattr(cs, "make_llm", lambda s: object())
+    monkeypatch.setattr(cs, "make_llm", lambda s, **_kw: object())
     settings = cs.get_settings()
     monkeypatch.setattr(settings, "dry_run", False, raising=False)
 
@@ -1344,7 +1344,7 @@ def test_a_quiet_card_stops_being_too_early_as_the_stage_ages(tmp_path, monkeypa
         return cs._normalize_state({"client_goal": "2к", "confidence": 0.6}, profile)
 
     monkeypatch.setattr(cs, "analyze_with_llm", _fake)
-    monkeypatch.setattr(cs, "make_llm", lambda s: object())
+    monkeypatch.setattr(cs, "make_llm", lambda s, **_kw: object())
     settings = cs.get_settings()
     monkeypatch.setattr(settings, "dry_run", False, raising=False)
 
@@ -1374,7 +1374,7 @@ def test_cached_verdict_follows_a_rule_change(tmp_path, monkeypatch):
         cs, "analyze_with_llm",
         lambda *a, **k: cs._normalize_state({"client_goal": "2к"}, cs.BUYER_PROFILE),
     )
-    monkeypatch.setattr(cs, "make_llm", lambda s: object())
+    monkeypatch.setattr(cs, "make_llm", lambda s, **_kw: object())
     settings = cs.get_settings()
     monkeypatch.setattr(settings, "dry_run", False, raising=False)
 
@@ -1409,7 +1409,7 @@ def test_recomputed_verdict_is_persisted_not_just_reported(tmp_path, monkeypatch
         cs, "analyze_with_llm",
         lambda *a, **k: cs._normalize_state({"client_goal": "2к"}, cs.BUYER_PROFILE),
     )
-    monkeypatch.setattr(cs, "make_llm", lambda s: object())
+    monkeypatch.setattr(cs, "make_llm", lambda s, **_kw: object())
     settings = cs.get_settings()
     monkeypatch.setattr(settings, "dry_run", False, raising=False)
 
@@ -1440,7 +1440,7 @@ def test_cache_hit_still_costs_nothing(tmp_path, monkeypatch):
         return cs._normalize_state({"client_goal": "2к"}, cs.BUYER_PROFILE)
 
     monkeypatch.setattr(cs, "analyze_with_llm", _fake)
-    monkeypatch.setattr(cs, "make_llm", lambda s: object())
+    monkeypatch.setattr(cs, "make_llm", lambda s, **_kw: object())
     settings = cs.get_settings()
     monkeypatch.setattr(settings, "dry_run", False, raising=False)
 

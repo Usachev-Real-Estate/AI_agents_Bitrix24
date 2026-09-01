@@ -7,11 +7,16 @@ from langchain_openai import ChatOpenAI
 from config import Settings
 
 
-def make_llm(settings: Settings) -> ChatOpenAI:
+def make_llm(settings: Settings, *, service_tier: str = "") -> ChatOpenAI:
     """Build ChatOpenAI from Settings (base_url + model are provider-specific).
 
-    max_tokens и reasoning_effort передаются, только если заданы: пустое
-    значение означает «оставить дефолт провайдера», а не «выключить».
+    max_tokens, reasoning_effort и service_tier передаются, только если
+    заданы: пустое значение означает «оставить дефолт провайдера», а не
+    «выключить».
+
+    service_tier приходит аргументом, а не из настроек, ровно потому, что
+    клиентов нужно два: основной в выбранном режиме и запасной в обычном
+    (см. analyze_deal).
     """
     kwargs: dict[str, object] = {
         "api_key": settings.llm_api_key,
@@ -23,6 +28,8 @@ def make_llm(settings: Settings) -> ChatOpenAI:
         kwargs["max_tokens"] = settings.llm_max_tokens
     if settings.llm_reasoning_effort:
         kwargs["reasoning_effort"] = settings.llm_reasoning_effort
+    if service_tier:
+        kwargs["service_tier"] = service_tier
     return ChatOpenAI(**kwargs)
 
 

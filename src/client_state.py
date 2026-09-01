@@ -1477,6 +1477,7 @@ def analyze_deal(
     profile: FunnelProfile = BUYER_PROFILE,
     settings: Settings | None = None,
     llm: LLMClient | None = None,
+    fallback_llm: LLMClient | None = None,
     prepared: bool = False,
     force: bool = False,
     rop_map: dict[int, int] | None = None,
@@ -1651,20 +1652,62 @@ def analyze_deal(
         state = empty_card_state(profile)
         envelope["empty_card"] = True
     else:
-        model = llm or make_llm(settings)
+        if llm is not None:
+            model, spare = llm, fallback_llm
+        else:
+            # Клиентов два: основной в выбранном режиме и запасной в
+            # обычном. Запасной существует только при непустом
+            # llm_service_tier, и ровно для того, чтобы дешёвый режим не
+            # стоил нам отчёта: RouterAI обещает, что при нехватке
+            # мощностей flex «вернёт ошибку, средства не спишутся». Ошибка
+            # по мощностям и авария провайдера выглядят для нас одинаково,
+            # и отличить их можно единственным честным способом — повторить
+            # в обычном режиме и посмотреть.
+            tier = (settings.llm_service_tier or "").strip()
+            model = make_llm(settings, service_tier=tier)
+            spare = make_llm(settings) if tier else None
         usage: dict[str, int] = {key: 0 for key in USAGE_KEYS}
         envelope["usage"] = usage
-        try:
-            state = analyze_with_llm(
-                record, previous_state, new_events, events, model, profile,
+
+        def _ask(client: LLMClient) -> dict[str, Any] | None:
+            return analyze_with_llm(
+                record, previous_state, new_events, events, client, profile,
                 usage_sink=usage, mask_map=mask_map,
                 task_authors=task_authors,
             )
+
+        try:
+            state = _ask(model)
         except Exception as exc:  # noqa: BLE001 — одна карточка не роняет батч
-            logger.warning("Client state LLM failed for deal %s: %s", deal_id, exc)
-            envelope["skipped"] = True
-            envelope["reason"] = "llm_error"
-            return envelope
+            if spare is None:
+                logger.warning(
+                    "Client state LLM failed for deal %s: %s", deal_id, exc,
+                )
+                envelope["skipped"] = True
+                envelope["reason"] = "llm_error"
+                return envelope
+            # Дешёвый режим отказал. Причина может быть любой — от нехватки
+            # мощностей до кончившегося баланса, — и отличить их можно
+            # единственным честным способом: повторить в обычном режиме.
+            # Счётчик обнуляем: за неудачную попытку провайдер не списывает,
+            # и записать её в расход значило бы завысить счёт.
+            logger.info(
+                "Deal %s: %s отказал (%s) — повтор в обычном режиме",
+                deal_id, settings.llm_service_tier or "основной клиент", exc,
+            )
+            for key in usage:
+                usage[key] = 0
+            envelope["tier_fallback"] = True
+            try:
+                state = _ask(spare)
+            except Exception as exc2:  # noqa: BLE001
+                logger.warning(
+                    "Client state LLM failed for deal %s on both tiers: %s",
+                    deal_id, exc2,
+                )
+                envelope["skipped"] = True
+                envelope["reason"] = "llm_error"
+                return envelope
 
         if state is None:
             logger.warning("Client state parse failed for deal %s", deal_id)
