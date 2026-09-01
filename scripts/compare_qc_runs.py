@@ -44,10 +44,36 @@ def load(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def funnels(run: dict[str, Any]) -> list[dict[str, Any]]:
+    """Воронки прогона — из обеих форм файла.
+
+    С переходом на отчёт каждому РОПу лично воронки уехали на уровень
+    глубже: было `{"funnels": [...]}`, стало
+    `{"deliveries": [{"funnels": [...]}]}`. Обход остался прежним и стал
+    возвращать ноль карточек — молча, без единой ошибки: `.get("funnels")`
+    на новом файле просто не находит ключа. Инструмент, которым проверяют
+    правки, сам полгода показывал бы «сравнивать нечего».
+
+    Старую форму читаем по-прежнему: файлы прошлых прогонов лежат на диске
+    и сравнивать их с новыми — ровно то, ради чего этот скрипт написан.
+    """
+    if run.get("funnels"):
+        return list(run["funnels"])
+    return [
+        funnel
+        for delivery in run.get("deliveries") or []
+        for funnel in delivery.get("funnels") or []
+    ]
+
+
 def cards_by_id(run: dict[str, Any]) -> dict[int, dict[str, Any]]:
-    """Все карточки прогона обеих воронок, по номеру сделки."""
+    """Все карточки прогона обеих воронок, по номеру сделки.
+
+    Один и тот же РОП получает и покупателей, и продавцов, а карточка
+    принадлежит ровно одному адресату — так что ключи не сталкиваются.
+    """
     out: dict[int, dict[str, Any]] = {}
-    for funnel in run.get("funnels") or []:
+    for funnel in funnels(run):
         for card in funnel.get("cards") or []:
             deal_id = int(card.get("deal_id") or 0)
             if deal_id:
@@ -58,7 +84,7 @@ def cards_by_id(run: dict[str, Any]) -> dict[int, dict[str, Any]]:
 def totals(run: dict[str, Any]) -> dict[str, float]:
     """Сводка прогона одной строкой: суммы по обеим воронкам."""
     acc: dict[str, float] = {}
-    for funnel in run.get("funnels") or []:
+    for funnel in funnels(run):
         for key, _label, _dir in QUALITY_KEYS:
             acc[key] = acc.get(key, 0.0) + float(funnel.get(key) or 0)
         acc["cost_rub"] = acc.get("cost_rub", 0.0) + float(
@@ -107,9 +133,23 @@ def main() -> None:
 
     runs = [(path.stem, load(path)) for path in args.files]
     all_cards = [cards_by_id(run) for _name, run in runs]
+    # Пустой прогон — это не «карточки не совпали», а нечитаемый файл, и
+    # путать эти два случая нельзя: из-за такой путаницы дефект обхода
+    # воронок и жил незамеченным. Называем виновника по имени.
+    empty = [name for (name, _run), cards in zip(runs, all_cards) if not cards]
+    if empty:
+        parser.error(
+            "ни одной карточки не прочитано в: " + ", ".join(empty)
+            + ". Ожидается JSON прогона QC — с ключом deliveries "
+            "(или funnels у прогонов до 01.09)",
+        )
     common = sorted(set.intersection(*(set(c) for c in all_cards)))
     if not common:
-        print("Общих карточек нет — сравнивать нечего.")
+        print(
+            "Карточки прочитаны, но общих нет: прогоны сделаны по разным "
+            "выборкам. Судить по ним нельзя — повторите с тем же --order "
+            "и --limit.",
+        )
         return
 
     names = [name for name, _run in runs]
