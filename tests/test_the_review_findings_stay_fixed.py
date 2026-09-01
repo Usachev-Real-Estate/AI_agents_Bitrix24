@@ -348,13 +348,20 @@ def test_the_numerals_decline():
     assert abandoned_noun(21) == "брошенная"
 
 
-def test_an_unreadable_card_keeps_its_gap_visible_in_one_line():
-    """Карточка ушла в ✅ и унесла обе строки о пробеле с собой."""
+def test_an_unreadable_card_without_a_claim_is_counted_not_printed():
+    """Пробел был виден однострочником ✅; с 31.08 раздела нет.
+
+    Решение агентства: отчёт нужен РОПу для контроля работы брокеров, и
+    карточка без вопросов места в нём не занимает. Пробел «картину клиента
+    не восстановить» остался в счётчике шапки — «⚠️ Неинформативных
+    карточек: N», — а имя карточки из тела ушло. Это принятая цена, и
+    проверяем мы, что карточка при этом не выглядит потерянной.
+    """
     card = {"deal_id": 3, "skipped": False, "state": {
         "temperature": "warm", "verdict": "good", "recoverable": False,
         "next_step": {}, "work_evidence": {
             "proven": True, "reason": "call", "window_days": 3,
         }}}
     body = format_sections([card], {3: "Сделка"}, WEBHOOK)
-    assert "В РАБОТЕ" in body
-    assert "сделку по карточке не подхватить" in body
+    assert "В РАБОТЕ" not in body
+    assert "✅ Без вопросов: 1 в работе — в отчёт не выводятся." in body
