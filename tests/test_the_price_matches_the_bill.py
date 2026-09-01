@@ -23,6 +23,8 @@ _SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+import pytest  # noqa: E402
+
 from llm import estimate_cost  # noqa: E402
 
 # Итоги суток из выгрузки. Только оплаченные вызовы: строки с нулевой
@@ -41,9 +43,11 @@ class _Tariff:
     def __init__(self) -> None:
         from config import Settings
         fields = Settings.model_fields
-        self.llm_price_input = fields["llm_price_input"].default
-        self.llm_price_output = fields["llm_price_output"].default
-        self.llm_price_cache_read = fields["llm_price_cache_read"].default
+        for name in (
+            "llm_price_input", "llm_price_output",
+            "llm_price_cache_read", "llm_price_cache_write",
+        ):
+            setattr(self, name, fields[name].default)
 
 
 def test_the_estimate_reproduces_the_bill_to_the_kopeck():
@@ -67,6 +71,9 @@ def test_the_old_tariff_would_halve_the_bill():
         llm_price_input = 40.0
         llm_price_output = 202.0
         llm_price_cache_read = 4.04
+        # Строки записи в кэш в старом тарифе не было вовсе; на выгрузке
+        # 01.09 это не сказалось — кэша там ноль.
+        llm_price_cache_write = 0.0
 
     cost = estimate_cost(
         {
@@ -102,4 +109,45 @@ def test_reasoning_is_inside_the_output_and_not_billed_twice():
 def test_the_cache_read_is_the_cheap_line():
     """Ради чего вообще стоит чинить кэш: перечитывание вдесятеро дешевле."""
     tariff = _Tariff()
-    assert tariff.llm_price_cache_read < tariff.llm_price_input / 9
+    assert tariff.llm_price_cache_read == pytest.approx(
+        tariff.llm_price_input / 10,
+    )
+
+
+def test_writing_to_the_cache_is_cheaper_still():
+    """Со страницы модели: запись дешевле чтения и в 18 раз дешевле входа.
+
+    Значит кэш окупается с первого повторения, а не с десятого, — это и
+    есть ответ на вопрос «стоит ли вообще возиться».
+    """
+    tariff = _Tariff()
+    assert tariff.llm_price_cache_write < tariff.llm_price_cache_read
+    assert tariff.llm_price_input / tariff.llm_price_cache_write > 15
+
+
+def test_written_tokens_are_part_of_the_input_not_a_surcharge():
+    """Записанное в кэш вычитается из свежего входа, а не добавляется.
+
+    Допущение (своей выгрузки с кэшем пока нет), и держать его надо явно:
+    ошибись тут в другую сторону — и счёт снова разойдётся с провайдером,
+    ровно как расходился при старом тарифе.
+    """
+    tariff = _Tariff()
+    all_fresh = estimate_cost({"input_tokens": 1_000_000}, tariff)
+    all_written = estimate_cost(
+        {"input_tokens": 1_000_000, "cache_write_tokens": 1_000_000}, tariff,
+    )
+    assert all_fresh == pytest.approx(tariff.llm_price_input)
+    assert all_written == pytest.approx(tariff.llm_price_cache_write)
+
+
+def test_a_provider_over_reporting_the_cache_cannot_make_it_negative():
+    """Сумма кэша и записи больше входа — счёт всё равно не уходит в минус."""
+    cost = estimate_cost(
+        {
+            "input_tokens": 1_000, "cached_tokens": 900,
+            "cache_write_tokens": 900, "output_tokens": 0,
+        },
+        _Tariff(),
+    )
+    assert cost > 0
