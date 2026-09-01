@@ -965,6 +965,9 @@ def build_llm_payload(
 
 USAGE_KEYS = (
     "input_tokens", "output_tokens", "cached_tokens", "reasoning_tokens",
+    # Токены, записанные в кэш. У RouterAI своя, самая дешёвая ставка, и
+    # без этого счётчика она не к чему было бы применить.
+    "cache_write_tokens",
 )
 
 
@@ -983,6 +986,9 @@ def extract_usage(response: Any) -> dict[str, int]:
         details = meta.get("input_token_details")
         if isinstance(details, dict):
             usage["cached_tokens"] = _coerce_int(details.get("cache_read"))
+            usage["cache_write_tokens"] = _coerce_int(
+                details.get("cache_creation"),
+            )
         out_details = meta.get("output_token_details")
         if isinstance(out_details, dict):
             usage["reasoning_tokens"] = _coerce_int(out_details.get("reasoning"))

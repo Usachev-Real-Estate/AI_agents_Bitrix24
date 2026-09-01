@@ -541,6 +541,7 @@ def test_usage_read_from_langchain_metadata():
     assert usage == {
         "input_tokens": 1500, "output_tokens": 300, "cached_tokens": 1200,
         "reasoning_tokens": 0,
+        "cache_write_tokens": 0,
     }
 
 
@@ -555,6 +556,7 @@ def test_usage_read_from_openai_style_token_usage():
     assert usage == {
         "input_tokens": 900, "output_tokens": 120, "cached_tokens": 640,
         "reasoning_tokens": 0,
+        "cache_write_tokens": 0,
     }
 
 
@@ -575,6 +577,7 @@ def test_usage_absent_does_not_raise():
     assert extract_usage(_Resp()) == {
         "input_tokens": 0, "output_tokens": 0, "cached_tokens": 0,
         "reasoning_tokens": 0,
+        "cache_write_tokens": 0,
     }
 
 
@@ -620,6 +623,7 @@ def test_run_client_state_sums_token_usage(monkeypatch):
     assert stats["usage"] == {
         "input_tokens": 2000, "output_tokens": 400, "cached_tokens": 1400,
         "reasoning_tokens": 300,
+        "cache_write_tokens": 0,
     }
 
 
