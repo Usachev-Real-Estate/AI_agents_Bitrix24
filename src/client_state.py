@@ -250,6 +250,13 @@ def event_fingerprint(event: dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:FINGERPRINT_LEN]
 
 
+# Сколько отказов модели подряд считать обстоятельством, а не невезением.
+# Одна карточка может не разобраться: сеть моргнула, ответ не пришёл. Пять
+# подряд означают, что дело не в карточках — кончился баланс, отозван ключ,
+# лёг провайдер, — и продолжать бессмысленно.
+LLM_FAILURE_STREAK = 5
+
+
 def compute_content_hash(
     events: list[dict[str, Any]],
     profile: FunnelProfile | None = None,
@@ -1876,6 +1883,9 @@ def run_client_state(
         "transcripts_failed": 0,
         "usage": {key: 0 for key in USAGE_KEYS},
         "llm_calls": 0,
+        # Пусто — прогон дошёл до конца. Непусто — оборвался, и отчёт по
+        # нему отправлять нельзя (см. LLM_FAILURE_STREAK).
+        "aborted": "",
         "cost_rub": 0.0,
         "cost_rub_per_card": 0.0,
         # Сколько карточек судилось без известного возраста этапа. Больше
@@ -1925,6 +1935,19 @@ def run_client_state(
         )
         rop_map, broker_dept_map = {}, {}
 
+    # Подряд идущие отказы модели — не невезение, а обстоятельство. Одна
+    # карточка может не разобраться: сеть моргнула, ответ не пришёл. Пять
+    # подряд означают, что дело не в карточках: кончился баланс, отозван
+    # ключ, лёг провайдер. Прогон 01.09: RouterAI вернул 402 на первой
+    # минуте, и следующие ~265 карточек получили llm_error одна за другой.
+    #
+    # Продолжать в такой ситуации вредно дважды. Во-первых, это сотни
+    # бесполезных запросов. Во-вторых — и это хуже — на выходе получается
+    # отчёт, где почти всё «не прочитано»: РОП увидит короткий список
+    # претензий и решит, что в отделе порядок. Отсутствие данных снова
+    # оказалось бы выдано за результат, и в этот раз четверым людям сразу.
+    consecutive_llm_errors = 0
+
     for deal in deals:
         stage_code = _clean_str(deal.get("STAGE_ID") or deal.get("stage_id"))
         stats["stages"][stage_code or "(без этапа)"] = (
@@ -1952,6 +1975,20 @@ def run_client_state(
         source_key = source_code or "(без источника)"
         stats["sources"][source_key] = stats["sources"].get(source_key, 0) + 1
         stats["results"].append(result)
+        if str(result.get("reason") or "") == "llm_error":
+            consecutive_llm_errors += 1
+            if consecutive_llm_errors >= LLM_FAILURE_STREAK:
+                stats["aborted"] = "llm_unavailable"
+                logger.error(
+                    "%s: модель не отвечает %d раз подряд — прогон остановлен "
+                    "на %d карточке из %d. Отчёт по такому прогону отправлять "
+                    "нельзя: в нём почти всё «не прочитано»",
+                    profile.label, consecutive_llm_errors,
+                    len(stats["results"]), len(deals),
+                )
+                break
+        else:
+            consecutive_llm_errors = 0
         # Считаем и по карточкам из кэша: расшифровка от разбора не зависит.
         counts = result.get("transcripts") or {}
         # Ключ появляется только после успешного чтения карточки — по его
