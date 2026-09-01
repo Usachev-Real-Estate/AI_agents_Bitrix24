@@ -109,6 +109,55 @@ def test_a_finished_run_says_so(analyzed):
     assert run_client_state(SELLER_PROFILE, _deals(5))["aborted"] == ""
 
 
+def _cached(deal_id: int) -> dict[str, Any]:
+    """Карточка из кэша: модель её не звала."""
+    return {
+        "deal_id": deal_id, "skipped": True, "reason": "unchanged",
+        "state": {"temperature": "warm", "verdict": "poor"},
+        "content_hash": "h",
+    }
+
+
+def test_a_cached_card_does_not_reset_the_streak(analyzed):
+    """Серия считается по ответам модели, а не по карточкам.
+
+    Прогон 01.09 21:41: 402 от провайдера, но из кэша приходит девять
+    карточек из десяти, и они стояли между отказами. Пока счётчик
+    сбрасывался на кэше, серия из пяти подряд собиралась только по
+    случайности порядка: провайдер лежит, полсотни карточек не прочитаны,
+    а отчёт уходит РОПу как настоящий.
+
+    Карточка из кэша модель не звала и о её здоровье не говорит ничего.
+    Считать её ответом — это снова выдать отсутствие за результат.
+    """
+    install, calls = analyzed
+    # Отказ, кэш, отказ, кэш… Ни одной пары отказов рядом.
+    install(
+        lambda n, deal_id: _failure(deal_id) if n % 2 else _cached(deal_id),
+    )
+    stats = run_client_state(SELLER_PROFILE, _deals(200))
+    assert stats["aborted"] == "llm_unavailable"
+    # Пять отказов вперемешку с кэшем: девять карточек, потом стоп.
+    assert len(calls) == LLM_FAILURE_STREAK * 2 - 1
+
+
+def test_a_real_answer_still_clears_it(analyzed):
+    """Оборотная сторона: модель ответила — счёт обнулён.
+
+    Иначе отказы, размазанные по всему прогону, копились бы до пяти на
+    здоровом провайдере, и защита начала бы рвать нормальные прогоны.
+    """
+    install, calls = analyzed
+    install(
+        lambda n, deal_id: _cached(deal_id) if n % 3 == 0
+        else _failure(deal_id) if n % 3 == 1
+        else _success(deal_id),
+    )
+    stats = run_client_state(SELLER_PROFILE, _deals(60))
+    assert not stats["aborted"]
+    assert len(calls) == 60
+
+
 def test_parse_failures_are_not_a_streak(analyzed):
     """«Ответ не разобрался» — про карточку, а не про доступность модели."""
     install, calls = analyzed

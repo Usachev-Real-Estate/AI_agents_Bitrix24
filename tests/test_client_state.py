@@ -921,8 +921,12 @@ def test_cost_uses_the_cheap_rate_for_cached_input():
         {"input_tokens": 1_000_000, "output_tokens": 0, "cached_tokens": 1_000_000},
         settings,
     )
-    assert without_cache == pytest.approx(40.0)
-    assert fully_cached == pytest.approx(4.04)
+    # Ставки берём из настроек, а не числом: сверка тарифа со счётом
+    # провайдера — дело test_the_price_matches_the_bill, здесь проверяется
+    # арифметика кэша. Числом эти тесты уже ломались при правке тарифа
+    # 01.09, и ломались там, где к цене отношения не имеют.
+    assert without_cache == pytest.approx(settings.llm_price_input)
+    assert fully_cached == pytest.approx(settings.llm_price_cache_read)
 
 
 def test_output_is_five_times_the_input_rate():
@@ -936,7 +940,11 @@ def test_output_is_five_times_the_input_rate():
     one_million_out = estimate_cost(
         {"input_tokens": 0, "output_tokens": 1_000_000, "cached_tokens": 0}, settings,
     )
-    assert one_million_out == pytest.approx(one_million_in * 5.05)
+    # Ровно впятеро: так у RouterAI на gemini-3.7-flash, и на этом стоит
+    # правило «цитата до 300 символов» — см. test_prompts_bound_the_quote_length.
+    # До 01.09 в конфиге стояли 40 и 202, то есть отношение 5.05; сверка с
+    # выгрузкой дала 84,2198 и 421,099 — отношение ровно 5.
+    assert one_million_out == pytest.approx(one_million_in * 5.0)
 
 
 def test_cost_survives_a_provider_reporting_more_cache_than_input():
@@ -973,8 +981,16 @@ def test_run_reports_cost_in_roubles(monkeypatch):
 
     monkeypatch.setattr(cs, "analyze_deal", _fake)
     stats = cs.run_client_state(cs.BUYER_PROFILE, [{"ID": 1, "STAGE_ID": "C18:NEW"}])
-    # 8500 свежих × 40 + 1500 кэша × 4.04 + 1000 выхода × 202, всё на 1М.
-    expected = (8_500 * 40 + 1_500 * 4.04 + 1_000 * 202) / 1_000_000
+    # 8500 свежих + 1500 из кэша + 1000 выхода, каждое по своей ставке.
+    # Ставки — из настроек: тест про то, что стоимость доезжает до stats,
+    # а не про то, чему равен тариф (это test_the_price_matches_the_bill).
+    from config import get_settings
+    rates = get_settings()
+    expected = (
+        8_500 * rates.llm_price_input
+        + 1_500 * rates.llm_price_cache_read
+        + 1_000 * rates.llm_price_output
+    ) / 1_000_000
     assert stats["cost_rub"] == pytest.approx(round(expected, 2))
     assert stats["cost_rub_per_card"] == pytest.approx(round(expected, 4))
 
