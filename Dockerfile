@@ -21,6 +21,16 @@ RUN pip install --no-cache-dir --no-index --find-links=/wheels -r requirements.t
     && rm -rf /wheels
 
 COPY src/ ./src/
+# Крон запускает QC-агента как scripts/run_client_state_qc_pilot.py — это
+# единственный job, который живёт не в src/. Без этой строки контейнер его
+# не находит, и отчёт РОПам не уходит вовсе: «can't open file». Проверить
+# это на ручных прогонах нельзя — они идут через .venv на хосте, где
+# scripts/ есть всегда.
+#
+# Копией, а не монтированием тома: образ должен быть самодостаточным.
+# Смонтированный scripts/ разъезжается с кодом внутри образа — ровно тот
+# класс расхождения, из-за которого образ и пересобирают.
+COPY scripts/ ./scripts/
 
 # Run as non-root user
 RUN useradd -m auditor && chown -R auditor:auditor /app && \
