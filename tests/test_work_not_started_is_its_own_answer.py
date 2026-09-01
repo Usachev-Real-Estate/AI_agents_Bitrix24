@@ -71,13 +71,19 @@ def test_it_still_says_whose_traces_are_missing():
     assert "от брокера или РОПа" in card
 
 
-def test_they_get_their_own_section_with_the_full_write_up():
-    """С 31.08 разбор печатается здесь: в тревоге этих карточек больше нет.
+def test_they_get_their_own_section_as_a_list():
+    """С 31.08 раздел свой, с 01.09 — списком, строкой на карточку.
 
     Раньше 🆕 был свёрнутой строкой под тревогой, и прогон 14:01 показал
     предел: у продавцов 🚨 и 🆕 совпали шестью карточками из шести —
     тревога печатала разбор, а список ниже повторял её состав слово в
     слово. «Не дублировать, оставить что работу не начинали».
+
+    Полный разбор здесь читать нечего: работы не было, и девять строк про
+    температуру, ситуацию и совет говорят одно — «начните работать».
+    Прогон 01.09 14:30 показал цену такого разбора: 93 карточки у одного
+    РОПа съедали весь потолок, и 🔧 НЕДОРАБОТКА оставался без единого
+    разбора. Строка на карточку стоит примерно в девять раз дешевле.
     """
     body = format_sections(
         [_card(16570, GAP_NO_TRACE), _card(16550, GAP_NO_TRACE)],
@@ -86,9 +92,29 @@ def test_they_get_their_own_section_with_the_full_write_up():
     )
     assert "🆕 РАБОТУ НЕ НАЧИНАЛИ — 2" in body
     assert "разбор выше" not in body
-    assert body.count("Работу по карточке не начинали") == 2
+    # Строка на карточку: номер, название, ссылка. Разбора здесь нет.
+    assert "Ситуация:" not in body
+    for deal_id in (16570, 16550):
+        assert f"#{deal_id} {TITLES[deal_id]}" in body
+        assert f"/crm/deal/details/{deal_id}/" in body
     # И из тревоги они ушли целиком.
     assert "🚨 ТЕРЯЕМ КЛИЕНТА — 0" in body
+
+
+def test_the_list_is_never_truncated():
+    """Перепись обрезать нельзя: по ней РОП раздаёт карточки брокерам.
+
+    Потолок режет разборы, а не список. Обрезанный список бесполезен —
+    половины отдела в нём просто нет, и найти её негде.
+    """
+    rows = [_card(20000 + i, GAP_NO_TRACE) for i in range(60)]
+    body = format_sections(
+        rows, {r["deal_id"]: "Сделка" for r in rows}, WEBHOOK,
+    )
+    assert "🆕 РАБОТУ НЕ НАЧИНАЛИ — 60" in body
+    assert body.count("/crm/deal/details/") == 60
+    # И в остаток раздел не попадает никогда: он напечатан целиком.
+    assert "🆕 не начинали" not in body
 
 
 def test_the_empty_alarm_does_not_claim_more_than_it_saw():
