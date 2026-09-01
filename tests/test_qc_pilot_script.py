@@ -123,6 +123,29 @@ def _stats(label: str, **over: Any) -> dict[str, Any]:
     return stats
 
 
+def test_the_run_says_whether_it_fills_the_cache(pilot):
+    """Два выключателя названы похоже и работают врозь.
+
+    Флаг `--dry-run` отключает только отправку; запись разбора в кэш висит
+    на переменной окружения DRY_RUN. Имя флага обещает «ничего не делаю
+    по-настоящему», и человек, запустивший прогон на 676 карточек, не знает,
+    сохранится ли то, за что он заплатил, — а это ~310 ₽ разницы.
+
+    Связать их было бы хуже: тогда --dry-run перестал бы наполнять кэш, и
+    следующий боевой прогон разобрал бы всё заново. Поэтому не связываем,
+    а проговариваем.
+    """
+    assert pilot.describe_run_mode(cache_off=False, sending_off=True) == (
+        "Режим прогона: разбор пишется в кэш, отправка выключена"
+    )
+    assert "НЕ пишется" in pilot.describe_run_mode(
+        cache_off=True, sending_off=True,
+    )
+    assert "отправка включена" in pilot.describe_run_mode(
+        cache_off=False, sending_off=False,
+    )
+
+
 def test_report_covers_both_funnels_and_sums_the_cost(pilot):
     # Карточке нужен вопрос: с 31.08 в тело отчёта попадают только такие.
     buyers = _stats("Покупатели")

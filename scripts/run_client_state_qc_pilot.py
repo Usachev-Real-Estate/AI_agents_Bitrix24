@@ -62,6 +62,25 @@ MSK = ZoneInfo("Europe/Moscow")
 OUT_PATH = Path("data/client_state_qc_pilot.json")
 
 
+def describe_run_mode(cache_off: bool, sending_off: bool) -> str:
+    """Что этот прогон делает и чего не делает — одной строкой.
+
+    Два выключателя называются похоже и работают врозь: флаг `--dry-run`
+    отключает только отправку, а запись разбора в кэш висит на переменной
+    окружения DRY_RUN. Имя флага при этом обещает «ничего не делаю
+    по-настоящему» — и человек, запустивший прогон, не знает, сохранится ли
+    сотня разборов, за которые он заплатил.
+
+    Связать их было бы хуже, а не лучше: тогда `--dry-run` перестал бы
+    наполнять кэш, и следующий за ним боевой прогон разобрал бы всё заново.
+    На выборке из 676 карточек это ~310 ₽ на ровном месте. Поэтому не
+    связываем, а проговариваем.
+    """
+    cache = "кэш НЕ пишется (DRY_RUN=true)" if cache_off else "разбор пишется в кэш"
+    sending = "отправка выключена" if sending_off else "отправка включена"
+    return f"Режим прогона: {cache}, {sending}"
+
+
 def load_rop_directory() -> dict[int, Rop]:
     """Справочник РОПов из портала по списку фамилий агентства.
 
@@ -275,6 +294,13 @@ def main() -> None:
     settings = get_settings()
     setup_logging(settings.log_level)
     init_db()
+
+    mode = describe_run_mode(
+        cache_off=settings.dry_run,
+        sending_off=settings.dry_run or args.dry_run,
+    )
+    logger.info("%s", mode)
+    print(mode)
 
     chat_id = args.chat_id or settings.report_chat_id
     # Один запрос на прогон: «источник 26» РОПу ничего не говорит.
