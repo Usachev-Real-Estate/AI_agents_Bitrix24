@@ -1664,8 +1664,12 @@ def analyze_deal(
             # и отличить их можно единственным честным способом — повторить
             # в обычном режиме и посмотреть.
             tier = (settings.llm_service_tier or "").strip()
-            model = make_llm(settings, service_tier=tier)
-            spare = make_llm(settings) if tier else None
+            pinned = (settings.llm_provider or "").strip()
+            model = make_llm(settings, service_tier=tier, provider=pinned)
+            # Запасной клиент — тот же провайдер, обычный тариф. Провайдер
+            # тот же намеренно: у него уже прогрет префикс, и терять кэш
+            # из-за отказа по мощностям было бы обидно вдвойне.
+            spare = make_llm(settings, provider=pinned) if tier else None
         usage: dict[str, int] = {key: 0 for key in USAGE_KEYS}
         envelope["usage"] = usage
 

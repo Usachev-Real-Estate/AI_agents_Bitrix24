@@ -34,7 +34,7 @@ if str(_SRC) not in sys.path:
 import client_state as cs  # noqa: E402
 from client_state import LLM_FAILURE_STREAK, run_client_state  # noqa: E402
 from funnel_profiles import SELLER_PROFILE  # noqa: E402
-from llm import make_llm  # noqa: E402
+from llm import make_llm, provider_body  # noqa: E402
 
 
 class _Tariff:
@@ -44,12 +44,66 @@ class _Tariff:
     llm_max_tokens = 0
     llm_reasoning_effort = ""
     llm_service_tier = ""
+    llm_provider = ""
 
 
 def test_the_tier_reaches_the_client_only_when_asked():
     """Пусто — параметр не отправляем: это дефолт провайдера, а не «выключить»."""
     assert make_llm(_Tariff()).service_tier is None
     assert make_llm(_Tariff(), service_tier="flex").service_tier == "flex"
+
+
+# ── Закреплённый провайдер ─────────────────────────────────────────────
+def test_pinning_sends_the_provider_block():
+    """Закрепляем ОДНОГО провайдера и запрещаем откат.
+
+    Разрешённый откат вернул бы распределение нагрузки между провайдерами
+    — ровно то, из-за чего неявный кэш и не срабатывал.
+    """
+    assert provider_body("google-ai-studio") == {
+        "provider": {"only": ["google-ai-studio"], "allow_fallbacks": False},
+    }
+
+
+def test_the_tier_is_a_suffix_of_the_provider_tag():
+    """У RouterAI тариф — часть тега эндпоинта, а не отдельное поле."""
+    assert provider_body("google-ai-studio", "flex") == {
+        "provider": {
+            "only": ["google-ai-studio/flex"], "allow_fallbacks": False,
+        },
+    }
+
+
+def test_nothing_is_sent_when_nothing_is_pinned():
+    assert provider_body("") == {}
+    assert provider_body("", "flex") == {}
+
+
+def test_the_tier_is_not_said_twice():
+    """Закреплён провайдер — service_tier полем не уходит.
+
+    Два способа сказать одно и то же в одном запросе — это способ однажды
+    сказать разное.
+    """
+    client = make_llm(_Tariff(), service_tier="flex", provider="google-ai-studio")
+    assert client.service_tier is None
+    assert client.extra_body == {
+        "provider": {
+            "only": ["google-ai-studio/flex"], "allow_fallbacks": False,
+        },
+    }
+
+
+def test_the_spare_client_keeps_the_same_provider():
+    """Запасной — тот же провайдер, обычный тариф: префикс уже прогрет.
+
+    Уйди откат к другому провайдеру — потеряли бы кэш ровно там, где и так
+    платим полную цену.
+    """
+    spare = make_llm(_Tariff(), provider="google-ai-studio")
+    assert spare.extra_body == {
+        "provider": {"only": ["google-ai-studio"], "allow_fallbacks": False},
+    }
 
 
 def _deals(count: int) -> list[dict[str, Any]]:
@@ -65,7 +119,7 @@ def two_tiers(monkeypatch):
     calls: list[str] = []
 
     def _install(cheap_fails: bool, plain_fails: bool) -> None:
-        def _fake_make(settings, *, service_tier: str = ""):
+        def _fake_make(settings, *, service_tier: str = "", provider: str = ""):
             return f"cheap:{service_tier}" if service_tier else "plain"
 
         def _fake_analyze(deal, prev, new_events, all_events, client,
@@ -96,6 +150,7 @@ def two_tiers(monkeypatch):
 def _run(monkeypatch, tier: str, count: int = 3) -> dict[str, Any]:
     settings = cs.get_settings()
     monkeypatch.setattr(settings, "llm_service_tier", tier, raising=False)
+    monkeypatch.setattr(settings, "llm_provider", "", raising=False)
     # force: иначе карточки придут из кэша прошлых прогонов и до модели
     # не дойдут вовсе — а тест ровно про то, кто из клиентов ответил.
     return run_client_state(

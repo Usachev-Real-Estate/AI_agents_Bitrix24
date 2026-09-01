@@ -7,16 +7,44 @@ from langchain_openai import ChatOpenAI
 from config import Settings
 
 
-def make_llm(settings: Settings, *, service_tier: str = "") -> ChatOpenAI:
+def provider_body(provider: str, service_tier: str = "") -> dict[str, object]:
+    """Тело `provider` для RouterAI: закрепить провайдера и тариф.
+
+    Тариф у RouterAI — суффикс тега эндпоинта, а не отдельное поле:
+    `google-ai-studio/flex` стоит ровно половину `google-ai-studio`. Оба
+    указывают на ОДНОГО провайдера, поэтому неявный кэш префикса греется и
+    переживает откат с дешёвого тарифа на обычный.
+
+    allow_fallbacks=False намеренно: разрешённый откат вернул бы нас к
+    распределению нагрузки между провайдерами, ради отмены которого всё и
+    делается. Цена отказа — ошибка на карточке, и её ловит повтор в
+    analyze_deal.
+    """
+    if not provider:
+        return {}
+    tag = f"{provider}/{service_tier}" if service_tier else provider
+    return {"provider": {"only": [tag], "allow_fallbacks": False}}
+
+
+def make_llm(
+    settings: Settings,
+    *,
+    service_tier: str = "",
+    provider: str = "",
+) -> ChatOpenAI:
     """Build ChatOpenAI from Settings (base_url + model are provider-specific).
 
-    max_tokens, reasoning_effort и service_tier передаются, только если
-    заданы: пустое значение означает «оставить дефолт провайдера», а не
+    max_tokens, reasoning_effort, service_tier и provider передаются, только
+    если заданы: пустое значение означает «оставить дефолт провайдера», а не
     «выключить».
 
-    service_tier приходит аргументом, а не из настроек, ровно потому, что
-    клиентов нужно два: основной в выбранном режиме и запасной в обычном
-    (см. analyze_deal).
+    service_tier и provider приходят аргументами, а не из настроек, ровно
+    потому, что клиентов нужно два: основной в дешёвом режиме и запасной в
+    обычном (см. analyze_deal).
+
+    Когда провайдер закреплён, тариф уходит суффиксом его тега, а поле
+    service_tier не отправляется вовсе: два способа сказать одно и то же в
+    одном запросе — это способ однажды сказать разное.
     """
     kwargs: dict[str, object] = {
         "api_key": settings.llm_api_key,
@@ -28,7 +56,10 @@ def make_llm(settings: Settings, *, service_tier: str = "") -> ChatOpenAI:
         kwargs["max_tokens"] = settings.llm_max_tokens
     if settings.llm_reasoning_effort:
         kwargs["reasoning_effort"] = settings.llm_reasoning_effort
-    if service_tier:
+    body = provider_body(provider, service_tier)
+    if body:
+        kwargs["extra_body"] = body
+    elif service_tier:
         kwargs["service_tier"] = service_tier
     return ChatOpenAI(**kwargs)
 
