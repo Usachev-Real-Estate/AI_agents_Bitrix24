@@ -48,3 +48,24 @@ def no_bitrix_network(monkeypatch: pytest.MonkeyPatch) -> None:
         raise RuntimeError(f"Bitrix REST disabled in tests: {method}")
 
     monkeypatch.setattr(tools, "_bx_get_all_sync", _blocked)
+
+
+@pytest.fixture
+def analytics_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """Изолированный файл витрины на тест.
+
+    Путь к витрине читается из настроек, поэтому подменяем переменную
+    окружения и сбрасываем кеш Settings — иначе тесты писали бы в боевую
+    data/analytics.db.
+    """
+    from config import get_settings
+
+    db_path = tmp_path / "analytics.db"
+    monkeypatch.setenv("ANALYTICS_DB_PATH", str(db_path))
+    get_settings.cache_clear()
+
+    from analytics.schema import init_analytics_db
+
+    init_analytics_db()
+    yield db_path
+    get_settings.cache_clear()

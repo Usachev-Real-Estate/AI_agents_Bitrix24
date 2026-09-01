@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}Сделки{% endblock %}
+
+{% block content %}
+{% if not funnel %}
+  <div class="card"><div class="empty">В витрине нет ни одной воронки.
+    Запустите ETL: <code>python src/analytics/etl.py --backfill</code></div></div>
+{% else %}
+<h1 class="section-title">Воронка сделок · {{ period.label }}</h1>
+
+<div class="grid grid-kpi">
+  {{ ui.tile('Сделок создано', funnel.cohort_size | int_ru) }}
+  {{ ui.tile('Выиграно', wins.won | int_ru) }}
+  {{ ui.tile('Доля выигранных', wins.win_rate | pct,
+             hint='из ' ~ (wins.closed | int_ru) ~ ' закрытых за период') }}
+  {{ ui.tile('Цикл сделки', cycle.median | days,
+             hint='медиана; p75 ' ~ (cycle.p75 | days)) }}
+  {{ ui.tile('Выиграно денег', wins.won_amount | money(short=True)) }}
+  {{ ui.tile('Средний чек', wins.avg_check | money(short=True)) }}
+</div>
+
+<div class="grid grid-2 mt-16">
+  <div class="card">
+    <div class="card-head">
+      <div>
+        <h2>Когортная воронка</h2>
+        <p class="card-sub">Сколько сделок периода <em>когда-либо</em> дошли до стадии</p>
+      </div>
+    </div>
+    <div data-chart="funnel" data-source="deal-funnel-data"></div>
+    <script type="application/json" id="deal-funnel-data">{{ charts.funnel | tojson }}</script>
+    {{ ui.definition('Это НЕ «сколько стоит на стадии сейчас». Сделка, прошедшая
+      показ и ушедшая дальше, здесь учтена на показе — иначе воронка показывала бы
+      загрузку, а не проходимость. Текущий срез — в колонке «стоит сейчас».') }}
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div>
+        <h2>Стадии: числа</h2>
+        <p class="card-sub">Срез и когорта рядом, чтобы их не путать</p>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Стадия</th>
+            <th class="num">Дошли</th>
+            <th class="num">Доля когорты</th>
+            <th class="num">Из пред. стадии</th>
+            <th class="num">Стоит сейчас</th>
+            <th class="num">Сумма открытых</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in funnel.stages %}
+          <tr>
+            <td>
+              <a href="{{ base_path }}/table?{{ qs(request, stage=row.stage_id, all_time='1') }}"
+                 title="Показать карточки этой стадии">{{ row.name }}</a>
+              {% if row.semantic == 'won' %}<span class="badge badge-won">успех</span>
+              {% elif row.semantic == 'lost' %}<span class="badge badge-lost">провал</span>{% endif %}
+            </td>
+            <td class="num">{{ row.reached | int_ru }}</td>
+            <td class="num">{{ row.conversion_from_start | pct }}</td>
+            <td class="num muted">{{ row.conversion_step | pct if row.conversion_step is not none else '—' }}</td>
+            <td class="num">{{ row.count_now | int_ru }}</td>
+            <td class="num">{{ row.amount_open | money }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="grid grid-2 mt-16">
+  <div class="card">
+    <div class="card-head">
+      <div>
+        <h2>Время на стадии</h2>
+        <p class="card-sub">Медиана по интервалам, завершённым за период</p>
+      </div>
+    </div>
+    <div data-chart="bars" data-source="durations-data"></div>
+    <script type="application/json" id="durations-data">{{ charts.durations | tojson }}</script>
+    {{ ui.definition('Медиана, а не среднее: одна зависшая на год сделка сдвигает
+      среднее так, что им нельзя пользоваться. Наведите на полосу — увидите p75
+      и сколько карточек стоит на стадии прямо сейчас.') }}
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div>
+        <h2>Взвешенный прогноз</h2>
+        <p class="card-sub">Сумма открытых сделок × историческая вероятность стадии</p>
+      </div>
+    </div>
+    <div class="tile-label">Ожидаемая выручка по открытым сделкам</div>
+    <div class="tile-value hero">{{ forecast.expected | money(short=True) }}</div>
+    {{ ui.coverage(forecast.coverage, (forecast.open_deals * forecast.coverage / 100) | round | int,
+                   forecast.open_deals, 'открытых сделок') }}
+    <div class="table-wrap mt-14">
+      <table>
+        <thead>
+          <tr><th>Стадия</th><th class="num">Сделок</th><th class="num">Сумма</th>
+            <th class="num">Вероятность</th><th class="num">Ожидание</th></tr>
+        </thead>
+        <tbody>
+          {% for row in forecast.by_stage %}
+          <tr>
+            <td>{{ row.name }}</td>
+            <td class="num">{{ row.deals | int_ru }}</td>
+            <td class="num">{{ row.amount | money }}</td>
+            <td class="num">{{ row.probability | pct }}</td>
+            <td class="num">{{ row.expected | money }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {{ ui.definition('Вероятность взята из собственных закрытых сделок воронки за
+      всё окно витрины: доля выигранных среди тех, кто доходил до этой стадии.
+      Проценты, проставленные в карточке воронки Bitrix вручную, не используются —
+      их ставят один раз при настройке и почти никогда не пересматривают.') }}
+  </div>
+</div>
+
+<div class="card mt-16">
+  <div class="card-head">
+    <div>
+      <h2>Деньги воронки</h2>
+      <p class="card-sub">Каждая сумма — с покрытием поля</p>
+    </div>
+  </div>
+  <div class="grid grid-kpi">
+    <div class="card">
+      <div class="tile-label">Сумма в работе</div>
+      <div class="tile-value">{{ money.open_amount | money(short=True) }}</div>
+      {{ ui.coverage(money.open_coverage, money.open_filled, money.open_deals, 'открытых') }}
+    </div>
+    <div class="card">
+      <div class="tile-label">Выиграно за период</div>
+      <div class="tile-value">{{ money.won_amount | money(short=True) }}</div>
+      {{ ui.coverage(money.won_coverage, money.won_filled, money.won_deals, 'выигранных') }}
+    </div>
+    <div class="card">
+      <div class="tile-label">Средний чек</div>
+      <div class="tile-value">{{ money.avg_check | money(short=True) }}</div>
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

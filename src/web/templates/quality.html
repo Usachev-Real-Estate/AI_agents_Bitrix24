@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}Качество данных{% endblock %}
+
+{% block content %}
+<h1 class="section-title">Качество данных и состояние загрузки</h1>
+
+<div class="notice">
+  <span>ℹ</span>
+  <span>Эта страница ставит границу доверия к остальным. Если у трети сделок пуста
+    сумма, «сумма в работе» на других страницах — не цифра, а треть цифры.</span>
+</div>
+
+<div class="grid grid-kpi">
+  {% set scope = (pipelines | selectattr('category_id', 'equalto', category_id)
+                  | map(attribute='name') | first) if category_id is not none else 'все воронки' %}
+  {{ ui.tile('Сделок в витрине', quality.deals.total | int_ru, hint=scope) }}
+  {{ ui.tile('Лидов в витрине', quality.leads.total | int_ru, hint='воронка лидов') }}
+  {{ ui.tile('Событий движения', status.counts.stage_events | int_ru) }}
+  {{ ui.tile('Данные загружены', (status.lag_minutes | int_ru ~ ' мин назад')
+             if status.lag_minutes is not none else 'никогда',
+             hint='окно витрины с ' ~ (status.window_since or '—')) }}
+</div>
+
+<div class="grid grid-2 mt-16">
+  <div class="card">
+    <div class="card-head"><div><h2>Заполненность полей сделок</h2></div></div>
+    <div class="stack">
+      <div>
+        <div class="tile-label">Сумма («Комиссия»)</div>
+        {{ ui.coverage(quality.deals.amount_coverage,
+                       quality.deals.total - quality.deals.no_amount,
+                       quality.deals.total) }}
+      </div>
+      <div>
+        <div class="tile-label">Источник</div>
+        {{ ui.coverage(quality.deals.source_coverage,
+                       quality.deals.total - quality.deals.no_source,
+                       quality.deals.total) }}
+      </div>
+    </div>
+    <div class="table-wrap mt-16">
+      <table>
+        <tbody>
+          <tr><td>Сделок без суммы</td>
+            <td class="num {{ 'delta-down' if quality.deals.no_amount else '' }}">
+              {{ quality.deals.no_amount | int_ru }}</td></tr>
+          <tr><td>Выигранных сделок с пустой суммой</td>
+            <td class="num {{ 'delta-down' if quality.deals.won_no_amount else '' }}">
+              {{ quality.deals.won_no_amount | int_ru }}</td></tr>
+          <tr><td>Сделок без источника</td>
+            <td class="num">{{ quality.deals.no_source | int_ru }}</td></tr>
+          <tr><td>Сделок без ответственного</td>
+            <td class="num">{{ quality.deals.no_assignee | int_ru }}</td></tr>
+          <tr><td>Закрытых без даты закрытия</td>
+            <td class="num">{{ quality.deals.closed_no_date | int_ru }}</td></tr>
+          <tr><td>Сделок на неизвестной стадии</td>
+            <td class="num">{{ quality.orphan_stage_deals | int_ru }}</td></tr>
+          <tr><td>Лидов без источника</td>
+            <td class="num">{{ quality.leads.no_source | int_ru }}</td></tr>
+          <tr><td title="Почти всегда сбитые часы на портале или ошибка таймзоны">
+              Событий движения с датой из будущего</td>
+            <td class="num {{ 'delta-down' if quality.future_stage_events else '' }}">
+              {{ quality.future_stage_events | int_ru }}</td></tr>
+        </tbody>
+      </table>
+    </div>
+    {{ ui.definition('«Выигранная сделка с пустой суммой» — самая дорогая ошибка в
+      этом списке: такая сделка занижает и выручку, и средний чек, и вероятность
+      стадии в прогнозе.') }}
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div>
+        <h2>Сходимость с Bitrix</h2>
+        <p class="card-sub">Сверьте с числом сделок в интерфейсе воронки</p>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Воронка</th><th class="num">Всего</th><th class="num">Открытых</th>
+            <th class="num">Сумма открытых</th></tr>
+        </thead>
+        <tbody>
+          {% for row in pipeline_counts %}
+          <tr>
+            <td>{{ row.name }}</td>
+            <td class="num">{{ row.deals | int_ru }}</td>
+            <td class="num">{{ row.open_deals | int_ru }}</td>
+            <td class="num">{{ row.open_amount | money }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {{ ui.definition('Витрина хранит сделки, созданные с ' ~ (status.window_since or '—') ~
+      '. Более старые карточки в Bitrix есть, а здесь их нет — расхождение на эту
+      величину ожидаемо и ошибкой не является. Числа выше — по всем воронкам,
+      независимо от выбранной в фильтре.') }}
+  </div>
+</div>
+
+<h2 class="section-title">Последние прогоны загрузки</h2>
+<div class="card">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Режим</th><th>Начат</th><th>Завершён</th><th>Статус</th>
+          <th class="num">Записей</th><th>Ошибка</th></tr>
+      </thead>
+      <tbody>
+        {% for run in status.runs %}
+        <tr>
+          <td>{{ run.kind }}</td>
+          <td class="nowrap muted">{{ run.started_at | datetime_ru }}</td>
+          <td class="nowrap muted">{{ run.finished_at | datetime_ru }}</td>
+          <td>
+            {% if run.status == 'ok' %}<span class="badge badge-won">ок</span>
+            {% elif run.status == 'error' %}<span class="badge badge-lost">ошибка</span>
+            {% else %}<span class="badge">идёт</span>{% endif %}
+          </td>
+          <td class="num">{{ run.rows_upserted | int_ru }}</td>
+          <td class="ellipsis muted" title="{{ run.error }}">{{ run.error or '—' }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="empty">ETL ещё не запускался</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

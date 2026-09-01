@@ -65,5 +65,32 @@ lead-quality:
 import-kc-owners:
 	$(PYTHON) scripts/import_kc_owners.py
 
+# --- Аналитическая витрина и дашборд ---
+
+etl:
+	$(PYTHON) src/analytics/etl.py --incremental
+
+etl-full:
+	$(PYTHON) src/analytics/etl.py --full
+
+etl-backfill:
+	$(PYTHON) src/analytics/etl.py --backfill
+
+etl-probe:
+	$(PYTHON) src/analytics/etl.py --probe
+
+dashboard:
+	$(PYTHON) src/web/server.py
+
+dashboard-adduser:
+	@if [ -z "$(USER_LOGIN)" ]; then \
+		echo "Error: USER_LOGIN is required. Usage: make dashboard-adduser USER_LOGIN=ivanov"; \
+		exit 1; \
+	fi
+	$(PYTHON) src/web/manage.py adduser $(USER_LOGIN)
+
+dashboard-secret:
+	$(PYTHON) src/web/manage.py gen-secret
+
 docker-build:
 	docker build -t b24-ai-auditor:latest .

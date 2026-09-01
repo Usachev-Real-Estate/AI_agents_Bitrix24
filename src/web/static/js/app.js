@@ -1,0 +1,68 @@
+/* Подключение графиков и фильтров.
+ *
+ * Данные приходят островками <script type="application/json">: браузер их не
+ * исполняет, поэтому строгий CSP обходится без 'unsafe-inline', а страница
+ * не мигает спиннерами — цифры уже отрисованы сервером в таблицах рядом.
+ */
+(function () {
+  'use strict';
+
+  function readData(id) {
+    var node = document.getElementById(id);
+    if (!node) return null;
+    try {
+      return JSON.parse(node.textContent);
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function renderAll() {
+    var hosts = document.querySelectorAll('[data-chart]');
+    Array.prototype.forEach.call(hosts, function (host) {
+      var kind = host.getAttribute('data-chart');
+      var data = readData(host.getAttribute('data-source'));
+      if (!data || !window.Charts[kind]) return;
+      window.Charts[kind](host, data);
+    });
+  }
+
+  function debounce(fn, wait) {
+    var timer = null;
+    return function () {
+      clearTimeout(timer);
+      timer = setTimeout(fn, wait);
+    };
+  }
+
+  /* Форма фильтров отправляется по изменению любого поля: отдельная кнопка
+   * «Применить» на дашборде лишний клик — период меняют постоянно. */
+  function wireFilters() {
+    var form = document.querySelector('[data-autosubmit]');
+    if (!form) return;
+    Array.prototype.forEach.call(form.querySelectorAll('select, input[type="date"]'),
+      function (field) {
+        field.addEventListener('change', function () { form.submit(); });
+      });
+  }
+
+  /* Ширина полосы покрытия ставится из JS, а не атрибутом style: строгий CSP
+   * (style-src 'self') запрещает инлайновые стили в разметке, а ослаблять его
+   * ради одной полосы означало бы открыть подмену интерфейса через внедрённую
+   * разметку. На изменение свойств через CSSOM политика не распространяется. */
+  function applyCoverageWidths() {
+    var bars = document.querySelectorAll('.coverage-fill[data-width]');
+    Array.prototype.forEach.call(bars, function (bar) {
+      var value = parseFloat(bar.getAttribute('data-width'));
+      bar.style.width = (isFinite(value) ? Math.max(0, Math.min(100, value)) : 0) + '%';
+    });
+  }
+
+  document.addEventListener('DOMContentLoaded', function () {
+    applyCoverageWidths();
+    renderAll();
+    wireFilters();
+    // Раскладка подписей зависит от ширины, поэтому перерисовываем целиком.
+    window.addEventListener('resize', debounce(renderAll, 180));
+  });
+})();

@@ -1,0 +1,37 @@
+{# Повторно используемые куски интерфейса. #}
+
+{% macro tile(label, value, delta=None, hint='', hero=False) %}
+<div class="card">
+  <div class="tile-label">{{ label }}</div>
+  <div class="tile-value {{ 'hero' if hero else '' }}">{{ value }}</div>
+  {% if delta is not none %}
+    <div class="tile-delta">
+      <span class="{{ 'delta-up' if delta > 0 else ('delta-down' if delta < 0 else '') }}">
+        {{ delta | pct(sign=True) }}</span>
+      <span>к прошлому периоду</span>
+    </div>
+  {% elif hint %}
+    <div class="tile-delta">{{ hint }}</div>
+  {% endif %}
+</div>
+{% endmacro %}
+
+{#
+  Покрытие рядом с суммой — обязательная часть денежной метрики, а не
+  украшение: поле «Комиссия» заполнено не везде, и сумма без указания доли
+  заполненных сделок вводит в заблуждение ровно там, где решается вопрос
+  о деньгах.
+#}
+{% macro coverage(percent, filled, total, what='сделок') %}
+<div class="coverage" title="Сумма считается только по заполненным карточкам">
+  <span class="coverage-track">
+    <span class="coverage-fill {{ 'bad' if percent < 50 else ('warn' if percent < 80 else '') }}"
+          data-width="{{ percent }}"></span>
+  </span>
+  <span>заполнено {{ percent | pct }} {{ what }} ({{ filled | int_ru }} из {{ total | int_ru }})</span>
+</div>
+{% endmacro %}
+
+{% macro definition(text) %}
+<p class="definition">{{ text }}</p>
+{% endmacro %}
