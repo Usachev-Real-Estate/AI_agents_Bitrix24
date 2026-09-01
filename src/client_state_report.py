@@ -692,6 +692,20 @@ def format_stage_mix(stages: dict[str, int]) -> str:
     )
 
 
+# Сколько карточек печатается разбором в одно сообщение. Решение агентства
+# от 01.09. Отчёт задумывался на десять карточек, а с переходом на «весь
+# отдел РОПа» уперся в объём: у Кретова 367 карточек, из них с вопросами
+# около 330 — это 71 сообщение подряд в полдень. Семьдесят одно сообщение
+# не читают, их выключают.
+#
+# Режется СООБЩЕНИЕ, а не аудит: разбираются по-прежнему все карточки
+# отдела, и полный разбор остаётся в JSON прогона. Разделы идут по
+# строгости (🚨 → 🕸 → 🆕 → 🔧 → 🔔), поэтому в лимит попадает худшее.
+# Остаток называется числом по разделам — иначе это снова было бы
+# отсутствие, выданное за результат.
+CARDS_PER_MESSAGE = 20
+
+
 # ── Два раздела: клиент уходит / брокер не дорабатывает ────────────────
 # Разрывы, которые и означают «с клиентом не ведётся работа». Определение
 # агентства от 28.08 дословно: «Теряем клиента — это когда с ним не ведётся
@@ -719,6 +733,35 @@ def format_stage_mix(stages: dict[str, int]) -> str:
 #   разрывы-напоминания — до этого правила они вообще не доходят: решение
 #                         агентства ставит напоминание раньше квалификации.
 LOSING_GAPS = frozenset({GAP_NO_TRACE, GAP_ABANDONED})
+
+
+# Короткое имя раздела для строки остатка: капслок посреди фразы читается
+# как крик, а «напомнить брокеру 8» — как обрубок. Держим списком, а не
+# выводим из заголовка: вывод по строке ломается на первой же правке
+# заголовка, и молча.
+SHORT_SECTION: dict[str, str] = {
+    "losing": "🚨 теряем",
+    "abandoned": "🕸 брошены",
+    "not_started": "🆕 не начинали",
+    "neglected": "🔧 недоработка",
+    "reminders": "🔔 напоминание",
+}
+
+
+def cards_genitive(count: int) -> str:
+    """«1 карточка» / «2 карточки» / «5 карточек» — для строки остатка.
+
+    Отдельно от cards_noun: там дательный («по 3 карточкам»), здесь
+    именительный со счётом. Один падеж на все случаи не натягивается.
+    """
+    if count % 100 in range(11, 15):
+        return "карточек"
+    tail = count % 10
+    if tail == 1:
+        return "карточка"
+    if tail in (2, 3, 4):
+        return "карточки"
+    return "карточек"
 
 
 def _is_losing_client(state: dict[str, Any]) -> bool:
@@ -905,7 +948,13 @@ def format_sections(
         f" Не прочитано карточек: {len(unread)}." if unread else ""
     )
 
-    def _block(header: str, rows: list[dict[str, Any]], empty: str) -> None:
+    # Сколько полных разборов ещё можно напечатать, и что не поместилось.
+    budget = [CARDS_PER_MESSAGE]
+    overflow: list[tuple[str, int]] = []
+
+    def _block(
+        header: str, rows: list[dict[str, Any]], empty: str, key: str = "",
+    ) -> None:
         if rows and all(int(r.get("deal_id") or 0) in printed for r in rows):
             # Весь раздел уже напечатан выше. Раньше он выходил столбиком
             # строк «— см. выше»: заголовок с числом, а под ним ни одного
@@ -925,9 +974,15 @@ def format_sections(
             blocks.append(empty)
             blocks.append("")
             return
+        left = 0
         for row in rows:
             deal_id = int(row.get("deal_id") or 0)
             title = titles.get(deal_id, "")
+            if deal_id not in printed and budget[0] <= 0:
+                # Лимит выбран. Карточку не печатаем, но и не теряем: её
+                # считает строка остатка ниже, а разбор лежит в JSON.
+                left += 1
+                continue
             if deal_id in printed:
                 # Карточка уже напечатана разбором выше. Повторять её целиком
                 # значит удвоить отчёт ради строки, которую читатель только
@@ -936,8 +991,11 @@ def format_sections(
                 blocks.append("")
                 continue
             printed.add(deal_id)
+            budget[0] -= 1
             blocks.append(format_card(row, title, webhook_url))
             blocks.append("")
+        if left:
+            overflow.append((SHORT_SECTION.get(key, header), left))
 
     # Та же оговорка, что и у недоработок: холод внутри отсрочки тревогу
     # больше не поднимает (#17080), значит «ни одной с признаками» верно
@@ -1029,19 +1087,21 @@ def format_sections(
 
     _block(
         f"🚨 ТЕРЯЕМ КЛИЕНТА — {len(losing)}", losing, no_loss + caveat,
+        "losing",
     )
     if overlap:
         blocks.append(overlap)
         blocks.append("")
     if abandoned:
         # Раньше недоработок: месяц тишины срочнее, чем отставание на три дня.
-        _block(f"🕸 БРОШЕНЫ — {len(abandoned)}", abandoned, "")
+        _block(f"🕸 БРОШЕНЫ — {len(abandoned)}", abandoned, "", "abandoned")
     if not_started:
         # Свой раздел, и с 31.08 — с полным разбором: в тревоге этих карточек
         # больше нет, печатать их больше негде. Разговор с брокером тут
         # другой: не «верните клиента», а «начните работать».
         _block(
             f"🆕 РАБОТУ НЕ НАЧИНАЛИ — {len(not_started)}", not_started, "",
+            "not_started",
         )
     # «Работа подтверждена по всем прочитанным карточкам» на выборке, где по
     # всем карточкам судить ещё рано, — то же самое отсутствие вердикта,
@@ -1080,13 +1140,16 @@ def format_sections(
     )
     _block(
         f"🔧 НЕДОРАБОТКА БРОКЕРА — {len(neglected)}", neglected,
-        no_shortfall + caveat,
+        no_shortfall + caveat, "neglected",
     )
     if reminders:
         # Не претензия, а напоминание: ход за контрагентом, и вернуться к
         # разговору нечем. Отдельно от недоработки — иначе брокер получает
         # выговор за то, что клиент уехал до сентября.
-        _block(f"🔔 НАПОМНИТЬ БРОКЕРУ — {len(reminders)}", reminders, "")
+        _block(
+            f"🔔 НАПОМНИТЬ БРОКЕРУ — {len(reminders)}", reminders, "",
+            "reminders",
+        )
 
     # ⏳ и ✅ в отчёт не выводятся (решение агентства от 31.08). Отчёт нужен
     # РОПу, чтобы контролировать работу брокеров; карточка, к которой нет
@@ -1110,6 +1173,22 @@ def format_sections(
                 f"#{deal_id} {card_title(titles.get(deal_id))} — "
                 f"{REASON_RU.get(reason, reason)}".strip(),
             )
+        blocks.append("")
+
+    # Что не поместилось в лимит. Называем по разделам: «ещё 310» без
+    # разбивки не говорит, тревога это или напоминания, — а РОПу решать,
+    # открывать ли JSON, именно по этому.
+    if overflow:
+        total_left = sum(count for _header, count in overflow)
+        parts = " · ".join(f"{name} {count}" for name, count in overflow)
+        tail = (
+            "не поместилась" if total_left % 10 == 1
+            and total_left % 100 != 11 else "не поместились"
+        )
+        blocks.append(
+            f"… ещё {total_left} {cards_genitive(total_left)} с вопросами "
+            f"{tail}: {parts} — весь разбор в JSON прогона."
+        )
         blocks.append("")
 
     # Учёт того, что в отчёт не попало. Разделы ⏳ и ✅ убраны, и без этой
