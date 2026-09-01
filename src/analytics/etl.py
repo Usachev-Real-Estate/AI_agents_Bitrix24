@@ -104,6 +104,27 @@ def infer_semantic(
     return SEMANTIC_IN_PROGRESS
 
 
+def status_semantic_code(row: dict[str, Any]) -> str:
+    """Семантика стадии так, как её объявил сам портал.
+
+    Bitrix кладёт её в двух разных местах: у статусов лида — в поле SEMANTICS,
+    у стадий сделки — в EXTRA.SEMANTICS. Читаем оба.
+
+    Без этого справочник стадий оставался бы на угадывании по суффиксу, а
+    самодельные стадии суффиксом ничего не говорят: «Закрытая продажа»
+    (UC_A94BGF) выглядела бы «в работе» на странице воронки, хотя те же
+    сделки в win rate считаются закрытыми. Два ответа на один вопрос на
+    соседних экранах стоят доверия ко всему дашборду.
+    """
+    code = _str(row.get("SEMANTICS"))
+    if code:
+        return code
+    extra = row.get("EXTRA")
+    if isinstance(extra, dict):
+        return _str(extra.get("SEMANTICS"))
+    return ""
+
+
 # --------------------------------------------------------------------------
 # измерения
 # --------------------------------------------------------------------------
@@ -177,7 +198,8 @@ def sync_stages(
                 """,
                 (
                     stage_id, int(category_id), _str(row.get("NAME")) or stage_id,
-                    _int(row.get("SORT")), infer_semantic(stage_id, None, overrides), now,
+                    _int(row.get("SORT")),
+                    infer_semantic(stage_id, status_semantic_code(row), overrides), now,
                 ),
             )
             total += 1
@@ -200,7 +222,7 @@ def sync_lead_statuses(client: BitrixClient, conn, now: str, overrides: dict[str
             """,
             (
                 status_id, _str(row.get("NAME")) or status_id, _int(row.get("SORT")),
-                infer_semantic(status_id, None, overrides), now,
+                infer_semantic(status_id, status_semantic_code(row), overrides), now,
             ),
         )
     logger.info("Статусов лидов загружено: %d", len(rows) if isinstance(rows, list) else 0)
@@ -239,21 +261,23 @@ def sync_users(client: BitrixClient, conn, now: str) -> None:
             continue
         dept_ids = row.get("UF_DEPARTMENT") or []
         dept_id = _int(dept_ids[0]) if isinstance(dept_ids, list) and dept_ids else None
+        last_name = _str(row.get("LAST_NAME"))
         name = " ".join(
-            part for part in (_str(row.get("NAME")), _str(row.get("LAST_NAME"))) if part
+            part for part in (_str(row.get("NAME")), last_name) if part
         ) or _str(row.get("EMAIL")) or f"ID {user_id}"
         conn.execute(
             """
-            INSERT INTO dim_user(user_id, name, department_id, department_name,
-                                 is_active, synced_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO dim_user(user_id, name, last_name, department_id,
+                                 department_name, is_active, synced_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
-                name=excluded.name, department_id=excluded.department_id,
+                name=excluded.name, last_name=excluded.last_name,
+                department_id=excluded.department_id,
                 department_name=excluded.department_name,
                 is_active=excluded.is_active, synced_at=excluded.synced_at
             """,
             (
-                user_id, name, dept_id, departments.get(dept_id or 0, ""),
+                user_id, name, last_name, dept_id, departments.get(dept_id or 0, ""),
                 1 if str(row.get("ACTIVE")).upper() in ("Y", "TRUE", "1") else 0, now,
             ),
         )

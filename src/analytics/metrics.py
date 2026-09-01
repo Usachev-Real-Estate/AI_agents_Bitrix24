@@ -222,6 +222,43 @@ def departments_options(conn) -> list[dict[str, Any]]:
     )
 
 
+def rop_by_department(conn) -> dict[int, dict[str, Any]]:
+    """Отдел → РОП, по списку фамилий из qc_delivery.
+
+    Список фамилий — решение агентства от 31.08, и берётся он оттуда же,
+    откуда его берёт рассылка QC: двум ответам на вопрос «чей это отдел»
+    расходиться нельзя. Угадывать по должности здесь тем более нельзя —
+    ошибка означает, что РОП увидит на дашборде чужой отдел.
+
+    Однофамильцев не разрешаем догадкой, как и рассылка: если под фамилию
+    подходят двое, не берётся ни один, и отдел остаётся без РОПа. Пустой
+    ответ честнее неверного.
+    """
+    from qc_delivery import ROP_SURNAMES
+
+    by_surname: dict[str, list[dict[str, Any]]] = {}
+    for row in _rows(
+        conn,
+        "SELECT user_id, name, last_name, department_id FROM v_user "
+        "WHERE is_active = 1 AND department_id IS NOT NULL AND last_name <> ''",
+    ):
+        surname = str(row["last_name"]).strip().lower()
+        if surname in ROP_SURNAMES:
+            by_surname.setdefault(surname, []).append(row)
+
+    directory: dict[int, dict[str, Any]] = {}
+    for surname, rows in by_surname.items():
+        if len(rows) != 1:
+            continue
+        row = rows[0]
+        directory[int(row["department_id"])] = {
+            "user_id": int(row["user_id"]),
+            "name": row["name"],
+            "surname": surname,
+        }
+    return directory
+
+
 def sources(conn) -> list[dict[str, Any]]:
     return _rows(conn, "SELECT source_id, name FROM dim_source ORDER BY name")
 

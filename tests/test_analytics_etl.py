@@ -41,7 +41,14 @@ class FakeClient:
                     {"STATUS_ID": "C18:APOLOGY", "NAME": "Сделка проиграна", "SORT": 95},
                 ]
             if entity == "DEAL_STAGE":
-                return [{"STATUS_ID": "NEW", "NAME": "Назначение встречи", "SORT": 10}]
+                return [
+                    {"STATUS_ID": "NEW", "NAME": "Назначение встречи", "SORT": 10},
+                    # Самодельная стадия: суффикс не говорит ничего, семантику
+                    # объявляет портал — и именно так её объявляет Bitrix у
+                    # стадий сделки, вложенным полем EXTRA.
+                    {"STATUS_ID": "UC_A94BGF", "NAME": "Закрытая продажа", "SORT": 80,
+                     "EXTRA": {"SEMANTICS": "F"}},
+                ]
             if entity == "STATUS":
                 return [
                     {"STATUS_ID": "NEW", "NAME": "Не обработан", "SORT": 10},
@@ -130,7 +137,7 @@ def test_backfill_loads_facts_dimensions_and_stage_history(analytics_db, fake_cl
     assert summary["deals"] == 2 and summary["leads"] == 2
     with analytics_session(readonly=True) as conn:
         assert conn.execute("SELECT COUNT(*) FROM dim_pipeline").fetchone()[0] == 2
-        assert conn.execute("SELECT COUNT(*) FROM dim_stage").fetchone()[0] == 4
+        assert conn.execute("SELECT COUNT(*) FROM dim_stage").fetchone()[0] == 5
         assert conn.execute("SELECT COUNT(*) FROM dim_user").fetchone()[0] == 1
         assert conn.execute(
             "SELECT department_name FROM dim_user WHERE user_id = 32"
@@ -236,6 +243,7 @@ def test_window_since_is_frozen_after_first_run(analytics_db, fake_client):
 
 @pytest.mark.parametrize("stage_id,code,expected", [
     ("C18:WON", "S", "won"),
+    ("UC_A94BGF", "F", "lost"),
     ("C18:APOLOGY", "F", "lost"),
     ("C18:NEW", "P", "in_progress"),
     ("C18:WON", None, "won"),
@@ -298,3 +306,45 @@ def test_incremental_picks_up_a_department_transfer(analytics_db, fake_client):
     with analytics_session(readonly=True) as conn:
         assert conn.execute(
             "SELECT department_id FROM dim_user WHERE user_id = 32").fetchone()[0] == 50
+
+
+def test_stage_dictionary_takes_semantics_from_the_portal(analytics_db, fake_client):
+    """Справочник стадий и сами сделки обязаны отвечать одинаково.
+
+    Семантику самодельной стадии («Закрытая продажа», UC_A94BGF) по суффиксу
+    не угадать: раньше справочник записывал её «в работе», а сделки на ней
+    приходили с портальным кодом F и считались закрытыми. Страница воронки и
+    win rate давали два ответа на один вопрос, и понять, какой из них верный,
+    было нельзя.
+    """
+    fake_client(FakeClient(deals=[_deal(101)], leads=[]))
+    etl.run_sync("backfill", since_override="2026-01-01")
+
+    with analytics_session(readonly=True) as conn:
+        assert conn.execute(
+            "SELECT semantic FROM dim_stage WHERE stage_id = 'UC_A94BGF'"
+        ).fetchone()[0] == "lost"
+        # Обычные стадии остаются как были: портал их семантику не объявляет,
+        # и суффикс по-прежнему единственный источник.
+        assert conn.execute(
+            "SELECT semantic FROM dim_stage WHERE stage_id = 'C18:WON'"
+        ).fetchone()[0] == "won"
+
+
+def test_lead_status_semantics_come_from_the_portal():
+    """У статусов лида портал кладёт семантику в поле SEMANTICS, не в EXTRA."""
+    assert etl.status_semantic_code({"SEMANTICS": "F"}) == "F"
+    assert etl.status_semantic_code({"EXTRA": {"SEMANTICS": "S"}}) == "S"
+    assert etl.status_semantic_code({"EXTRA": None}) == ""
+    assert etl.status_semantic_code({}) == ""
+
+
+def test_people_directory_keeps_the_surname(analytics_db, fake_client):
+    """Фамилия хранится отдельным полем — по ней отдел сопоставляется с РОПом."""
+    fake_client(FakeClient(deals=[_deal(101)], leads=[]))
+    etl.run_sync("backfill", since_override="2026-01-01")
+
+    with analytics_session(readonly=True) as conn:
+        assert conn.execute(
+            "SELECT last_name FROM dim_user WHERE user_id = 32"
+        ).fetchone()[0] == "Петров"

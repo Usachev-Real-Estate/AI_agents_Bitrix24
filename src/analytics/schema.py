@@ -25,7 +25,7 @@ DEFAULT_DB_PATH = Path("data/analytics.db")
 # запас, что и основная база проекта.
 BUSY_TIMEOUT_MS = 10_000
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Семантика стадии. Без неё нельзя посчитать ни конверсию, ни win rate:
 # «выиграно» и «проиграно» надо отличать от «в работе», а по одному только
@@ -69,6 +69,7 @@ _DDL: tuple[str, ...] = (
     CREATE TABLE IF NOT EXISTS dim_user (
         user_id          INTEGER PRIMARY KEY,
         name             TEXT    NOT NULL,
+        last_name        TEXT    NOT NULL DEFAULT '',
         department_id    INTEGER,
         department_name  TEXT    NOT NULL DEFAULT '',
         is_active        INTEGER NOT NULL DEFAULT 1,
@@ -248,11 +249,25 @@ def analytics_session(
         conn.close()
 
 
+def _migrate_dim_user_last_name(conn: sqlite3.Connection) -> None:
+    """Добавить last_name витринам, созданным до появления колонки.
+
+    Фамилия отдельным полем нужна, чтобы сопоставить отдел с РОПом по списку
+    фамилий из qc_delivery. Разбирать её из полного имени нельзя: «Шпырная
+    Юлия» и «Юлия Шпырная» встречаются в портале одинаково часто.
+    """
+    try:
+        conn.execute("ALTER TABLE dim_user ADD COLUMN last_name TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+
+
 def init_analytics_db(db_path: str | Path | None = None) -> None:
     """Создать таблицы витрины, если их нет. Идемпотентно."""
     with analytics_session(db_path) as conn:
         for statement in _DDL:
             conn.execute(statement)
+        _migrate_dim_user_last_name(conn)
         conn.execute(
             "INSERT INTO analytics_meta(key, value) VALUES('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",

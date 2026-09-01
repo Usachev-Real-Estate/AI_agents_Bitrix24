@@ -1,6 +1,6 @@
 """Управление доступом к дашборду.
 
-    python src/web/manage.py adduser ivanov
+    python src/web/manage.py adduser ivanov --rop Резников
     python src/web/manage.py passwd ivanov
     python src/web/manage.py list
     python src/web/manage.py revoke ivanov
@@ -17,6 +17,7 @@ import argparse
 import getpass
 import secrets
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 if __package__ in (None, ""):
@@ -64,24 +65,74 @@ def cmd_setrole(args: argparse.Namespace) -> int:
 
 
 def cmd_departments(_: argparse.Namespace) -> int:
-    """Отделы из витрины — чтобы админ знал, какие ID назначать РОПам."""
-    import analytics  # noqa: F401  — кладёт src/analytics на sys.path
-    import metrics
-    from scope import Scope, scoped_session
+    """Отделы из витрины — чтобы админ знал, какие ID назначать РОПам.
 
-    with scoped_session(Scope.everything()) as conn:
-        rows = metrics.departments_options(conn)
+    Рядом с отделом печатается его РОП: назначить учётке чужой отдел —
+    значит показать РОПу чужих брокеров, и такую опечатку в голом списке
+    идентификаторов никто не заметит.
+    """
+    with _mart() as conn:
+        rows = _metrics().departments_options(conn)
+        rops = _metrics().rop_by_department(conn)
     if not rows:
         print("В витрине нет отделов. Сначала запустите ETL.")
         return 0
-    print(f"{'ID':<8} {'сделок':<8} отдел")
+    print(f"{'ID':<8} {'сделок':<8} {'отдел':<32} РОП")
     for row in rows:
-        print(f"{row['department_id']:<8} {row['deals']:<8} {row['name']}")
+        rop = rops.get(row["department_id"])
+        print(f"{row['department_id']:<8} {row['deals']:<8} {row['name']:<32} "
+              f"{rop['name'] if rop else '—'}")
     return 0
+
+
+def _metrics():
+    """Метрики витрины. Импорт ленивый: CLI смены пароля витрину не читает."""
+    import analytics  # noqa: F401  — кладёт src/analytics на sys.path
+    import metrics
+
+    return metrics
+
+
+@contextmanager
+def _mart():
+    """Соединение с витриной без ограничения по отделам — команда админская."""
+    import analytics  # noqa: F401  — кладёт src/analytics на sys.path
+    from scope import Scope, scoped_session
+
+    with scoped_session(Scope.everything()) as conn:
+        yield conn
+
+
+def _departments_of_rop(surname: str) -> list[int]:
+    """Отделы названного РОПа из витрины.
+
+    Молчаливой недостачи здесь быть не должно — та же причина, по которой
+    рассылка QC не угадывает однофамильцев: учётка, собранная по догадке,
+    открывает РОПу чужой отдел. Не нашли — падаем и просим указать отделы
+    руками.
+    """
+    wanted = surname.strip().lower()
+    with _mart() as conn:
+        rops = _metrics().rop_by_department(conn)
+    departments = sorted(
+        dept_id for dept_id, rop in rops.items() if rop["surname"] == wanted
+    )
+    if not departments:
+        raise SystemExit(
+            f"РОП «{surname}» в витрине не найден — либо фамилии нет в списке "
+            f"qc_delivery.ROP_SURNAMES, либо в портале под ней несколько человек, "
+            f"либо ETL ещё не прогонялся. Отделы можно указать вручную: --department ID"
+        )
+    return departments
 
 
 def _departments_arg(args: argparse.Namespace) -> list[int]:
     departments = list(args.department or [])
+    surname = getattr(args, "rop", None)
+    if surname:
+        resolved = _departments_of_rop(surname)
+        print(f"РОП {surname}: отделы {', '.join(str(d) for d in resolved)}")
+        departments = sorted(set(departments) | set(resolved))
     if args.role == store.ROLE_ROP and not departments:
         # Учётка без отделов не видит ничего. Это безопасно, но чаще всего
         # означает забытый флаг, а не намерение — предупреждаем вслух.
@@ -212,6 +263,10 @@ def main() -> int:
                 "--department", type=int, action="append", metavar="ID",
                 help="отдел РОПа; можно указать несколько раз. "
                      "ID смотреть в manage.py departments")
+            command.add_argument(
+                "--rop", metavar="ФАМИЛИЯ",
+                help="взять отделы из витрины по фамилии РОПа "
+                     "(список фамилий — qc_delivery.ROP_SURNAMES)")
         if name == "sessions":
             command.add_argument("username", nargs="?", default=None)
         command.set_defaults(handler=handler)

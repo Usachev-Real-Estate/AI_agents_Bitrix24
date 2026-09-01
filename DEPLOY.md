@@ -163,14 +163,16 @@ docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/dat
 ```bash
 DOCKER="docker run --rm -it --env-file .env -v $(pwd)/data:/app/data b24-ai-auditor:latest"
 
-# какие отделы есть в витрине и какие у них ID
+# какие отделы есть в витрине, какие у них ID и кто ими руководит
 $DOCKER python src/web/manage.py departments
 
 # администратор — роль указывается явно
 $DOCKER python src/web/manage.py adduser director --role admin
 
-# РОП: один или несколько отделов
-$DOCKER python src/web/manage.py adduser trofimova --role rop --department 44
+# РОП: отделы берутся из витрины по фамилии
+$DOCKER python src/web/manage.py adduser trofimova --role rop --rop Трофимова
+
+# то же самое числами, если фамилии в списке агентства нет
 $DOCKER python src/web/manage.py adduser komdir --role rop --department 44 --department 50
 
 # кто что видит
@@ -184,6 +186,13 @@ $DOCKER python src/web/manage.py setrole trofimova --role rop --department 44 --
 флаг создаёт пользователя с минимальным доступом, а не администратора: ошибка
 в сторону меньшего доступа исправляется одной командой, обратная
 обнаруживается по утёкшим данным.
+
+`--rop ФАМИЛИЯ` берёт отделы из витрины по списку фамилий РОПов
+(`src/qc_delivery.py`, решение агентства от 31.08) — по тому же списку
+рассылается отчёт QC, и расходиться этим двум ответам на вопрос «чей это
+отдел» нельзя. Фамилии нет в списке, под ней в портале двое или ETL ещё не
+прогонялся — команда падает и просит указать отделы числами: учётка,
+собранная по догадке, открыла бы РОПу чужой отдел.
 
 ### Кадровые изменения в Bitrix
 
