@@ -25,12 +25,15 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from broker_work import (  # noqa: E402
+    GAP_DUE_TASK_NO_RESULT,
     GAP_NO_TRACE_IN_WINDOW,
     GAP_ONLY_PLANS,
+    GAP_TASK_DUE_TODAY,
     PROVEN,
     PROVEN_BY_OPEN_TASK,
     PROVEN_BY_TASK_PLAN,
     REASON_RU,
+    REMINDERS,
     assess_broker_work,
     work_window_days,
 )
@@ -144,3 +147,49 @@ def test_real_work_is_named_as_real_work():
 
 def test_the_reason_has_words_for_the_report():
     assert REASON_RU[PROVEN_BY_OPEN_TASK]
+
+
+def test_the_other_half_of_the_same_decision():
+    """Дело, срок которого прошёл впустую, — недоработка, а не напоминание.
+
+    Две половины одного решения от 01.09, и порознь они не держатся: если
+    живое дело СНИМАЕТ претензию к темпу, то за дело, срок которого прошёл
+    без единой строки в таймлайне, платить напоминанием нельзя — это ровно
+    тот случай, где контроль оказался фикцией.
+
+    Карточка здесь с записанной паузой: своей претензии у неё нет, и
+    просрочка становится вердиктом, а не доводом в скобках. Там, где у
+    цепочки претензия своя, она и остаётся — просрочка едет довеском, и
+    раздел всё равно 🔧.
+
+    Отменена при этом только половина решения от 28.08: дело со сроком на
+    сегодня осталось напоминанием, день ещё не кончился.
+    """
+    work = assess_broker_work(
+        events=[_comment(8), _task(-4)],
+        profile=SELLER_PROFILE, stage_id=STAGE, hours_on_stage=24 * 20,
+        claims_messaged=False, comment_informative=True,
+        pause_explained=True, pause_until="2026-10-01", now=NOW,
+    )
+    assert work["reason"] == GAP_DUE_TASK_NO_RESULT
+    assert work["proven"] is False
+    assert GAP_DUE_TASK_NO_RESULT not in REMINDERS
+    assert GAP_TASK_DUE_TODAY in REMINDERS
+
+
+def test_the_pause_alone_is_still_only_a_reminder():
+    """Оборотная сторона: та же пауза, но дела нет вовсе — 🔔.
+
+    Лестница от 28.08 тут перевернулась, и перевернулась осознанно
+    (решение агентства от 01.09): поставить дело и пропустить его срок
+    теперь строго хуже, чем не ставить дела вовсе. Обойти это брокер может
+    ровно одним способом — написать результат в таймлайн, то есть тем
+    самым, ради чего правило и написано.
+    """
+    work = assess_broker_work(
+        events=[_comment(8)],
+        profile=SELLER_PROFILE, stage_id=STAGE, hours_on_stage=24 * 20,
+        claims_messaged=False, comment_informative=True,
+        pause_explained=True, pause_until="2026-10-01", now=NOW,
+    )
+    assert work["reason"] in REMINDERS
