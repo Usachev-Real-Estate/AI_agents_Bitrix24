@@ -12,10 +12,9 @@
 <header class="topbar">
   <a class="brand" href="{{ base_path }}/">Аналитика Bitrix24</a>
   <nav class="nav">
-    {% for slug, label in nav %}
-      <a href="{{ base_path }}/{{ slug }}?{{ qs(request,
-             department=department_id if slug in department_aware_pages else None) }}"
-         class="{{ 'active' if active == slug else '' }}">{{ label }}</a>
+    {% for item in nav %}
+      <a href="{{ base_path }}/{{ item.slug }}?{{ item.query }}"
+         class="{{ 'active' if active == item.slug else '' }}">{{ item.label }}</a>
     {% endfor %}
   </nav>
   <div class="topbar-right">

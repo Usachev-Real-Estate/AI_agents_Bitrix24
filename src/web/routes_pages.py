@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse
 
 import chartdata
 import metrics
+import objects
 from context import base_context, read_analytics
 
 router = APIRouter()
@@ -191,6 +192,43 @@ async def table(request: Request) -> HTMLResponse:
     return _render(request, "table.html", context)
 
 
+# Обработчик синхронный намеренно, в отличие от соседних async def. Запрос к
+# Афине — это блокирующий httpx внутри, и в async-обработчике он занимал бы
+# цикл событий на всё время ожидания: медленная Афина подвешивала бы весь
+# дашборд, включая /healthz. Starlette уносит обычный def в пул потоков.
+@router.get("/objects", response_class=HTMLResponse)
+def objects_page(request: Request) -> HTMLResponse:
+    """Объекты Афины: счётчики, реклама, сайт и снятия.
+
+    Единственная страница дашборда, данные для которой приходят не из
+    витрины, а по HTTP из другой системы. Отсюда и два отличия: область
+    видимости к ним неприменима (см. objects.py), а отказ источника — штатное
+    состояние страницы, а не пятисотая.
+    """
+    context = base_context(request, active=objects.SLUG)
+    settings = request.app.state.settings
+    selected = objects.resolve(request.query_params)
+    context.update({
+        "selected": selected,
+        "views": objects.VIEWS,
+        "listing_filters": objects.LISTING_FILTERS,
+        "summary_tiles": objects.SUMMARY_TILES,
+        "configured": objects.is_configured(settings),
+        "summary": None,
+        "table": None,
+        "card": None,
+        "error": None,
+    })
+    if not context["is_admin"]:
+        return _forbidden(request, context)
+    if context["configured"]:
+        context.update(objects.load(
+            objects.client_for(settings), selected, context["period"],
+            settings.afina_api_page_size,
+        ))
+    return _render(request, "objects.html", context)
+
+
 @router.get("/quality", response_class=HTMLResponse)
 async def quality(request: Request) -> HTMLResponse:
     context = base_context(request, active="quality")
@@ -201,6 +239,16 @@ async def quality(request: Request) -> HTMLResponse:
             "pipeline_counts": metrics.counts_by_pipeline(conn),
         })
     return _render(request, "quality.html", context)
+
+
+def _forbidden(request: Request, context: dict) -> HTMLResponse:
+    """Отказ в доступе к разделу. Без подробностей: чего нет, того не видно."""
+    return request.app.state.templates.TemplateResponse(
+        request, "error.html",
+        {"code": 403, "message": "Раздел доступен только администратору",
+         "base_path": context["base_path"], "user": context["user"]},
+        status_code=403,
+    )
 
 
 def _grain_for(period: dict) -> str:
