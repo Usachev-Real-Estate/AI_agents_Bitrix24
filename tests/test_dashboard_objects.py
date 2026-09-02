@@ -429,7 +429,7 @@ def test_a_missing_endpoint_is_not_reported_as_a_missing_object():
 
     generic = afina._error_for("/summary", httpx.Response(404, text="{}"))
     assert not isinstance(generic, afina.AfinaNotFound)
-    assert "эндпоинтов витрины" in str(generic)
+    assert "витрины Афины нет" in str(generic)
 
     single = afina._error_for(
         "/listings/9", httpx.Response(404, text="{}"), allow_not_found=True,

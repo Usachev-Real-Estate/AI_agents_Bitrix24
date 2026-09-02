@@ -251,7 +251,7 @@ crontab -l
 | `ANALYTICS_MONTHS_BACK` | Глубина истории при первичной загрузке |
 | `DASHBOARD_SECRET_KEY` | Ключ подписи сессий. Без него дашборд не стартует |
 | `DASHBOARD_COOKIE_SECURE` | `true` в проде; `false` только для отладки по http |
-| `AFINA_API_BASE_URL` | Адрес Афины CRM (по умолчанию `https://afina-crm.ru`) |
+| `AFINA_API_BASE_URL` | Корень сервиса Афины CRM, без пути (по умолчанию `https://afina-crm.ru`) |
 | `AFINA_API_KEY` | Ключ витрины объектов Афины. Пусто — раздела «Объекты» нет |
 | `AFINA_API_TIMEOUT_SECONDS` | Таймаут запроса к Афине (по умолчанию 10) |
 | `AFINA_API_PAGE_SIZE` | Размер страницы выдачи, потолок Афины — 100 |

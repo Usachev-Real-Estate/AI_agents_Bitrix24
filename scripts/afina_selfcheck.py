@@ -9,6 +9,12 @@
 Шаги идут от простого к сложному и обрываются на первом сломанном: имя,
 сеть, сертификат, ключ. Номер последнего напечатанного шага и есть ответ,
 что чинить.
+
+Адрес можно передать аргументом — перебрать кандидатов, не правя .env и не
+перезапуская контейнер:
+
+    docker compose exec dashboard python scripts/afina_selfcheck.py \
+        http://172.17.0.1:8001
 """
 import os
 import socket
@@ -23,20 +29,23 @@ DASHBOARD_PATH = "/api/public/dashboard/summary"
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
 
 
-def _settings() -> tuple[str, str]:
+def _settings(argv: list[str]) -> tuple[str, str]:
     """Адрес и ключ так, как их видит сам дашборд.
 
     Читаем из окружения, а не из Settings: внутри контейнера важно ровно то,
-    что туда доехало через env_file, а не то, что лежит в .env рядом.
+    что туда доехало через env_file, а не то, что лежит в .env рядом. Адрес
+    из аргумента перебивает окружение — так подбирают рабочий адрес, не
+    перезапуская контейнер на каждую попытку.
     """
+    override = argv[1] if len(argv) > 1 else ""
     return (
-        (os.environ.get("AFINA_API_BASE_URL") or "").rstrip("/"),
+        (override or os.environ.get("AFINA_API_BASE_URL") or "").rstrip("/"),
         (os.environ.get("AFINA_API_KEY") or "").strip(),
     )
 
 
-def main() -> int:
-    base, key = _settings()
+def main(argv: list[str]) -> int:
+    base, key = _settings(argv)
     print(f"1. адрес: {base or '(ПУСТО)'}")
     print(f"   ключ: {'задан, ' + str(len(key)) + ' симв.' if key else '(ПУСТО)'}")
     if not base or not key:
@@ -52,6 +61,13 @@ def main() -> int:
     if not host:
         print("   → адрес не разбирается, ожидается вид https://afina-crm.ru")
         return 1
+    if parts.path.strip("/"):
+        # Клиент дописывает /api/public/dashboard/... сам, поэтому путь в
+        # адресе склеивается в двойной и даёт 404 на пятом шаге. Не ошибка:
+        # Афина может стоять за прокси с префиксом. Но чаще это вставленный
+        # целиком эндпоинт, и увидеть это надо здесь, а не гадать по 404.
+        print(f"   ВНИМАНИЕ: в адресе есть путь /{parts.path.strip('/')}.")
+        print("   Ожидается корень сервиса; путь витрины клиент дописывает сам")
 
     try:
         addresses = sorted({info[4][0] for info in socket.getaddrinfo(host, None)})
@@ -81,25 +97,26 @@ def main() -> int:
             print("   → цепочка сертификатов или разъехавшееся время на сервере")
             return 1
 
+    url = f"{base}{DASHBOARD_PATH}"
+    print(f"5. запрос: GET {url}")
     try:
-        response = httpx.get(
-            f"{base}{DASHBOARD_PATH}", headers={"X-API-Key": key}, timeout=10,
-        )
+        response = httpx.get(url, headers={"X-API-Key": key}, timeout=10)
     except httpx.HTTPError as exc:
-        print(f"5. запрос не дошёл: {type(exc).__name__}")
+        print(f"   не дошёл: {type(exc).__name__}")
         return 1
-    print(f"5. HTTP {response.status_code}: {response.text[:200]}")
+    print(f"   HTTP {response.status_code}: {response.text[:200]}")
     if response.status_code == 200:
         print("   → связь рабочая, раздел «Объекты» должен наполняться")
         return 0
     print({
         401: "   → ключ не совпал с PUBLIC_API_KEY на стороне Афины",
         403: "   → ключ не совпал с PUBLIC_API_KEY на стороне Афины",
-        404: "   → на этом адресе нет витрины: бэкенд Афины не пересобран",
+        404: ("   → витрины по этому адресу нет. Три причины: адрес ведёт на\n"
+              "     другой сервис, в адресе лишний путь, бэкенд не пересобран"),
         503: "   → на стороне Афины не задан PUBLIC_API_KEY",
     }.get(response.status_code, "   → неожиданный ответ, смотрите тело выше"))
     return 1
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv))
