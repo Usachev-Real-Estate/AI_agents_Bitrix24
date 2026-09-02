@@ -13,7 +13,10 @@
   {{ ui.tile('Конверсия в сделку', funnel.conversion | pct) }}
   {% if first_move.supported %}
     {{ ui.tile('Лид лежит до первой обработки', first_move.median | days,
-               hint='медиана; 90-й перцентиль ' ~ (first_move.p90 | days)) }}
+               hint='медиана; 90-й перцентиль ' ~ (first_move.p90 | days)
+                    ~ (', ' ~ (first_move.waiting | int_ru) ~ ' ещё не обработаны — их время
+                       считается по «до сих пор», медиана поэтому оценка снизу'
+                       if first_move.waiting else '')) }}
   {% else %}
     {{ ui.tile('Скорость обработки', '—',
                hint='портал не ведёт историю статусов лидов') }}

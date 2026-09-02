@@ -179,7 +179,10 @@
           <td>{{ row.assignee }}</td>
           <td class="muted">{{ row.department }}</td>
           <td class="num delta-down">{{ row.days_in_stage | days }}</td>
-          <td class="num muted">{{ row.threshold_days | days }}</td>
+          <td class="num muted">{{ row.threshold_days | days }}
+            {%- if row.threshold_source == 'воронка' %}<span class="muted"
+              title="У этой стадии нет ни одного завершённого интервала — порог взят по всей воронке"
+              > · по воронке</span>{% endif %}</td>
           <td class="num">{{ row.opportunity | money }}</td>
           <td class="num nowrap">
             <a href="{{ crm_link('deal', row.deal_id) }}" target="_blank" rel="noopener">
@@ -195,7 +198,10 @@
   {{ ui.definition('Порог берётся из собственных данных воронки — 75-й перцентиль
     времени на этой же стадии, — а не из выдуманного числа дней: у «Подбора» и
     «Офера» нормальный срок разный, и единый порог либо завалит список шумом,
-    либо пропустит реальные простои.') }}
+    либо пропустит реальные простои. У стадии, с которой ещё никто не уходил,
+    своей нормы нет — там порог берётся по всей воронке, и строка помечена
+    «по воронке». Раньше такие карточки не показывались вовсе, хотя стоят
+    дольше всех.') }}
 </div>
 {% endif %}
 {% endblock %}

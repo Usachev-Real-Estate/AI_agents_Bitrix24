@@ -41,6 +41,12 @@
     <div class="tile-delta">по {{ overview.money.avg_check_base | int_ru }} сделкам
       с заполненной суммой</div>
 
+    {% if overview.money.won_foreign or overview.money.open_foreign %}
+    <div class="notice notice-warn mt-14"><span>⚠</span>
+      <span>{{ (overview.money.won_foreign + overview.money.open_foreign) | int_ru }} сделок
+        заведены не в {{ overview.money.currency }} — в суммы выше они не входят.
+        Курса у витрины нет, и сложить их с рублями значит напечатать неверное число.</span></div>
+    {% endif %}
     {{ ui.definition('Суммы считаются только по карточкам с заполненным полем. Полоса
       рядом показывает, какая доля сделок его имеет: при низком покрытии сумма
       занижена, а не «маленькая».') }}

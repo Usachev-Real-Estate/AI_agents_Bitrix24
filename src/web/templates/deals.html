@@ -155,6 +155,11 @@
       <div class="tile-label">Выиграно за период</div>
       <div class="tile-value">{{ money.won_amount | money(short=True) }}</div>
       {{ ui.coverage(money.won_coverage, money.won_filled, money.won_deals, 'выигранных') }}
+      {% if money.won_foreign or money.open_foreign %}
+      <div class="notice notice-warn mt-14"><span>⚠</span>
+        <span>{{ (money.won_foreign + money.open_foreign) | int_ru }} сделок воронки заведены
+          не в {{ money.currency }} — в суммы они не входят.</span></div>
+      {% endif %}
     </div>
     <div class="card">
       <div class="tile-label">Средний чек</div>
