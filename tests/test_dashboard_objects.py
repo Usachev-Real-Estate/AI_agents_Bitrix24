@@ -8,6 +8,8 @@
 """
 
 import re
+import socket
+import ssl
 
 import pytest
 import web  # noqa: F401  — кладёт src/web и src/analytics на sys.path
@@ -526,6 +528,46 @@ def test_hostile_content_from_afina_is_escaped(app_factory, monkeypatch):
     assert "<img src=x onerror=" not in body
     assert "<script>alert(" not in body
     assert 'onmouseover="alert' not in body
+
+
+@pytest.mark.parametrize("cause, expected", [
+    (socket.gaierror("Name or service not known"), "не разрешается в адрес"),
+    (ConnectionRefusedError(111, "Connection refused"), "отказала в соединении"),
+    (ssl.SSLCertVerificationError("certificate has expired"),
+     "Сертификат Афины не принят"),
+])
+def test_an_unreachable_afina_says_which_link_broke(cause, expected):
+    """DNS, отказ соединения и сертификат — три разные поломки.
+
+    httpx складывает их в один ConnectError, и одно «Афина недоступна» на
+    всех отправляет администратора гадать: чинить адрес, сеть или TLS.
+    """
+    import httpx as _httpx
+
+    error = _httpx.ConnectError("boom")
+    error.__cause__ = cause
+    assert expected in afina._transport_reason(error)
+
+
+def test_an_unexplained_transport_failure_still_says_something_useful():
+    """Причины в цепочке нет — говорим хотя бы, откуда не достучались."""
+    import httpx as _httpx
+
+    reason = afina._transport_reason(_httpx.ConnectError("boom"))
+    assert "с сервера дашборда" in reason
+
+
+def test_a_proxy_in_the_way_is_named(afina_over_transport):
+    """Прокси в окружении — частая причина, и искать её надо в окружении."""
+    import httpx as _httpx
+
+    def handler(request):
+        raise _httpx.ProxyError("no route")
+
+    client = afina_over_transport(handler)
+    with pytest.raises(afina.AfinaError) as failure:
+        client.summary()
+    assert "HTTP_PROXY" in str(failure.value)
 
 
 def test_a_broken_base_url_is_a_notice_not_a_crash():

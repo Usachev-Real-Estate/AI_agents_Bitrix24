@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import logging
+import socket
+import ssl
 from typing import Any
 
 import httpx
@@ -170,7 +172,7 @@ class AfinaClient:
         except httpx.HTTPError as exc:
             # Тип ошибки, а не её текст: в текст httpx кладёт полный URL.
             logger.warning("Афина недоступна: %s (%s)", path, type(exc).__name__)
-            raise AfinaError("Афина недоступна") from exc
+            raise AfinaError(_transport_reason(exc)) from exc
 
         if response.status_code >= 400:
             raise _error_for(path, response, allow_not_found=allow_not_found)
@@ -210,6 +212,40 @@ def _is_naive_moment(value: str) -> bool:
         return False
     tail = value[10:]
     return not (tail.endswith("Z") or "+" in tail or "-" in tail)
+
+
+def _transport_reason(exc: Exception) -> str:
+    """Почему запрос не дошёл — словами, которые говорят, что проверять.
+
+    httpx складывает не разрешившееся имя, отказ в соединении и непринятый
+    сертификат в один ConnectError. Для человека это три разные поломки с
+    тремя разными действиями, и одно «Афина недоступна» на всех отправляет
+    его гадать. Настоящая причина лежит в цепочке __cause__.
+    """
+    if isinstance(exc, httpx.ProxyError):
+        return ("Запрос к Афине ушёл через прокси и не дошёл: "
+                "проверьте HTTP_PROXY и HTTPS_PROXY в окружении дашборда")
+    for cause in _causes(exc):
+        if isinstance(cause, ssl.SSLError):
+            return ("Сертификат Афины не принят: "
+                    "проверьте цепочку сертификатов и время на сервере")
+        if isinstance(cause, socket.gaierror):
+            return ("Имя из AFINA_API_BASE_URL не разрешается в адрес: "
+                    "проверьте его и DNS контейнера дашборда")
+        if isinstance(cause, ConnectionRefusedError):
+            return ("Афина отказала в соединении: проверьте, что её адрес "
+                    "доступен именно с сервера дашборда")
+    return "Афина недоступна: с сервера дашборда до неё не достучаться"
+
+
+def _causes(exc: BaseException):
+    """Цепочка причин исключения — httpx прячет настоящую ошибку в ней."""
+    seen = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
 
 
 def _clamp_size(size: Any) -> int:
