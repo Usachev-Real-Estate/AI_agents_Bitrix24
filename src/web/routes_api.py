@@ -14,8 +14,10 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 import metrics
+import objects
 from context import read_analytics, resolve_filters
 from links import crm_link
+from scope import ROLE_ADMIN
 
 router = APIRouter(prefix="/api")
 
@@ -87,6 +89,41 @@ async def api_quality(request: Request) -> JSONResponse:
             "quality": metrics.data_quality(conn, filters["category_id"]),
             "etl": metrics.etl_status(conn),
         })
+
+
+# Синхронный по той же причине, что и страница: блокирующий запрос к Афине
+# в async-обработчике занял бы цикл событий на всё время ожидания.
+@router.get("/objects")
+def api_objects(request: Request) -> JSONResponse:
+    """Объекты Афины тем же ответом, что видит страница.
+
+    Раздел закрыт для всех, кроме администратора, — по той же причине, что и
+    страница: сопоставить отделы Афины с отделами Битрикса нечем, а значит
+    сузить выдачу до своего отдела невозможно.
+    """
+    settings = request.app.state.settings
+    if (getattr(request.state, "user", None) or {}).get("role") != ROLE_ADMIN:
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    if not objects.is_configured(settings):
+        return JSONResponse({"error": "afina_not_configured"}, status_code=503)
+    selected = objects.resolve(request.query_params)
+    period = resolve_filters(request)["period"]
+    data = objects.load(
+        objects.client_for(settings), selected, period,
+        settings.afina_api_page_size,
+    )
+    # 502 — отказ источника: дашборд жив, недоступна Афина за ним. 404 —
+    # ответ самой Афины «такого объекта нет», и выдавать его за аварию значит
+    # поднимать мониторинг по чужой опечатке в адресе.
+    status_code = 502 if data["failed"] else 404 if data["not_found"] else 200
+    return JSONResponse({
+        "view": selected["view"],
+        "filter": selected["filter"],
+        "summary": data["summary"],
+        "table": data["table"],
+        "card": data["card"],
+        "error": data["error"],
+    }, status_code=status_code)
 
 
 @router.get("/table")

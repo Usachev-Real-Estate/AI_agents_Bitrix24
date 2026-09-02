@@ -8,6 +8,7 @@ from typing import Any, Iterator
 from fastapi import Request
 
 import metrics
+import objects
 from links import crm_link
 from scope import ROLE_ADMIN, Scope, scoped_session
 
@@ -22,6 +23,7 @@ NAV = [
     ("deals", "Сделки"),
     ("movement", "Движение"),
     ("people", "Люди"),
+    (objects.SLUG, "Объекты"),
     ("table", "Таблица"),
     ("quality", "Качество данных"),
 ]
@@ -94,6 +96,51 @@ def _optional_int(value: str | None) -> int | None:
         return None
 
 
+def visible_nav(request: Request, settings: Any, is_admin: bool,
+                active: str, department_id: int | None) -> list[dict[str, Any]]:
+    """Навигация под конкретного пользователя: что видно и куда ведёт.
+
+    «Объекты» появляются, только когда связь с Афиной настроена и смотрит
+    администратор. Пункт меню, который ведёт на отказ или на плашку «не
+    настроено», хуже отсутствующего: по нему нельзя понять, поломка это или
+    так и задумано.
+    """
+    shown = NAV if (objects.is_configured(settings) and is_admin) else [
+        item for item in NAV if item[0] != objects.SLUG
+    ]
+    return [
+        {"slug": slug, "label": label,
+         "query": _nav_query(request, slug, active, department_id)}
+        for slug, label in shown
+    ]
+
+
+# Параметры, которые принадлежат конкретному разделу, а не всему дашборду.
+# Период, воронка и отдел общие — их переход между разделами сохраняет.
+SECTION_PARAMS = (
+    "q", "page", "id", "view", "filter", "entity", "stage", "assignee",
+    "source", "open", "all_time", "sort", "dir",
+)
+
+
+def _nav_query(request: Request, slug: str, active: str,
+               department_id: int | None) -> str:
+    """Строка запроса для пункта меню.
+
+    Уходя из раздела, его собственные параметры надо оставить: «Объекты»
+    получали из «Таблицы» чужие page=3 и q=Иванов и открывались на пустой
+    третьей странице с непонятно откуда взявшимся поиском. Внутри своего
+    раздела параметры сохраняются — иначе клик по текущему пункту молча
+    сбрасывал бы уже настроенные фильтры.
+    """
+    overrides: dict[str, Any] = {
+        "department": department_id if slug in DEPARTMENT_AWARE_PAGES else None,
+    }
+    if slug != active:
+        overrides.update({name: None for name in SECTION_PARAMS})
+    return query_string(request, **overrides)
+
+
 def base_context(request: Request, active: str = "") -> dict[str, Any]:
     """Контекст, нужный каждой странице: пользователь, период, список воронок."""
     config = request.app.state.config
@@ -101,6 +148,7 @@ def base_context(request: Request, active: str = "") -> dict[str, Any]:
     filters = resolve_filters(request)
 
     user = getattr(request.state, "user", None)
+    is_admin = (user or {}).get("role") == ROLE_ADMIN
     with read_analytics(request) as conn:
         pipelines = metrics.pipelines(conn)
         departments = metrics.departments_options(conn)
@@ -109,11 +157,12 @@ def base_context(request: Request, active: str = "") -> dict[str, Any]:
     return {
         "request": request,
         "user": user,
-        "is_admin": (user or {}).get("role") == ROLE_ADMIN,
+        "is_admin": is_admin,
         "scope_label": scope_for(request).describe(),
         "base_path": config.base_path,
-        "nav": NAV,
-        "department_aware_pages": DEPARTMENT_AWARE_PAGES,
+        "nav": visible_nav(
+            request, settings, is_admin, active, filters["department_id"],
+        ),
         "active": active,
         "period": filters["period"],
         "period_presets": metrics.PERIOD_PRESETS,

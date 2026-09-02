@@ -98,7 +98,8 @@ PERIOD = "?start=2026-08-01&end=2026-08-31&category=18"
 
 
 @pytest.mark.parametrize("path", [
-    "/", "/leads", "/deals", "/movement", "/people", "/table", "/quality",
+    "/", "/leads", "/deals", "/movement", "/people", "/objects", "/table",
+    "/quality",
 ])
 def test_hostile_crm_content_is_never_rendered_as_markup(client, path):
     body = client.get(f"{BASE}{path}{PERIOD}").text

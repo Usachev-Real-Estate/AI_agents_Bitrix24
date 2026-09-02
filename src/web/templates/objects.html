@@ -1,0 +1,283 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}Объекты{% endblock %}
+
+{# Воронка и отдел к объектам Афины не относятся: у неё свой справочник
+   отделов и никаких воронок Битрикса. Период применяется только к истории
+   снятий — у остальных цифр это состояние «прямо сейчас», и переключатель
+   периода над ними читался бы как неработающий фильтр. #}
+{% block filters %}
+<form class="filters" method="get" action="" data-autosubmit>
+  <div class="chips">
+    {% for key, label in views %}
+      <a class="chip {{ 'active' if selected.view == key else '' }}"
+         href="?{{ qs(request, view=key, page=None, id=None) }}">{{ label }}</a>
+    {% endfor %}
+  </div>
+  {% if selected.view == 'removals' and selected.object_id is none %}
+    <div class="chips">
+      {% for key, label in period_presets.items() %}
+        <a class="chip {{ 'active' if period.preset == key else '' }}"
+           href="?{{ qs(request, period=key, start=None, end=None, page=None) }}">{{ label }}</a>
+      {% endfor %}
+    </div>
+    <label class="field">с
+      <input type="date" name="start" value="{{ period.start }}"></label>
+    <label class="field">по
+      <input type="date" name="end" value="{{ period.end }}"></label>
+  {% else %}
+    <div class="chips">
+      {% for key, item in listing_filters.items() %}
+        <a class="chip {{ 'active' if selected.filter == key else '' }}"
+           href="?{{ qs(request, filter=key, page=None, id=None) }}">{{ item[0] }}</a>
+      {% endfor %}
+    </div>
+  {% endif %}
+  <label class="field">
+    <input type="search" name="q" placeholder="адрес, ЖК или ID"
+           value="{{ selected.q }}"></label>
+  <input type="hidden" name="view" value="{{ selected.view }}">
+  <input type="hidden" name="filter" value="{{ selected.filter }}">
+  {% if selected.view == 'removals' %}
+    <input type="hidden" name="period" value="{{ period.preset }}">
+    {% if selected.object_id is not none %}
+      <input type="hidden" name="start" value="{{ period.start }}">
+      <input type="hidden" name="end" value="{{ period.end }}">
+    {% endif %}
+  {% endif %}
+  <button class="btn" type="submit">Найти</button>
+</form>
+{% endblock %}
+
+{% block content %}
+<h1 class="section-title">Объекты в Афине CRM</h1>
+
+{% if not configured %}
+  <div class="notice notice-warn">
+    <span>⚠</span>
+    <span>Связь с Афиной не настроена. Задайте <code>AFINA_API_KEY</code>
+      (значение <code>PUBLIC_API_KEY</code> на стороне Афины) и
+      <code>AFINA_API_BASE_URL</code> в <code>.env</code> и перезапустите
+      дашборд.</span>
+  </div>
+{% else %}
+
+  {% if error %}
+    <div class="notice notice-bad">
+      <span>⚠</span>
+      <span>{{ error }}</span>
+    </div>
+  {% endif %}
+
+  {% if summary %}
+    <div class="grid grid-kpi">
+      {% for key, label, hint in summary_tiles %}
+        {{ ui.tile(label, summary.get(key) | int_ru, hint=hint) }}
+      {% endfor %}
+    </div>
+    {{ ui.definition('Счётчики независимы и пересекаются: объект может быть
+      одновременно в рекламе и на сайте, поэтому складывать их нельзя. Копии
+      считаются отдельно — одна квартира в двух рекламных аккаунтах даёт две
+      карточки.') }}
+  {% endif %}
+
+  {% if card %}
+    <div class="card mt-16">
+      <div class="card-head">
+        <div>
+          <h2>#{{ card.id }} · {{ card.title or card.address or 'без названия' }}</h2>
+          <p class="card-sub">{{ card.address or '—' }}{% if card.complex_name %} ·
+            {{ card.complex_name }}{% endif %}{% if card.district %} ·
+            {{ card.district }}{% endif %}</p>
+        </div>
+        <div class="chips">
+          <a class="chip" href="?{{ qs(request, id=None) }}">← ко всем объектам</a>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <tbody>
+            <tr><td class="muted">Статус</td><td>{{ card.status or '—' }}</td></tr>
+            <tr><td class="muted">В рекламе</td>
+              <td>{{ 'да' if card.in_ad else 'нет' }}</td></tr>
+            <tr><td class="muted">На сайте</td>
+              <td>{{ 'да' if card.is_published else 'нет' }}</td></tr>
+            <tr><td class="muted">Период размещения</td>
+              <td>{{ card.ad_period or '—' }}</td></tr>
+            <tr><td class="muted">Причина снятия</td>
+              <td>{% if card.removal %}{{ card.removal.reason or '—' }}
+                {% else %}—{% endif %}</td></tr>
+            <tr><td class="muted">Создан</td>
+              <td>{{ card.created_at | datetime_ru }}</td></tr>
+            <tr><td class="muted">Опубликован в рекламе</td>
+              <td>{{ card.published_to_ads_at | datetime_ru }}</td></tr>
+            <tr><td class="muted">Опубликован на сайте</td>
+              <td>{{ card.published_to_site_at | datetime_ru }}</td></tr>
+            <tr><td class="muted">Продлён</td>
+              <td>{{ card.last_renewed_at | datetime_ru }}</td></tr>
+            <tr><td class="muted">Снят с рекламы</td>
+              <td>{{ card.removed_from_ad_at | datetime_ru }}</td></tr>
+            <tr><td class="muted">Цена</td>
+              <td>{{ card.price | money if card.price else '—' }}</td></tr>
+            <tr><td class="muted">Площадь</td>
+              <td>{{ card.area | area }}</td></tr>
+            <tr><td class="muted">Брокер</td><td>{{ card.assignee_name or '—' }}</td></tr>
+            <tr><td class="muted">Отдел</td><td>{{ card.department_name or '—' }}</td></tr>
+            <tr><td class="muted">Рекламный аккаунт</td>
+              <td>{{ card.ad_account_name or '—' }}</td></tr>
+            <tr><td class="muted">Копия</td>
+              <td>{% if card.is_copy %}да, оригинал #{{ card.original_flat_id }}
+                {% else %}нет{% endif %}</td></tr>
+          </tbody>
+        </table>
+      </div>
+      {{ ui.definition('Карточка показывает состояние на сейчас. Причина снятия
+        живёт в поле объекта и не стирается при возврате в рекламу, поэтому
+        здесь она показана только у снятых.') }}
+    </div>
+  {% elif table and selected.view == 'removals' %}
+    <div class="card mt-16">
+      <div class="card-head">
+        <div>
+          <h2>Снятия с рекламы · найдено {{ table.total | int_ru }}</h2>
+          <p class="card-sub">События журнала Афины за {{ period.label }}, а не
+            текущий статус. Один объект попадает сюда столько раз, сколько раз
+            его снимали.</p>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th class="num nowrap">Когда сняли</th>
+              <th>Объект</th>
+              <th>Причина</th>
+              <th>Комментарий</th>
+              <th>Статус сейчас</th>
+              <th>Брокер</th>
+              <th>Отдел</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in table.rows %}
+              <tr>
+                <td class="num"><a href="?{{ qs(request, id=row.flat_id) }}">
+                  {{ row.flat_id }}</a></td>
+                <td class="num nowrap">{{ row.removed_at | datetime_ru }}</td>
+                <td class="ellipsis" title="{{ row.address or row.title or '' }}">
+                  {{ row.title or row.address or '—' }}
+                  {% if row.complex_name %}<span class="muted">·
+                    {{ row.complex_name }}</span>{% endif %}</td>
+                <td>{{ row.removal.category or '—' }}</td>
+                <td class="ellipsis" title="{{ row.removal.comment or '' }}">
+                  {{ row.removal.comment or '—' }}</td>
+                <td class="muted">{{ row.current_status or '—' }}</td>
+                <td>{{ row.assignee_name or '—' }}</td>
+                <td class="muted">{{ row.department_name or '—' }}</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="8" class="empty">За этот период снятий не было</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% if table.pages > 1 %}
+      <div class="pagination">
+        {% if table.page > 1 %}
+          <a class="btn" href="?{{ qs(request, page=table.page - 1) }}">← назад</a>
+        {% endif %}
+        <span>страница {{ table.page }} из {{ table.pages }}</span>
+        {% if table.page < table.pages %}
+          <a class="btn" href="?{{ qs(request, page=table.page + 1) }}">вперёд →</a>
+        {% endif %}
+      </div>
+      {% endif %}
+      {{ ui.definition('Границы периода — календарные дни по UTC, обе
+        включающие. Снятия по истечению срока размещения Афина в журнал не
+        пишет: такой объект виден в списке «Сняты с рекламы», но не здесь.') }}
+    </div>
+  {% elif table %}
+    <div class="card mt-16">
+      <div class="card-head">
+        <div>
+          <h2>{{ listing_filters[selected.filter][0] }} ·
+            найдено {{ table.total | int_ru }}</h2>
+          <p class="card-sub">Состояние на сейчас: реклама, сайт и даты событий
+            из журнала Афины.</p>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Объект</th>
+              <th>Статус</th>
+              <th class="nowrap">Период рекламы</th>
+              <th class="num nowrap">В рекламе с</th>
+              <th class="num nowrap">На сайте с</th>
+              <th class="num nowrap">Продлён</th>
+              <th class="num nowrap">Снят</th>
+              <th>Причина снятия</th>
+              <th>Брокер</th>
+              <th>Отдел</th>
+              <th>Аккаунт</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in table.rows %}
+              <tr>
+                <td class="num"><a href="?{{ qs(request, id=row.id) }}">
+                  {{ row.id }}</a></td>
+                <td class="ellipsis" title="{{ row.address or row.title or '' }}">
+                  {{ row.title or row.address or '—' }}
+                  {% if row.complex_name %}<span class="muted">·
+                    {{ row.complex_name }}</span>{% endif %}
+                  {% if row.is_copy %}<span class="badge"
+                    title="Копия объекта #{{ row.original_flat_id }} в другом
+                    рекламном аккаунте">копия</span>{% endif %}</td>
+                <td class="nowrap">{{ row.status or '—' }}
+                  {% if row.is_published %}<span class="badge badge-won"
+                    title="Опубликован на сайте">сайт</span>{% endif %}</td>
+                <td class="nowrap muted">{{ row.ad_period or '—' }}</td>
+                <td class="num nowrap">{{ row.published_to_ads_at | date_ru }}</td>
+                <td class="num nowrap">{{ row.published_to_site_at | date_ru }}</td>
+                <td class="num nowrap">{{ row.last_renewed_at | date_ru }}</td>
+                <td class="num nowrap">{{ row.removed_from_ad_at | date_ru }}</td>
+                <td class="ellipsis" title="{{ row.removal.reason if row.removal else '' }}">
+                  {% if row.removal %}{{ row.removal.category or '—' }}
+                    {% if row.removal.comment %}<span class="muted">·
+                      {{ row.removal.comment }}</span>{% endif %}
+                  {% else %}—{% endif %}</td>
+                <td>{{ row.assignee_name or '—' }}</td>
+                <td class="muted">{{ row.department_name or '—' }}</td>
+                <td class="muted">{{ row.ad_account_name or '—' }}</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="12" class="empty">Ничего не найдено</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% if table.pages > 1 %}
+      <div class="pagination">
+        {% if table.page > 1 %}
+          <a class="btn" href="?{{ qs(request, page=table.page - 1) }}">← назад</a>
+        {% endif %}
+        <span>страница {{ table.page }} из {{ table.pages }}</span>
+        {% if table.page < table.pages %}
+          <a class="btn" href="?{{ qs(request, page=table.page + 1) }}">вперёд →</a>
+        {% endif %}
+      </div>
+      {% endif %}
+      {{ ui.definition('Даты «в рекламе с» и «на сайте с» — первое событие
+        публикации в журнале Афины. У объектов, заведённых до журнала, они
+        пусты; период рекламы в такой строке остаётся единственным
+        ориентиром. Причина снятия показана только у снятых: у вернувшихся в
+        рекламу поле причины остаётся заполненным старым значением.') }}
+    </div>
+  {% endif %}
+
+{% endif %}
+{% endblock %}

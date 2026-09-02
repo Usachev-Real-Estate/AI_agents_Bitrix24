@@ -54,6 +54,20 @@ def fmt_days(value: Any) -> str:
     return f"{number:.1f}".rstrip("0").rstrip(".").replace(".", ",") + f"{NBSP}дн"
 
 
+def fmt_area(value: Any) -> str:
+    """Площадь в квадратных метрах. Десятые — не украшение.
+
+    int_ru округлил бы 62,4 до 62, а 44,5 и 45,5 — в разные стороны: две
+    соседние квартиры в списке разъехались бы на метр из ниоткуда.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    text = f"{number:.1f}".rstrip("0").rstrip(".").replace(".", ",")
+    return f"{text}{NBSP}м²"
+
+
 def fmt_date(value: Any) -> str:
     """UTC ISO → дата в московском времени, как её видит пользователь портала."""
     if not value:
@@ -84,6 +98,7 @@ FILTERS = {
     "money": fmt_money,
     "pct": fmt_pct,
     "days": fmt_days,
+    "area": fmt_area,
     "date_ru": fmt_date,
     "datetime_ru": fmt_datetime,
 }

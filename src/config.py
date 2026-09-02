@@ -460,6 +460,35 @@ class Settings(BaseSettings):
         validation_alias="DASHBOARD_LOGIN_LOCKOUT_MINUTES",
     )
 
+    # --- Афина CRM: объекты для дашборда ---
+    # Read-only витрина Афины: тот же ключ, что у публичного каталога, но
+    # другой контракт — статусы, причины снятия и даты событий.
+    # Префикс afina_api_, а не afina_: «ID Афины» — это поле сделки в Bitrix
+    # (SELLERS_AFINA_UF), и путать его с внешним API не надо.
+    afina_api_base_url: str = Field(
+        default="https://afina-crm.ru",
+        validation_alias="AFINA_API_BASE_URL",
+    )
+    # Пусто → раздел «Объекты» не показывается и в навигацию не попадает.
+    # Так дашборд не рисует пустую страницу с ошибкой там, где интеграцию
+    # просто не настроили.
+    afina_api_key: str = Field(
+        default="",
+        validation_alias="AFINA_API_KEY",
+    )
+    # Дашборд синхронный: страница ждёт ответ Афины. Долгий таймаут держал бы
+    # воркер uvicorn занятым, поэтому он заметно короче хардкодных 60 с
+    # фоновых задач.
+    afina_api_timeout_seconds: float = Field(
+        default=10.0,
+        validation_alias="AFINA_API_TIMEOUT_SECONDS",
+    )
+    # Потолок страницы у Афины — 100. Просить больше значит получить 422.
+    afina_api_page_size: int = Field(
+        default=50,
+        validation_alias="AFINA_API_PAGE_SIZE",
+    )
+
     @property
     def analytics_amount_field_by_category(self) -> dict[int, str]:
         """Поле суммы по воронкам. Пусто → OPPORTUNITY."""
