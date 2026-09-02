@@ -3,6 +3,9 @@
 {% block title %}Таблица{% endblock %}
 
 {% block extra_filters %}
+  {# У лидов воронки нет: селектор на этой вкладке принимал бы выбор и молча
+     его игнорировал. Лучше не показывать фильтр, чем показывать неработающий. #}
+  {% if entity != 'lead' %}
   <label class="field">Воронка
     <select name="category">
       <option value="all" {{ 'selected' if category_id is none else '' }}>Все</option>
@@ -12,6 +15,7 @@
       {% endfor %}
     </select>
   </label>
+  {% endif %}
   {% if is_admin or departments | length > 1 %}
   <label class="field">Отдел
     <select name="department">

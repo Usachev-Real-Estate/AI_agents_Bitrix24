@@ -401,6 +401,14 @@ class Settings(BaseSettings):
         default=5,
         validation_alias="ANALYTICS_ETL_OVERLAP_MINUTES",
     )
+    # Валюта, в которой считаются денежные метрики дашборда. Складывать
+    # доллары с рублями нельзя, а курса у витрины нет: она хранит сумму ровно
+    # так, как её ввели в Bitrix. Сделки в другой валюте в суммы не входят и
+    # показываются отдельным счётчиком.
+    analytics_base_currency: str = Field(
+        default="RUB",
+        validation_alias="ANALYTICS_BASE_CURRENCY",
+    )
     # Поле суммы по воронкам: {"0": "UF_CRM_XXX"}. Пусто → OPPORTUNITY.
     analytics_amount_field_by_category_json: str = Field(
         default="{}",

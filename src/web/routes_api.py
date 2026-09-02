@@ -106,6 +106,10 @@ async def api_export_csv(request: Request) -> StreamingResponse:
     params = dict(request.query_params)
     requested = _int_or_none(params.get("size")) or CSV_MAX_ROWS
     params["size"] = str(max(1, min(CSV_MAX_ROWS, requested)))
+    # Потолок страницы (500 строк) держит интерфейс лёгким, но выгрузку он
+    # обрезал молча: подпись обещала десять тысяч, в файл уходила первая
+    # страница сортировки, и в чьём-то Excel сходился неверный итог.
+    params["max_rows"] = str(CSV_MAX_ROWS)
     params["page"] = "1"
 
     with read_analytics(request) as conn:
@@ -118,6 +122,16 @@ async def api_export_csv(request: Request) -> StreamingResponse:
     for row in result["rows"]:
         row["link"] = crm_link(result["entity"], row["id"], settings.b24_webhook_url)
         writer.writerow([_csv_cell(row.get(key)) for key, _ in CSV_COLUMNS])
+
+    # Обрезка обязана быть видна в самом файле: тот, кто считает по выгрузке в
+    # Excel, страницу дашборда рядом не держит.
+    if result["total"] > len(result["rows"]):
+        writer.writerow([])
+        writer.writerow([
+            f"Показаны первые {len(result['rows'])} строк из {result['total']}: "
+            f"выгрузка ограничена {CSV_MAX_ROWS} строками. "
+            f"Сузьте фильтры, чтобы выгрузить остальное.",
+        ])
 
     payload = "﻿" + buffer.getvalue()
     filename = f"{result['entity']}s.csv"
@@ -156,6 +170,7 @@ def _table_from_request(
         direction=params.get("dir", "desc"),
         page=_int_or_none(params.get("page")) or 1,
         page_size=_int_or_none(params.get("size")) or 50,
+        max_rows=_int_or_none(params.get("max_rows")) or metrics.MAX_PAGE_SIZE,
     )
 
 

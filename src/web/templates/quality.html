@@ -2,6 +2,26 @@
 {% import "macros.html" as ui %}
 {% block title %}Качество данных{% endblock %}
 
+{# Период на этой странице не применяется ни к одной цифре: заполненность,
+   сходимость и журнал прогонов считаются по всей витрине. Чипы периода здесь
+   переключались и ничего не меняли — это читается как «за любой месяц данные
+   одинаковые», а не как неработающий фильтр. Оставлен только выбор воронки. #}
+{% block filters %}
+<form class="filters" method="get" action="" data-autosubmit>
+  <label class="field">Воронка
+    <select name="category">
+      <option value="all" {{ 'selected' if category_id is none else '' }}>Все</option>
+      {% for pipeline in pipelines %}
+        <option value="{{ pipeline.category_id }}"
+          {{ 'selected' if category_id == pipeline.category_id else '' }}>
+          {{ pipeline.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <span class="muted">Числа на странице — по всей витрине, период к ним не применяется</span>
+</form>
+{% endblock %}
+
 {% block content %}
 <h1 class="section-title">Качество данных и состояние загрузки</h1>
 
@@ -54,6 +74,9 @@
             <td class="num">{{ quality.deals.no_assignee | int_ru }}</td></tr>
           <tr><td>Закрытых без даты закрытия</td>
             <td class="num">{{ quality.deals.closed_no_date | int_ru }}</td></tr>
+          <tr><td>Сделок в другой валюте (в суммы не входят)</td>
+            <td class="num {{ 'delta-down' if quality.deals.foreign_currency else '' }}">
+              {{ quality.deals.foreign_currency | int_ru }}</td></tr>
           <tr><td>Сделок на неизвестной стадии</td>
             <td class="num">{{ quality.orphan_stage_deals | int_ru }}</td></tr>
           <tr><td>Лидов без источника</td>

@@ -44,12 +44,21 @@ DEFAULT_PERIOD = "30d"
 # период
 # --------------------------------------------------------------------------
 
+# Витрина хранит время в UTC, а бизнес живёт по Москве. Границы периодов
+# обязаны совпадать с календарём того, кто смотрит отчёт: пока сутки резались
+# по UTC, «Текущий месяц» начинался в 03:00 МСК первого числа, и всё закрытое
+# ночью уезжало в соседний период — ровно на стыке месяца, когда и считают
+# отчётность. Даты на экране (format.py) переводятся в эту же зону.
+BUSINESS_TZ = timezone(timedelta(hours=3))
+
+
 def _iso(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).isoformat()
 
 
 def _day_start(day: date) -> datetime:
-    return datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+    """Полночь этого дня по московскому календарю."""
+    return datetime(day.year, day.month, day.day, tzinfo=BUSINESS_TZ)
 
 
 def resolve_period(
@@ -63,7 +72,7 @@ def resolve_period(
     «по 31 августа» либо теряет весь последний день, либо задваивает его при
     сравнении с соседним периодом.
     """
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now(BUSINESS_TZ).date()
 
     if start or end:
         since_day = _parse_day(start) or (today - timedelta(days=30))
@@ -131,6 +140,30 @@ def _parse_day(value: str | None) -> date | None:
 # --------------------------------------------------------------------------
 # служебное
 # --------------------------------------------------------------------------
+
+def base_currency() -> str:
+    """Валюта денежных метрик. По умолчанию рубль, меняется настройкой."""
+    try:
+        from config import get_settings
+
+        return (get_settings().analytics_base_currency or "RUB").strip().upper()
+    except Exception:  # pragma: no cover — конфиг недоступен в изолированных тестах
+        return "RUB"
+
+
+def _money_of(alias: str = "") -> str:
+    """Условие «эта сумма выражена в валюте, которую можно складывать».
+
+    Пустая валюта — это карточка, где поле не заполнено: портал в таких
+    случаях подразумевает валюту портала, и выбрасывать их значит потерять
+    почти всё. А вот сделку в долларах сложить с рублёвой нельзя: курса у
+    витрины нет, и «1 910 000 ₽», где десять тысяч из них доллары, — это
+    неверное число, а не приблизительное.
+    """
+    prefix = f"{alias}." if alias else ""
+    return (f"({prefix}currency_id = '' OR {prefix}currency_id IS NULL"
+            f" OR upper({prefix}currency_id) = :base)")
+
 
 def _rows(conn, sql: str, params: dict[str, Any] | Sequence[Any] = ()) -> list[dict[str, Any]]:
     return [dict(row) for row in conn.execute(sql, params).fetchall()]
@@ -337,29 +370,52 @@ def win_rate(conn, category_id: int, since: str, until: str) -> dict[str, Any]:
 
     Знаменатель — только закрытые сделки. Считать от всех, включая открытые,
     значит занижать конверсию тем сильнее, чем больше сделок в работе.
+
+    Штуки считаются по всем сделкам, деньги — только по базовой валюте
+    (см. _money_of). Выигранные сделки в другой валюте видны отдельным
+    счётчиком ``won_foreign``: молча сложить их с рублями значит напечатать
+    неверное число со знаком ₽.
     """
+    money_ok = _money_of()
     row = _one(
         conn,
-        """
+        f"""
         SELECT
             SUM(is_won) AS won,
             SUM(is_lost) AS lost,
-            COALESCE(SUM(CASE WHEN is_won = 1 THEN opportunity ELSE 0 END), 0) AS won_amount
+            SUM(CASE WHEN is_won = 1 AND opportunity > 0 AND {money_ok}
+                     THEN 1 ELSE 0 END) AS won_filled,
+            COALESCE(SUM(CASE WHEN is_won = 1 AND {money_ok}
+                              THEN opportunity ELSE 0 END), 0) AS won_amount,
+            SUM(CASE WHEN is_won = 1 AND NOT {money_ok} THEN 1 ELSE 0 END) AS won_foreign
         FROM v_deal
         WHERE is_closed = 1
           AND closedate >= :since AND closedate < :until
           AND (:cat IS NULL OR category_id = :cat)
         """,
-        {"cat": category_id, "since": since, "until": until},
+        {"cat": category_id, "since": since, "until": until, "base": base_currency()},
     )
     won = int(row.get("won") or 0)
     lost = int(row.get("lost") or 0)
+    won_filled = int(row.get("won_filled") or 0)
+    won_amount = float(row.get("won_amount") or 0)
+    won_foreign = int(row.get("won_foreign") or 0)
     closed = won + lost
+    # Средний чек делится на число сделок С ЗАПОЛНЕННОЙ суммой, а не на все
+    # выигранные: сделка с пустой комиссией входила в делитель штукой, а в
+    # делимое нулём и занижала чек тем сильнее, чем хуже заполнены карточки.
+    # Сколько сделок легло в основание, отдаём рядом — подпись обязана его
+    # называть, иначе «средний чек» опять читается как «по всем выигранным».
     return {
         "won": won, "lost": lost, "closed": closed,
         "win_rate": _share(won, closed),
-        "won_amount": float(row.get("won_amount") or 0),
-        "avg_check": round(float(row.get("won_amount") or 0) / won, 2) if won else 0.0,
+        "won_amount": won_amount,
+        "won_filled": won_filled,
+        "won_coverage": _share(won_filled, won - won_foreign),
+        "won_foreign": won_foreign,
+        "currency": base_currency(),
+        "avg_check": round(won_amount / won_filled, 2) if won_filled else 0.0,
+        "avg_check_base": won_filled,
     }
 
 
@@ -570,6 +626,25 @@ def stage_norms(conn, category_id: int) -> dict[str, float]:
     }
 
 
+def funnel_norm_days(conn, category_id: int) -> float:
+    """Запасная норма по всей воронке: p75 длительности любой её стадии.
+
+    Нужна стадиям, с которых ещё никто не уходил. Своих завершённых интервалов
+    у такой стадии нет, и пока порог брался только из них, карточки на ней
+    выпадали из списка целиком — включая те, что стоят там дольше всех. Молчать
+    о самых давних простоях хуже, чем сравнить их с общей нормой воронки.
+    """
+    values = [
+        row["days"] for row in _rows(
+            conn,
+            "SELECT duration_sec / 86400.0 AS days FROM v_stage_norm "
+            "WHERE category_id = :cat AND duration_sec >= 0",
+            {"cat": category_id},
+        ) if row["days"] is not None
+    ]
+    return percentile(values, 0.75) or 0.0
+
+
 def stuck_deals(
     conn,
     category_id: int,
@@ -580,14 +655,22 @@ def stuck_deals(
 
     Порог берётся из собственных данных воронки, а не из выдуманного числа
     дней: у «Подбора» и «Офера» нормальный срок разный, и единый порог либо
-    завалит список шумом, либо пропустит реальные простои.
+    завалит список шумом, либо пропустит реальные простои. У стадии без
+    завершённых интервалов своей нормы нет — тогда берётся общая по воронке, и
+    строка честно говорит, откуда её порог (``threshold_source``).
 
     Порог общий по воронке независимо от того, кто смотрит: и при фильтре по
     отделу, и у РОПа, видящего только свой отдел. Иначе медленный отдел
     сравнивался бы сам с собой и никогда не выглядел медленным, а одна и та же
     карточка была бы «зависшей» для директора и нормальной для РОПа.
+
+    Интервал берётся ровно один — последний незакрытый вход в ТЕКУЩУЮ стадию
+    карточки. Соединение со всеми незакрытыми интервалами задваивало карточку,
+    у которой в истории осталось два открытых входа, и показывало её дни от
+    чужой стадии.
     """
     thresholds = stage_norms(conn, category_id)
+    fallback = funnel_norm_days(conn, category_id)
     rows = _rows(
         conn,
         """
@@ -598,7 +681,11 @@ def stuck_deals(
                (julianday('now') - julianday(e.entered_at)) AS days_in_stage
         FROM v_deal d
         JOIN v_stage_event e
-          ON e.entity_type = 'deal' AND e.entity_id = d.deal_id AND e.left_at IS NULL
+          ON e.entity_type = 'deal' AND e.entity_id = d.deal_id
+         AND e.stage_id = d.stage_id AND e.left_at IS NULL
+         AND e.seq = (SELECT MAX(last.seq) FROM v_stage_event last
+                      WHERE last.entity_type = 'deal' AND last.entity_id = d.deal_id
+                        AND last.stage_id = d.stage_id AND last.left_at IS NULL)
         LEFT JOIN dim_stage s ON s.stage_id = d.stage_id AND s.category_id = d.category_id
         LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
         WHERE d.category_id = :cat AND d.is_closed = 0
@@ -607,15 +694,17 @@ def stuck_deals(
         """,
         {"cat": category_id, "dept": department_id},
     )
-    stuck = [
-        row for row in rows
-        if row["days_in_stage"] is not None
-        and thresholds.get(row["stage_id"], 0) > 0
-        and row["days_in_stage"] > thresholds[row["stage_id"]]
-    ]
-    for row in stuck:
-        row["days_in_stage"] = round(row["days_in_stage"], 1)
-        row["threshold_days"] = round(thresholds.get(row["stage_id"], 0), 1)
+    stuck = []
+    for row in rows:
+        days = row["days_in_stage"]
+        own = thresholds.get(row["stage_id"], 0) or 0
+        threshold = own or fallback
+        if days is None or threshold <= 0 or days <= threshold:
+            continue
+        row["days_in_stage"] = round(days, 1)
+        row["threshold_days"] = round(threshold, 1)
+        row["threshold_source"] = "стадия" if own else "воронка"
+        stuck.append(row)
     return stuck[:limit]
 
 
@@ -712,41 +801,50 @@ def lead_sources(conn, since: str, until: str) -> list[dict[str, Any]]:
 def lead_first_move_days(conn, since: str, until: str) -> dict[str, Any]:
     """Сколько лид лежит до первой смены статуса.
 
-    Прокси скорости первого касания: считается по истории стадий лидов и
-    доступен только если портал её ведёт (см. etl._lead_history_supported).
-    ``supported=False`` означает «не измеряем», а не «ноль».
+    Необработанный лид считается по времени ожидания «до сих пор», а не
+    выбрасывается. Пока в расчёт шли только лиды с закрытым первым интервалом,
+    метрика отвечала на вопрос «как быстро обрабатывают ТЕХ, КОГО обработали»,
+    и была тем лучше, чем больше лидов не тронули вовсе: девять лежащих месяц
+    карточек не мешали показать медиану в два часа по единственной десятой.
+
+    ``waiting`` — сколько лидов когорты ещё ждут первой обработки. Их время
+    измерено снизу: оно продолжает расти, поэтому медиана с ними — тоже оценка
+    снизу, и подпись обязана это называть.
+
+    Доступна, только если портал ведёт историю статусов лидов
+    (см. etl._lead_history_supported). ``supported=False`` означает
+    «не измеряем», а не «ноль».
     """
     supported = _one(
         conn, "SELECT value FROM analytics_meta WHERE key = 'lead_history_supported'",
     ).get("value") == "1"
     if not supported:
-        return {"supported": False, "median": None, "p90": None, "count": 0}
+        return {"supported": False, "median": None, "p90": None,
+                "count": 0, "waiting": 0}
 
-    values = [
-        row["days"] for row in _rows(
-            conn,
-            """
-            SELECT MIN(e.duration_sec) / 86400.0 AS days
-            FROM v_stage_event e
-            JOIN v_lead l ON l.lead_id = e.entity_id
-            WHERE e.entity_type = 'lead' AND e.seq = 0 AND e.duration_sec IS NOT NULL
-              AND l.date_create >= :since AND l.date_create < :until
-            GROUP BY e.entity_id
-            """,
-            {"since": since, "until": until},
-        ) if row["days"] is not None
-    ]
+    rows = _rows(
+        conn,
+        """
+        SELECT CASE WHEN e.duration_sec IS NOT NULL THEN e.duration_sec / 86400.0
+                    ELSE julianday('now') - julianday(e.entered_at) END AS days,
+               CASE WHEN e.duration_sec IS NULL THEN 1 ELSE 0 END AS waiting
+        FROM v_stage_event e
+        JOIN v_lead l ON l.lead_id = e.entity_id
+        WHERE e.entity_type = 'lead' AND e.seq = 0
+          AND l.date_create >= :since AND l.date_create < :until
+        """,
+        {"since": since, "until": until},
+    )
+    values = [max(0.0, row["days"]) for row in rows if row["days"] is not None]
+    waiting = sum(int(row["waiting"] or 0) for row in rows if row["days"] is not None)
     return {
         "supported": True,
         "median": round(percentile(values, 0.5) or 0, 2),
         "p90": round(percentile(values, 0.9) or 0, 2),
         "count": len(values),
+        "waiting": waiting,
     }
 
-
-# --------------------------------------------------------------------------
-# деньги
-# --------------------------------------------------------------------------
 
 def money(conn, category_id: int | None, since: str, until: str) -> dict[str, Any]:
     """Деньги + ПОКРЫТИЕ поля суммы.
@@ -756,42 +854,50 @@ def money(conn, category_id: int | None, since: str, until: str) -> dict[str, An
     брокерам его заполнить. «12,4 млн ₽» без приписки «заполнено у 68% сделок»
     вводит в заблуждение ровно там, где решается вопрос о деньгах.
     """
+    money_ok = _money_of()
     open_row = _one(
         conn,
-        """
+        f"""
         SELECT COUNT(*) AS deals,
-               SUM(CASE WHEN opportunity > 0 THEN 1 ELSE 0 END) AS filled,
-               COALESCE(SUM(opportunity), 0) AS amount
+               SUM(CASE WHEN opportunity > 0 AND {money_ok} THEN 1 ELSE 0 END) AS filled,
+               COALESCE(SUM(CASE WHEN {money_ok} THEN opportunity ELSE 0 END), 0) AS amount,
+               SUM(CASE WHEN NOT {money_ok} THEN 1 ELSE 0 END) AS foreign_deals
         FROM v_deal
         WHERE is_closed = 0
           AND (:cat IS NULL OR category_id = :cat)
         """,
-        {"cat": category_id},
+        {"cat": category_id, "base": base_currency()},
     )
+    # Покрытие берётся из того же расчёта, что и сама сумма. Отдельный запрос
+    # без is_closed давал числитель больше знаменателя: выигранная, но ещё не
+    # закрытая сделка попадала только в «заполнено», и подпись под суммой
+    # печатала «заполнено у 4 из 3 сделок».
     won = win_rate(conn, category_id, since, until)
-    won_coverage = _one(
-        conn,
-        """
-        SELECT COUNT(*) AS deals,
-               SUM(CASE WHEN opportunity > 0 THEN 1 ELSE 0 END) AS filled
-        FROM v_deal
-        WHERE is_won = 1
-          AND closedate >= :since AND closedate < :until
-          AND (:cat IS NULL OR category_id = :cat)
-        """,
-        {"cat": category_id, "since": since, "until": until},
-    )
     return {
         "open_amount": float(open_row.get("amount") or 0),
         "open_deals": int(open_row.get("deals") or 0),
         "open_filled": int(open_row.get("filled") or 0),
-        "open_coverage": _share(open_row.get("filled") or 0, open_row.get("deals") or 0),
+        "open_coverage": _share(
+            open_row.get("filled") or 0,
+            (open_row.get("deals") or 0) - (open_row.get("foreign_deals") or 0),
+        ),
+        "open_foreign": int(open_row.get("foreign_deals") or 0),
+        "won_foreign": won["won_foreign"],
+        "currency": won["currency"],
         "won_amount": won["won_amount"],
         "won_deals": won["won"],
-        "won_filled": int(won_coverage.get("filled") or 0),
-        "won_coverage": _share(won_coverage.get("filled") or 0, won_coverage.get("deals") or 0),
+        "won_filled": won["won_filled"],
+        "won_coverage": won["won_coverage"],
         "avg_check": won["avg_check"],
+        "avg_check_base": won["avg_check_base"],
     }
+
+
+# Сколько закрытых сделок должна накопить стадия, чтобы доля выигранных на ней
+# считалась вероятностью. Ниже этого числа один исход двигает результат на
+# десятки процентов: «50%» из двух сделок выглядит на экране так же
+# убедительно, как «50%» из двухсот.
+FORECAST_MIN_CLOSED = 10
 
 
 def stage_win_probability(conn, category_id: int) -> dict[str, float]:
@@ -814,17 +920,28 @@ def stage_win_probability(conn, category_id: int) -> dict[str, float]:
         """,
         {"cat": category_id},
     )
+    # Стадии, по которым закрытых сделок меньше порога, в ответ не попадают:
+    # у них вероятности НЕТ, и это не то же самое, что «ноль». Доля выигранных
+    # из двух закрытых сделок — случайность, а не история, и показывать по ней
+    # деньги нельзя. Отсутствие ключа прогноз обрабатывает отдельно.
     return {
-        row["stage_id"]: (row["won"] / row["closed"]) if row["closed"] else 0.0
+        row["stage_id"]: row["won"] / row["closed"]
         for row in rows
+        if (row["closed"] or 0) >= FORECAST_MIN_CLOSED
     }
 
 
 def weighted_forecast(conn, category_id: int) -> dict[str, Any]:
     """Взвешенный прогноз: сумма открытых сделок × вероятность их стадии.
 
-    ``coverage`` показывает, какая доля открытых сделок вообще имеет сумму —
-    прогноз по половине заполненных сделок это половина прогноза.
+    Рядом с прогнозом обязаны стоять два разных покрытия, иначе он читается
+    как полная картина:
+
+    * ``coverage`` — доля открытых сделок, у которых вообще заполнена сумма.
+      Прогноз по половине заполненных сделок это половина прогноза.
+    * ``priced_share`` — доля суммы, для которой у стадии есть накопленная
+      вероятность. Остаток лежит в ``unpriced_amount``: по этим стадиям
+      закрытых сделок меньше FORECAST_MIN_CLOSED, и оценивать их нечем.
     """
     probabilities = stage_win_probability(conn, category_id)
     rows = _rows(
@@ -841,25 +958,43 @@ def weighted_forecast(conn, category_id: int) -> dict[str, Any]:
     )
     stage_names = {s["stage_id"]: s["name"] for s in stages(conn, category_id)}
     total, deals, filled = 0.0, 0, 0
+    priced_amount, unpriced_amount, unpriced_deals = 0.0, 0.0, 0
     detail = []
     for row in rows:
-        probability = probabilities.get(row["stage_id"], 0.0)
-        expected = row["amount"] * probability
-        total += expected
+        probability = probabilities.get(row["stage_id"])
         deals += row["deals"]
         filled += row["filled"] or 0
+        if probability is None:
+            # Стадия без накопленной истории не обнуляет свои деньги: раньше
+            # она получала вероятность 0, и полтора миллиона в работе
+            # показывались как ожидаемый ноль. Теперь её сумма выносится из
+            # прогноза отдельной строкой «не оценено».
+            unpriced_amount += row["amount"]
+            unpriced_deals += row["deals"]
+            expected = None
+        else:
+            expected = row["amount"] * probability
+            total += expected
+            priced_amount += row["amount"]
         detail.append({
             "stage_id": row["stage_id"],
             "name": stage_names.get(row["stage_id"], row["stage_id"]),
             "deals": row["deals"], "amount": row["amount"],
-            "probability": round(100 * probability, 1),
-            "expected": round(expected, 0),
+            "probability": round(100 * probability, 1) if probability is not None else None,
+            "expected": round(expected, 0) if expected is not None else None,
         })
-    detail.sort(key=lambda r: r["expected"], reverse=True)
+    detail.sort(key=lambda r: (r["expected"] is None, -(r["expected"] or 0)))
+    open_amount = priced_amount + unpriced_amount
     return {
         "expected": round(total, 0),
         "open_deals": deals,
+        "open_amount": round(open_amount, 0),
+        "filled_deals": filled,
         "coverage": _share(filled, deals),
+        "priced_share": _share(priced_amount, open_amount),
+        "unpriced_deals": unpriced_deals,
+        "unpriced_amount": round(unpriced_amount, 0),
+        "min_closed": FORECAST_MIN_CLOSED,
         "by_stage": detail,
     }
 
@@ -869,26 +1004,51 @@ def weighted_forecast(conn, category_id: int) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 def people(conn, since: str, until: str, category_id: int | None = None) -> list[dict[str, Any]]:
-    """Срез по ответственным: нагрузка, конверсия, выигранные деньги."""
+    """Срез по ответственным: нагрузка когорты и закрытые за период деньги.
+
+    «Выиграно» и «Выиграно денег» считаются ровно тем же определением, что на
+    «Обзоре» и «Сделках»: закрытые в периоде, по дате закрытия. Раньше здесь
+    брались сделки, СОЗДАННЫЕ в периоде, и без требования быть закрытой —
+    достаточно было стоять на успешной стадии. Одна и та же подпись давала на
+    двух страницах разные числа, и сумма по людям не сходилась с итогом
+    компании.
+
+    «Сделок создано» и «Открыто из них» остаются когортой по дате создания:
+    это вопрос нагрузки, а не денег. Два окна в одной таблице — сознательный
+    выбор, поэтому каждая колонка названа своим окном в подписи под таблицей.
+    """
+    money_ok = _money_of("d")
     rows = _rows(
         conn,
-        """
+        f"""
         SELECT d.assigned_by_id AS user_id,
-               COALESCE(u.name, 'ID ' || d.assigned_by_id) AS name,
+               COALESCE(u.name, 'ID ' || CAST(d.assigned_by_id AS TEXT),
+                        'Без ответственного') AS name,
                COALESCE(u.department_name, '') AS department,
-               COUNT(*) AS deals_created,
-               SUM(CASE WHEN d.is_closed = 0 THEN 1 ELSE 0 END) AS deals_open,
-               SUM(d.is_won) AS won,
-               SUM(d.is_lost) AS lost,
-               COALESCE(SUM(CASE WHEN d.is_won = 1 THEN d.opportunity ELSE 0 END), 0) AS won_amount
+               SUM(CASE WHEN d.date_create >= :since AND d.date_create < :until
+                        THEN 1 ELSE 0 END) AS deals_created,
+               SUM(CASE WHEN d.date_create >= :since AND d.date_create < :until
+                         AND d.is_closed = 0 THEN 1 ELSE 0 END) AS deals_open,
+               SUM(CASE WHEN d.is_closed = 1 AND d.is_won = 1
+                         AND d.closedate >= :since AND d.closedate < :until
+                        THEN 1 ELSE 0 END) AS won,
+               SUM(CASE WHEN d.is_closed = 1 AND d.is_lost = 1
+                         AND d.closedate >= :since AND d.closedate < :until
+                        THEN 1 ELSE 0 END) AS lost,
+               COALESCE(SUM(CASE WHEN d.is_closed = 1 AND d.is_won = 1
+                                  AND d.closedate >= :since AND d.closedate < :until
+                                  AND {money_ok}
+                                 THEN d.opportunity ELSE 0 END), 0) AS won_amount
         FROM v_deal d
         LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
-        WHERE d.date_create >= :since AND d.date_create < :until
-          AND (:cat IS NULL OR d.category_id = :cat)
+        WHERE (:cat IS NULL OR d.category_id = :cat)
+          AND ((d.date_create >= :since AND d.date_create < :until)
+               OR (d.is_closed = 1
+                   AND d.closedate >= :since AND d.closedate < :until))
         GROUP BY d.assigned_by_id
         ORDER BY won_amount DESC, deals_created DESC
         """,
-        {"since": since, "until": until, "cat": category_id},
+        {"since": since, "until": until, "cat": category_id, "base": base_currency()},
     )
     for row in rows:
         closed = (row["won"] or 0) + (row["lost"] or 0)
@@ -915,10 +1075,13 @@ def departments(conn, since: str, until: str, category_id: int | None = None):
     return out
 
 
+# Корзины ряда нарезаются по тем же московским суткам, что и границы периода
+# (см. BUSINESS_TZ): иначе точка «1 сентября» на графике означала бы не тот
+# день, что подпись периода над ним.
 _GRAIN_SQL = {
-    "day": "substr({col}, 1, 10)",
-    "week": "strftime('%Y-W%W', {col})",
-    "month": "substr({col}, 1, 7)",
+    "day": "substr(datetime({col}, '+3 hours'), 1, 10)",
+    "week": "strftime('%Y-W%W', datetime({col}, '+3 hours'))",
+    "month": "substr(datetime({col}, '+3 hours'), 1, 7)",
 }
 
 
@@ -1036,6 +1199,10 @@ _TABLE_SORTS = {
     },
 }
 MAX_PAGE_SIZE = 500
+# Потолок выгрузки. Страница остаётся лёгкой (500 строк), а CSV отдаёт то, что
+# обещает подпись под таблицей: выгрузка на 500 строк, названная десятью
+# тысячами, — это молча обрезанный итог в чьём-то Excel.
+MAX_EXPORT_ROWS = 10_000
 
 
 def entity_table(
@@ -1055,6 +1222,7 @@ def entity_table(
     direction: str = "desc",
     page: int = 1,
     page_size: int = 50,
+    max_rows: int = MAX_PAGE_SIZE,
 ) -> dict[str, Any]:
     """Строки, из которых сложились цифры дашборда.
 
@@ -1071,7 +1239,7 @@ def entity_table(
     sort_column = _TABLE_SORTS[entity].get(sort, _TABLE_SORTS[entity]["created"])
     direction_sql = "ASC" if str(direction).lower() == "asc" else "DESC"
     page = max(1, int(page))
-    page_size = max(1, min(MAX_PAGE_SIZE, int(page_size)))
+    page_size = max(1, min(int(max_rows), int(page_size)))
 
     conditions: list[str] = []
     params: dict[str, Any] = {}
@@ -1170,6 +1338,15 @@ def entity_table(
         if until:
             conditions.append("l.date_create < :until")
             params["until"] = until
+        if only_open:
+            # «Открытый лид» — тот, по которому ещё нет сделки и чей статус не
+            # закрывает разговор (спам, нецелевой, отказ). Раньше чип на этой
+            # вкладке подсвечивался и не фильтровал ничего: условие было
+            # написано только для сделок, а параметр молча принимался.
+            conditions.append(
+                "l.converted_deal_id IS NULL"
+                " AND COALESCE(st.semantic, 'in_progress') = 'in_progress'"
+            )
         if query:
             conditions.append("(l.title LIKE :q OR CAST(l.lead_id AS TEXT) LIKE :q)")
             params["q"] = f"%{query}%"
@@ -1211,10 +1388,12 @@ def data_quality(conn, category_id: int | None = None) -> dict[str, Any]:
     Если у 40% сделок пуста сумма, «сумма в работе» — не цифра, а половина
     цифры. Эта страница ставит границу доверия к остальным.
     """
+    money_ok = _money_of()
     deals = _one(
         conn,
-        """
+        f"""
         SELECT COUNT(*) AS total,
+               SUM(CASE WHEN NOT {money_ok} THEN 1 ELSE 0 END) AS foreign_currency,
                SUM(CASE WHEN opportunity <= 0 THEN 1 ELSE 0 END) AS no_amount,
                SUM(CASE WHEN source_id = '' THEN 1 ELSE 0 END) AS no_source,
                SUM(CASE WHEN assigned_by_id IS NULL THEN 1 ELSE 0 END) AS no_assignee,
@@ -1225,7 +1404,7 @@ def data_quality(conn, category_id: int | None = None) -> dict[str, Any]:
         FROM v_deal
         WHERE (:cat IS NULL OR category_id = :cat)
         """,
-        {"cat": category_id},
+        {"cat": category_id, "base": base_currency()},
     )
     leads = _one(
         conn,

@@ -624,24 +624,45 @@ def set_watermark(conn, entity: str, *, full_sync: bool = False) -> None:
     )
 
 
+def _journal(sql: str, params: tuple) -> int | None:
+    """Записать строку журнала ОТДЕЛЬНЫМ соединением, со своим коммитом.
+
+    Журнал обязан пережить откат самой загрузки. Пока он писался тем же
+    соединением, что и данные, упавший прогон исчезал вместе с транзакцией:
+    в «Последних прогонах загрузки» оставались только успешные, лаг показывал
+    ноль минут, и ночная сверка могла падать неделями, не оставив следа на
+    странице, которая как раз и отвечает за доверие к цифрам.
+    """
+    with analytics_session() as journal:
+        return journal.execute(sql, params).lastrowid
+
+
 @contextmanager
 def etl_run(conn, kind: str, entity: str = "") -> Iterator[dict[str, int]]:
-    """Журналировать прогон: страница «Качество данных» показывает лаг и ошибки."""
-    cursor = conn.execute(
+    """Журналировать прогон: страница «Качество данных» показывает лаг и ошибки.
+
+    Своё соединение у журнала означает, что писать в него можно только когда
+    транзакция загрузки не держит блокировку: SQLite в WAL допускает одного
+    писателя. Поэтому перед записью итога транзакция прогона закрывается явно —
+    коммитом при успехе, откатом при ошибке. Внешний менеджер соединения
+    повторит то же действие вхолостую.
+    """
+    run_id = _journal(
         "INSERT INTO etl_run(kind, entity, started_at, status) VALUES (?, ?, ?, 'running')",
         (kind, entity, utc_now_iso()),
     )
-    run_id = cursor.lastrowid
     counters = {"rows": 0}
     try:
         yield counters
     except Exception as exc:
-        conn.execute(
+        conn.rollback()
+        _journal(
             "UPDATE etl_run SET finished_at=?, status='error', error=? WHERE id=?",
             (utc_now_iso(), str(exc)[:500], run_id),
         )
         raise
-    conn.execute(
+    conn.commit()
+    _journal(
         "UPDATE etl_run SET finished_at=?, status='ok', rows_upserted=? WHERE id=?",
         (utc_now_iso(), counters["rows"], run_id),
     )

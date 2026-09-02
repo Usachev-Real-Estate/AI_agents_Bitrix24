@@ -17,7 +17,8 @@
   {{ ui.tile('Цикл сделки', cycle.median | days,
              hint='медиана; p75 ' ~ (cycle.p75 | days)) }}
   {{ ui.tile('Выиграно денег', wins.won_amount | money(short=True)) }}
-  {{ ui.tile('Средний чек', wins.avg_check | money(short=True)) }}
+  {{ ui.tile('Средний чек', wins.avg_check | money(short=True),
+             hint='по ' ~ (wins.avg_check_base | int_ru) ~ ' сделкам с заполненной суммой') }}
 </div>
 
 <div class="grid grid-2 mt-16">
@@ -100,8 +101,15 @@
     </div>
     <div class="tile-label">Ожидаемая выручка по открытым сделкам</div>
     <div class="tile-value hero">{{ forecast.expected | money(short=True) }}</div>
-    {{ ui.coverage(forecast.coverage, (forecast.open_deals * forecast.coverage / 100) | round | int,
+    {{ ui.coverage(forecast.coverage, forecast.filled_deals,
                    forecast.open_deals, 'открытых сделок') }}
+    {% if forecast.unpriced_deals %}
+    <div class="notice notice-warn mt-14"><span>⚠</span>
+      <span>Не оценено {{ forecast.unpriced_amount | money(short=True) }}
+        по {{ forecast.unpriced_deals | int_ru }} сделкам: их стадии ещё не накопили
+        {{ forecast.min_closed }} закрытых сделок, и вероятность по ним считать не на чем.
+        В прогноз выше эти деньги не входят — ни как сумма, ни как ноль.</span></div>
+    {% endif %}
     <div class="table-wrap mt-14">
       <table>
         <thead>
@@ -114,8 +122,10 @@
             <td>{{ row.name }}</td>
             <td class="num">{{ row.deals | int_ru }}</td>
             <td class="num">{{ row.amount | money }}</td>
-            <td class="num">{{ row.probability | pct }}</td>
-            <td class="num">{{ row.expected | money }}</td>
+            <td class="num">{% if row.probability is none %}<span class="muted">данных мало</span>
+              {% else %}{{ row.probability | pct }}{% endif %}</td>
+            <td class="num">{% if row.expected is none %}<span class="muted">—</span>
+              {% else %}{{ row.expected | money }}{% endif %}</td>
           </tr>
           {% endfor %}
         </tbody>
@@ -145,6 +155,11 @@
       <div class="tile-label">Выиграно за период</div>
       <div class="tile-value">{{ money.won_amount | money(short=True) }}</div>
       {{ ui.coverage(money.won_coverage, money.won_filled, money.won_deals, 'выигранных') }}
+      {% if money.won_foreign or money.open_foreign %}
+      <div class="notice notice-warn mt-14"><span>⚠</span>
+        <span>{{ (money.won_foreign + money.open_foreign) | int_ru }} сделок воронки заведены
+          не в {{ money.currency }} — в суммы они не входят.</span></div>
+      {% endif %}
     </div>
     <div class="card">
       <div class="tile-label">Средний чек</div>
