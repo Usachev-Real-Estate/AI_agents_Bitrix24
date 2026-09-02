@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import logging
+import socket
+import ssl
 from typing import Any
 
 import httpx
@@ -170,7 +172,7 @@ class AfinaClient:
         except httpx.HTTPError as exc:
             # Тип ошибки, а не её текст: в текст httpx кладёт полный URL.
             logger.warning("Афина недоступна: %s (%s)", path, type(exc).__name__)
-            raise AfinaError("Афина недоступна") from exc
+            raise AfinaError(_transport_reason(exc)) from exc
 
         if response.status_code >= 400:
             raise _error_for(path, response, allow_not_found=allow_not_found)
@@ -212,6 +214,40 @@ def _is_naive_moment(value: str) -> bool:
     return not (tail.endswith("Z") or "+" in tail or "-" in tail)
 
 
+def _transport_reason(exc: Exception) -> str:
+    """Почему запрос не дошёл — словами, которые говорят, что проверять.
+
+    httpx складывает не разрешившееся имя, отказ в соединении и непринятый
+    сертификат в один ConnectError. Для человека это три разные поломки с
+    тремя разными действиями, и одно «Афина недоступна» на всех отправляет
+    его гадать. Настоящая причина лежит в цепочке __cause__.
+    """
+    if isinstance(exc, httpx.ProxyError):
+        return ("Запрос к Афине ушёл через прокси и не дошёл: "
+                "проверьте HTTP_PROXY и HTTPS_PROXY в окружении дашборда")
+    for cause in _causes(exc):
+        if isinstance(cause, ssl.SSLError):
+            return ("Сертификат Афины не принят: "
+                    "проверьте цепочку сертификатов и время на сервере")
+        if isinstance(cause, socket.gaierror):
+            return ("Имя из AFINA_API_BASE_URL не разрешается в адрес: "
+                    "проверьте его и DNS контейнера дашборда")
+        if isinstance(cause, ConnectionRefusedError):
+            return ("Афина отказала в соединении: проверьте, что её адрес "
+                    "доступен именно с сервера дашборда")
+    return "Афина недоступна: с сервера дашборда до неё не достучаться"
+
+
+def _causes(exc: BaseException):
+    """Цепочка причин исключения — httpx прячет настоящую ошибку в ней."""
+    seen = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
 def _clamp_size(size: Any) -> int:
     """Размер страницы в границах Афины: 1..100."""
     try:
@@ -241,13 +277,18 @@ def _error_for(path: str, response: httpx.Response, *,
     logger.warning("Афина ответила %s на %s: %s", code, path, response.text[:200])
     if code == 404:
         # 404 бывает двух разных смыслов. У карточки объекта это штатный
-        # ответ «такого id нет». На остальных адресах это значит, что самих
-        # эндпоинтов витрины на сервере нет — бэкенд Афины не пересобран, — и
-        # сказать про это «объект не найден» значит отправить искать не там.
+        # ответ «такого id нет». На остальных адресах витрины по этому адресу
+        # просто нет, и сказать про это «объект не найден» значит отправить
+        # искать не там. Причин у второго случая три, и все три встречались:
+        # адрес ведёт на другой сервис, в адресе лишний путь (клиент сам
+        # дописывает /api/public/dashboard), бэкенд Афины не пересобран.
         if allow_not_found:
             return AfinaNotFound("Объект не найден")
-        return AfinaError("Афина не знает эндпоинтов витрины: "
-                          "проверьте AFINA_API_BASE_URL и версию Афины")
+        return AfinaError(
+            "По этому адресу витрины Афины нет. AFINA_API_BASE_URL — корень "
+            "сервиса CRM без пути; проверьте, что это не другой сервис и что "
+            "бэкенд Афины пересобран",
+        )
     if code in (401, 403):
         return AfinaError("Афина не приняла ключ: проверьте AFINA_API_KEY")
     if code == 503:
