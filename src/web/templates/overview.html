@@ -38,6 +38,8 @@
 
     <div class="mt-18" class="tile-label">Средний чек выигранной сделки</div>
     <div class="tile-value">{{ overview.money.avg_check | money }}</div>
+    <div class="tile-delta">по {{ overview.money.avg_check_base | int_ru }} сделкам
+      с заполненной суммой</div>
 
     {{ ui.definition('Суммы считаются только по карточкам с заполненным полем. Полоса
       рядом показывает, какая доля сделок его имеет: при низком покрытии сумма

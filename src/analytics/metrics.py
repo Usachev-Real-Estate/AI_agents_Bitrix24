@@ -44,12 +44,21 @@ DEFAULT_PERIOD = "30d"
 # период
 # --------------------------------------------------------------------------
 
+# Витрина хранит время в UTC, а бизнес живёт по Москве. Границы периодов
+# обязаны совпадать с календарём того, кто смотрит отчёт: пока сутки резались
+# по UTC, «Текущий месяц» начинался в 03:00 МСК первого числа, и всё закрытое
+# ночью уезжало в соседний период — ровно на стыке месяца, когда и считают
+# отчётность. Даты на экране (format.py) переводятся в эту же зону.
+BUSINESS_TZ = timezone(timedelta(hours=3))
+
+
 def _iso(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).isoformat()
 
 
 def _day_start(day: date) -> datetime:
-    return datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+    """Полночь этого дня по московскому календарю."""
+    return datetime(day.year, day.month, day.day, tzinfo=BUSINESS_TZ)
 
 
 def resolve_period(
@@ -63,7 +72,7 @@ def resolve_period(
     «по 31 августа» либо теряет весь последний день, либо задваивает его при
     сравнении с соседним периодом.
     """
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now(BUSINESS_TZ).date()
 
     if start or end:
         since_day = _parse_day(start) or (today - timedelta(days=30))
@@ -344,6 +353,7 @@ def win_rate(conn, category_id: int, since: str, until: str) -> dict[str, Any]:
         SELECT
             SUM(is_won) AS won,
             SUM(is_lost) AS lost,
+            SUM(CASE WHEN is_won = 1 AND opportunity > 0 THEN 1 ELSE 0 END) AS won_filled,
             COALESCE(SUM(CASE WHEN is_won = 1 THEN opportunity ELSE 0 END), 0) AS won_amount
         FROM v_deal
         WHERE is_closed = 1
@@ -354,12 +364,22 @@ def win_rate(conn, category_id: int, since: str, until: str) -> dict[str, Any]:
     )
     won = int(row.get("won") or 0)
     lost = int(row.get("lost") or 0)
+    won_filled = int(row.get("won_filled") or 0)
+    won_amount = float(row.get("won_amount") or 0)
     closed = won + lost
+    # Средний чек делится на число сделок С ЗАПОЛНЕННОЙ суммой, а не на все
+    # выигранные: сделка с пустой комиссией входила в делитель штукой, а в
+    # делимое нулём и занижала чек тем сильнее, чем хуже заполнены карточки.
+    # Сколько сделок легло в основание, отдаём рядом — подпись обязана его
+    # называть, иначе «средний чек» опять читается как «по всем выигранным».
     return {
         "won": won, "lost": lost, "closed": closed,
         "win_rate": _share(won, closed),
-        "won_amount": float(row.get("won_amount") or 0),
-        "avg_check": round(float(row.get("won_amount") or 0) / won, 2) if won else 0.0,
+        "won_amount": won_amount,
+        "won_filled": won_filled,
+        "won_coverage": _share(won_filled, won),
+        "avg_check": round(won_amount / won_filled, 2) if won_filled else 0.0,
+        "avg_check_base": won_filled,
     }
 
 
@@ -768,19 +788,11 @@ def money(conn, category_id: int | None, since: str, until: str) -> dict[str, An
         """,
         {"cat": category_id},
     )
+    # Покрытие берётся из того же расчёта, что и сама сумма. Отдельный запрос
+    # без is_closed давал числитель больше знаменателя: выигранная, но ещё не
+    # закрытая сделка попадала только в «заполнено», и подпись под суммой
+    # печатала «заполнено у 4 из 3 сделок».
     won = win_rate(conn, category_id, since, until)
-    won_coverage = _one(
-        conn,
-        """
-        SELECT COUNT(*) AS deals,
-               SUM(CASE WHEN opportunity > 0 THEN 1 ELSE 0 END) AS filled
-        FROM v_deal
-        WHERE is_won = 1
-          AND closedate >= :since AND closedate < :until
-          AND (:cat IS NULL OR category_id = :cat)
-        """,
-        {"cat": category_id, "since": since, "until": until},
-    )
     return {
         "open_amount": float(open_row.get("amount") or 0),
         "open_deals": int(open_row.get("deals") or 0),
@@ -788,10 +800,18 @@ def money(conn, category_id: int | None, since: str, until: str) -> dict[str, An
         "open_coverage": _share(open_row.get("filled") or 0, open_row.get("deals") or 0),
         "won_amount": won["won_amount"],
         "won_deals": won["won"],
-        "won_filled": int(won_coverage.get("filled") or 0),
-        "won_coverage": _share(won_coverage.get("filled") or 0, won_coverage.get("deals") or 0),
+        "won_filled": won["won_filled"],
+        "won_coverage": won["won_coverage"],
         "avg_check": won["avg_check"],
+        "avg_check_base": won["avg_check_base"],
     }
+
+
+# Сколько закрытых сделок должна накопить стадия, чтобы доля выигранных на ней
+# считалась вероятностью. Ниже этого числа один исход двигает результат на
+# десятки процентов: «50%» из двух сделок выглядит на экране так же
+# убедительно, как «50%» из двухсот.
+FORECAST_MIN_CLOSED = 10
 
 
 def stage_win_probability(conn, category_id: int) -> dict[str, float]:
@@ -814,17 +834,28 @@ def stage_win_probability(conn, category_id: int) -> dict[str, float]:
         """,
         {"cat": category_id},
     )
+    # Стадии, по которым закрытых сделок меньше порога, в ответ не попадают:
+    # у них вероятности НЕТ, и это не то же самое, что «ноль». Доля выигранных
+    # из двух закрытых сделок — случайность, а не история, и показывать по ней
+    # деньги нельзя. Отсутствие ключа прогноз обрабатывает отдельно.
     return {
-        row["stage_id"]: (row["won"] / row["closed"]) if row["closed"] else 0.0
+        row["stage_id"]: row["won"] / row["closed"]
         for row in rows
+        if (row["closed"] or 0) >= FORECAST_MIN_CLOSED
     }
 
 
 def weighted_forecast(conn, category_id: int) -> dict[str, Any]:
     """Взвешенный прогноз: сумма открытых сделок × вероятность их стадии.
 
-    ``coverage`` показывает, какая доля открытых сделок вообще имеет сумму —
-    прогноз по половине заполненных сделок это половина прогноза.
+    Рядом с прогнозом обязаны стоять два разных покрытия, иначе он читается
+    как полная картина:
+
+    * ``coverage`` — доля открытых сделок, у которых вообще заполнена сумма.
+      Прогноз по половине заполненных сделок это половина прогноза.
+    * ``priced_share`` — доля суммы, для которой у стадии есть накопленная
+      вероятность. Остаток лежит в ``unpriced_amount``: по этим стадиям
+      закрытых сделок меньше FORECAST_MIN_CLOSED, и оценивать их нечем.
     """
     probabilities = stage_win_probability(conn, category_id)
     rows = _rows(
@@ -841,25 +872,43 @@ def weighted_forecast(conn, category_id: int) -> dict[str, Any]:
     )
     stage_names = {s["stage_id"]: s["name"] for s in stages(conn, category_id)}
     total, deals, filled = 0.0, 0, 0
+    priced_amount, unpriced_amount, unpriced_deals = 0.0, 0.0, 0
     detail = []
     for row in rows:
-        probability = probabilities.get(row["stage_id"], 0.0)
-        expected = row["amount"] * probability
-        total += expected
+        probability = probabilities.get(row["stage_id"])
         deals += row["deals"]
         filled += row["filled"] or 0
+        if probability is None:
+            # Стадия без накопленной истории не обнуляет свои деньги: раньше
+            # она получала вероятность 0, и полтора миллиона в работе
+            # показывались как ожидаемый ноль. Теперь её сумма выносится из
+            # прогноза отдельной строкой «не оценено».
+            unpriced_amount += row["amount"]
+            unpriced_deals += row["deals"]
+            expected = None
+        else:
+            expected = row["amount"] * probability
+            total += expected
+            priced_amount += row["amount"]
         detail.append({
             "stage_id": row["stage_id"],
             "name": stage_names.get(row["stage_id"], row["stage_id"]),
             "deals": row["deals"], "amount": row["amount"],
-            "probability": round(100 * probability, 1),
-            "expected": round(expected, 0),
+            "probability": round(100 * probability, 1) if probability is not None else None,
+            "expected": round(expected, 0) if expected is not None else None,
         })
-    detail.sort(key=lambda r: r["expected"], reverse=True)
+    detail.sort(key=lambda r: (r["expected"] is None, -(r["expected"] or 0)))
+    open_amount = priced_amount + unpriced_amount
     return {
         "expected": round(total, 0),
         "open_deals": deals,
+        "open_amount": round(open_amount, 0),
+        "filled_deals": filled,
         "coverage": _share(filled, deals),
+        "priced_share": _share(priced_amount, open_amount),
+        "unpriced_deals": unpriced_deals,
+        "unpriced_amount": round(unpriced_amount, 0),
+        "min_closed": FORECAST_MIN_CLOSED,
         "by_stage": detail,
     }
 
@@ -869,22 +918,45 @@ def weighted_forecast(conn, category_id: int) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 def people(conn, since: str, until: str, category_id: int | None = None) -> list[dict[str, Any]]:
-    """Срез по ответственным: нагрузка, конверсия, выигранные деньги."""
+    """Срез по ответственным: нагрузка когорты и закрытые за период деньги.
+
+    «Выиграно» и «Выиграно денег» считаются ровно тем же определением, что на
+    «Обзоре» и «Сделках»: закрытые в периоде, по дате закрытия. Раньше здесь
+    брались сделки, СОЗДАННЫЕ в периоде, и без требования быть закрытой —
+    достаточно было стоять на успешной стадии. Одна и та же подпись давала на
+    двух страницах разные числа, и сумма по людям не сходилась с итогом
+    компании.
+
+    «Сделок создано» и «Открыто из них» остаются когортой по дате создания:
+    это вопрос нагрузки, а не денег. Два окна в одной таблице — сознательный
+    выбор, поэтому каждая колонка названа своим окном в подписи под таблицей.
+    """
     rows = _rows(
         conn,
         """
         SELECT d.assigned_by_id AS user_id,
-               COALESCE(u.name, 'ID ' || d.assigned_by_id) AS name,
+               COALESCE(u.name, 'ID ' || CAST(d.assigned_by_id AS TEXT),
+                        'Без ответственного') AS name,
                COALESCE(u.department_name, '') AS department,
-               COUNT(*) AS deals_created,
-               SUM(CASE WHEN d.is_closed = 0 THEN 1 ELSE 0 END) AS deals_open,
-               SUM(d.is_won) AS won,
-               SUM(d.is_lost) AS lost,
-               COALESCE(SUM(CASE WHEN d.is_won = 1 THEN d.opportunity ELSE 0 END), 0) AS won_amount
+               SUM(CASE WHEN d.date_create >= :since AND d.date_create < :until
+                        THEN 1 ELSE 0 END) AS deals_created,
+               SUM(CASE WHEN d.date_create >= :since AND d.date_create < :until
+                         AND d.is_closed = 0 THEN 1 ELSE 0 END) AS deals_open,
+               SUM(CASE WHEN d.is_closed = 1 AND d.is_won = 1
+                         AND d.closedate >= :since AND d.closedate < :until
+                        THEN 1 ELSE 0 END) AS won,
+               SUM(CASE WHEN d.is_closed = 1 AND d.is_lost = 1
+                         AND d.closedate >= :since AND d.closedate < :until
+                        THEN 1 ELSE 0 END) AS lost,
+               COALESCE(SUM(CASE WHEN d.is_closed = 1 AND d.is_won = 1
+                                  AND d.closedate >= :since AND d.closedate < :until
+                                 THEN d.opportunity ELSE 0 END), 0) AS won_amount
         FROM v_deal d
         LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
-        WHERE d.date_create >= :since AND d.date_create < :until
-          AND (:cat IS NULL OR d.category_id = :cat)
+        WHERE (:cat IS NULL OR d.category_id = :cat)
+          AND ((d.date_create >= :since AND d.date_create < :until)
+               OR (d.is_closed = 1
+                   AND d.closedate >= :since AND d.closedate < :until))
         GROUP BY d.assigned_by_id
         ORDER BY won_amount DESC, deals_created DESC
         """,
@@ -915,10 +987,13 @@ def departments(conn, since: str, until: str, category_id: int | None = None):
     return out
 
 
+# Корзины ряда нарезаются по тем же московским суткам, что и границы периода
+# (см. BUSINESS_TZ): иначе точка «1 сентября» на графике означала бы не тот
+# день, что подпись периода над ним.
 _GRAIN_SQL = {
-    "day": "substr({col}, 1, 10)",
-    "week": "strftime('%Y-W%W', {col})",
-    "month": "substr({col}, 1, 7)",
+    "day": "substr(datetime({col}, '+3 hours'), 1, 10)",
+    "week": "strftime('%Y-W%W', datetime({col}, '+3 hours'))",
+    "month": "substr(datetime({col}, '+3 hours'), 1, 7)",
 }
 
 

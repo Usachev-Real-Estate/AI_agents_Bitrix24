@@ -202,14 +202,67 @@ def test_lead_conversion_uses_real_deal_link(seeded):
     assert by_source[0]["conversion"] == 50.0
 
 
-def test_weighted_forecast_uses_own_history(seeded):
+def test_forecast_does_not_price_a_stage_on_two_deals(seeded):
+    """Половина от двух закрытых сделок — не вероятность, а случайность.
+
+    Раньше эта витрина давала «Подбору» вероятность 50% и печатала её рядом с
+    деньгами. Одна закрытая сделка двигала её на полсотни процентов, а на
+    экране она выглядела так же убедительно, как процент, набранный сотнями
+    сделок.
+    """
     with scoped_session(Scope.everything()) as conn:
         forecast = metrics.weighted_forecast(conn, 18)
-    # Из дошедших до «Подбора» закрылись 2, выиграна 1 → вероятность 50%.
     by_stage = {s["stage_id"]: s for s in forecast["by_stage"]}
-    assert by_stage["C18:NEW"]["probability"] == 50.0
+    assert by_stage["C18:NEW"]["probability"] is None
+    assert by_stage["C18:NEW"]["expected"] is None
     # Открытая сделка без суммы — прогноз ноль, и покрытие это показывает.
     assert forecast["coverage"] == 0.0
+
+
+def test_forecast_carries_unpriced_money_instead_of_zeroing_it(analytics_db):
+    """Стадия без накопленной истории не обнуляет свои деньги, а называет их.
+
+    Вероятность нулю не равна: «ожидается 0 ₽» читается как «эти сделки не
+    закроются», хотя правда в том, что оценивать их нечем. Такие деньги идут
+    отдельной строкой и в прогноз не входят.
+    """
+    with analytics_session() as conn:
+        conn.execute("INSERT INTO dim_pipeline(category_id, name, is_active, sort, synced_at)"
+                     " VALUES (18, 'Покупатели', 1, 10, 'x')")
+        for stage_id, name, sort, semantic in (
+            ("C18:NEW", "Подбор", 10, "in_progress"),
+            ("C18:SHOW", "Показ", 20, "in_progress"),
+            ("C18:WON", "Договор закрыт", 90, "won"),
+        ):
+            conn.execute("INSERT INTO dim_stage(stage_id, category_id, name, sort, semantic,"
+                         " synced_at) VALUES (?, 18, ?, ?, ?, 'x')",
+                         (stage_id, name, sort, semantic))
+        # «Подбор» накопил историю: 12 закрытых сделок, 6 выиграно.
+        for i in range(1, 13):
+            won = i <= 6
+            _deal(conn, i, "C18:WON" if won else "C18:APOLOGY", won=won, lost=not won,
+                  amount=100000, closed="2026-08-10T00:00:00+00:00")
+            _events(conn, i, [("C18:NEW", "2026-08-01T00:00:00+00:00",
+                               "2026-08-10T00:00:00+00:00")])
+        # На «Подборе» стоят две открытые сделки — им вероятность считать есть на чём.
+        for i in (91, 92):
+            _deal(conn, i, "C18:NEW", amount=200000)
+            _events(conn, i, [("C18:NEW", "2026-08-05T00:00:00+00:00", None)])
+        # На «Показе» стоят открытые сделки на 900 000, закрытых там не было ни одной.
+        for i in (101, 102, 103):
+            _deal(conn, i, "C18:SHOW", amount=300000)
+            _events(conn, i, [("C18:SHOW", "2026-08-05T00:00:00+00:00", None)])
+
+    with scoped_session(Scope.everything()) as conn:
+        forecast = metrics.weighted_forecast(conn, 18)
+
+    by_stage = {s["stage_id"]: s for s in forecast["by_stage"]}
+    assert by_stage["C18:NEW"]["probability"] == 50.0, "12 закрытых — этого хватает на вероятность"
+    assert by_stage["C18:SHOW"]["probability"] is None
+    assert forecast["unpriced_deals"] == 3
+    assert forecast["unpriced_amount"] == 900000
+    assert forecast["expected"] == 200000, "оценены только 400 000 на «Подборе» × 50%"
+    assert forecast["priced_share"] < 100, "часть суммы осталась без оценки — это видно"
 
 
 def test_entity_table_paginates_and_links_rows(seeded):
