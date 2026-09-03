@@ -40,12 +40,20 @@ LISTING_FILTERS: dict[str, tuple[str, dict[str, bool]]] = {
 }
 DEFAULT_FILTER = "all"
 
-# Плитки счётчиков: ключ ответа Афины → подпись и пояснение.
+# Плитки по всей базе: ключ ответа `/summary` → подпись и пояснение.
 SUMMARY_TILES = (
     ("total", "Всего объектов", "Все карточки Афины, включая черновики и копии"),
     ("in_ad", "В рекламе", "Статус «В рекламе» прямо сейчас"),
     ("is_published", "На сайте", "Опубликованы на сайте прямо сейчас"),
     ("removed_from_ad", "Сняты с рекламы", "Статус «Снят с рекламы» прямо сейчас"),
+)
+
+# Те же три среза, но внутри выбранного фильтра и поиска. Первая плитка —
+# размер самой выборки, остальные разбирают её по тем же признакам.
+SCOPED_TILES = (
+    ("in_ad", "В рекламе", "Из них сейчас в рекламе"),
+    ("is_published", "На сайте", "Из них опубликованы на сайте"),
+    ("removed_from_ad", "Сняты с рекламы", "Из них сняты с рекламы"),
 )
 
 
@@ -96,14 +104,16 @@ def load(client: AfinaClient, selected: dict[str, Any], period: dict[str, str],
     понять, что сломалось, чем увидеть пятисотую.
     """
     data: dict[str, Any] = {
-        "summary": None, "table": None, "card": None, "error": None,
+        "tiles": [], "scoped": False, "table": None, "card": None,
+        "error": None,
         # Два разных несчастья: источник отказал или объекта просто нет.
         # Для страницы это одна плашка, а для JSON — 502 против 404, и
         # различать их надо здесь, пока известно, что именно случилось.
         "failed": False, "not_found": False,
     }
     try:
-        data["summary"] = client.summary()
+        data["scoped"] = _is_scoped(selected)
+        data["tiles"] = tiles_for(client, selected)
         if selected["object_id"] is not None:
             found = client.listing(selected["object_id"])
             # Карточку готовим так же, как строку таблицы: иначе период
@@ -121,6 +131,68 @@ def load(client: AfinaClient, selected: dict[str, Any], period: dict[str, str],
         data["failed"] = True
         data["error"] = str(exc)
     return data
+
+
+def _is_scoped(selected: dict[str, Any]) -> bool:
+    """Сужена ли выдача. Карточка и история снятий — сами по себе.
+
+    На карточке объекта и в истории снятий фильтр списка ни на что не
+    влияет, поэтому там плитки остаются про всю базу.
+    """
+    if selected["object_id"] is not None or selected["view"] == VIEW_REMOVALS:
+        return False
+    return bool(selected["filter"] != DEFAULT_FILTER or selected["q"])
+
+
+def tiles_for(client: AfinaClient, selected: dict[str, Any]) -> list[dict[str, Any]]:
+    """Плитки под то, что человек сейчас видит.
+
+    Без фильтра и поиска это счётчики по всей базе одним запросом. С
+    фильтром — те же срезы, но внутри выборки: иначе чипы переключаются, а
+    числа над ними стоят на месте, и плитки читаются как сломанные.
+
+    `/summary` для этого не годится — фильтров он не принимает вовсе, — так
+    что каждое число берётся из `total` выдачи, запрошенной страницей в одну
+    строку. Четыре счётных запроса вместо одного; они появляются только
+    когда выборка сужена, то есть не на первом открытии страницы.
+    """
+    if not _is_scoped(selected):
+        summary = client.summary()
+        return [
+            {"label": label, "value": summary.get(key), "hint": hint}
+            for key, label, hint in SUMMARY_TILES
+        ]
+
+    scope = dict(LISTING_FILTERS[selected["filter"]][1])
+    if selected["q"]:
+        scope["search"] = selected["q"]
+    tiles = [{
+        "label": "Найдено",
+        "value": client.count(**scope),
+        "hint": _scope_hint(selected),
+    }]
+    for key, label, hint in SCOPED_TILES:
+        # Фильтр и срез складываются: под «Сняты с рекламы» плитка «В
+        # рекламе» честно покажет ноль — статус у объекта один.
+        tiles.append({
+            "label": label,
+            "value": client.count(**dict(scope, **{key: True})),
+            "hint": hint,
+        })
+    return tiles
+
+
+def _scope_hint(selected: dict[str, Any]) -> str:
+    """Чем сужена выборка — словами, под первой плиткой."""
+    chip = LISTING_FILTERS[selected["filter"]][0]
+    narrowed = selected["filter"] != DEFAULT_FILTER
+    if narrowed and selected["q"]:
+        return f"Фильтр «{chip}», поиск «{selected['q']}»"
+    if narrowed:
+        return f"Фильтр «{chip}»"
+    if selected["q"]:
+        return f"Поиск «{selected['q']}»"
+    return "Вся база"
 
 
 def _listings_table(client: AfinaClient, selected: dict[str, Any],

@@ -96,6 +96,18 @@ class AfinaClient:
             "sort": sort,
         })
 
+    def count(self, **filters: Any) -> int:
+        """Сколько объектов подходит под фильтры — без самих объектов.
+
+        `/summary` фильтров не принимает вообще (только рекламный аккаунт),
+        поэтому счётчики под выбранный фильтр считаются так: та же выдача,
+        но страницей в одну строку. `total` в конверте считается до
+        OFFSET/LIMIT, так что размер страницы на него не влияет, а данные по
+        сети не едут.
+        """
+        payload = self._get("/listings", _query(dict(filters, page=1, size=1)))
+        return _int(payload.get("total")) if isinstance(payload, dict) else 0
+
     def listing(self, flat_id: int) -> dict[str, Any] | None:
         """Один объект по id CRM. None — такого объекта в Афине нет."""
         try:
@@ -246,6 +258,14 @@ def _causes(exc: BaseException):
         seen.add(id(current))
         yield current
         current = current.__cause__ or current.__context__
+
+
+def _int(value: Any) -> int:
+    """Целое из ответа Афины. Мусор считается нулём, а не роняет страницу."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _clamp_size(size: Any) -> int:

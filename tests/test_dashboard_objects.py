@@ -137,6 +137,36 @@ class FakeAfina:
         self._maybe_fail()
         return _page(afina._with_utc_dates(dict(item)) for item in self._listings)
 
+    def count(self, **filters):
+        """Считает по тем же правилам, что и Афина, — иначе плитки не проверить."""
+        self.calls.append(("count", filters))
+        self._maybe_fail()
+        return len([x for x in self._listings if self._matches(x, filters)])
+
+    @staticmethod
+    def _matches(item, filters):
+        status = (item.get("status") or "").strip()
+        if filters.get("in_ad") and status != "В рекламе":
+            return False
+        if filters.get("removed_from_ad") and status != "Снят с рекламы":
+            return False
+        if filters.get("is_published") and not item.get("is_published"):
+            return False
+        needle = (filters.get("search") or "").strip().lower()
+        if needle:
+            haystack = " ".join(
+                str(item.get(field) or "")
+                for field in ("address", "complex_name", "title", "district")
+            ).lower()
+            if needle not in haystack:
+                return False
+        return True
+
+    def counts_of(self, **filters):
+        """Все запросы счётчика, совпавшие по этим параметрам."""
+        return [kw for name, kw in self.calls
+                if name == "count" and all(kw.get(k) == v for k, v in filters.items())]
+
     def listing(self, flat_id):
         self.calls.append(("listing", {"flat_id": flat_id}))
         self._maybe_fail()
@@ -319,6 +349,80 @@ def test_filter_chip_reaches_afina(client, afina_api, chip, expected):
         assert kwargs[key] is value
 
 
+def _tile_values(body):
+    """Числа плиток в порядке слева направо."""
+    return re.findall(r'<div class="tile-value[^"]*">([^<]+)</div>', body)
+
+
+def _tile_labels(body):
+    return re.findall(r'<div class="tile-label">([^<]+)</div>', body)
+
+
+def test_tiles_show_the_whole_base_until_a_filter_is_chosen(client, afina_api):
+    """Без фильтра плитки — про всю базу, одним запросом к /summary."""
+    body = client.get(f"{BASE}/objects").text
+    assert _tile_labels(body)[0] == "Всего объектов"
+    assert "128" in _tile_values(body)[0]
+    # Считать по одной строке незачем: /summary отдал всё сразу.
+    assert afina_api.counts_of() == []
+
+
+def test_tiles_follow_the_chosen_filter(client, afina_api):
+    """Чип переключили — числа обязаны переехать за ним.
+
+    Иначе фильтр меняет таблицу, а плитки над ней стоят на месте, и человек
+    читает их как сломанные: ровно это и увидели на боевом дашборде.
+    """
+    body = client.get(f"{BASE}/objects?filter=removed").text
+    assert _tile_labels(body)[0] == "Найдено"
+    # В выборке один снятый объект из двух: он же и «найден», он же снят,
+    # а «в рекламе» под этим фильтром пусто — статус у объекта один.
+    assert _tile_values(body) == ["1", "0", "0", "1"]
+    assert "Сняты с рекламы" in body
+
+
+def test_tiles_follow_the_search(client, afina_api):
+    """Поиск сужает выборку так же, как чип."""
+    body = client.get(f"{BASE}/objects?q=Кубанская").text
+    assert _tile_labels(body)[0] == "Найдено"
+    assert _tile_values(body)[0] == "2"
+    assert "Поиск «Кубанская»" in body
+    body = client.get(f"{BASE}/objects?q=такого-адреса-нет").text
+    assert _tile_values(body) == ["0", "0", "0", "0"]
+
+
+def test_scoped_tiles_say_they_are_not_the_whole_base(client, afina_api):
+    """Суженные числа обязаны быть подписаны, иначе их примут за общие."""
+    body = client.get(f"{BASE}/objects?filter=in_ad&q=парка").text
+    assert "Фильтр «Сейчас в рекламе», поиск «парка»" in body
+    assert "по выбранной выборке, а не по всей базе" in _visible(body)
+
+
+def test_counts_ask_afina_for_one_row_not_the_whole_page(client, afina_api):
+    """Счётчику нужен только total, а не строки: страница в одну запись.
+
+    38 тысяч объектов по 50 в строку — 773 страницы; тянуть их ради числа
+    нельзя, и total в конверте считается до OFFSET/LIMIT.
+    """
+    client.get(f"{BASE}/objects?filter=in_ad")
+    requested = afina_api.counts_of()
+    assert requested, "счётчики не запрашивались"
+    assert all(kw.get("in_ad") for kw in requested)
+
+
+def test_the_card_keeps_the_whole_base_tiles(client, afina_api):
+    """На карточке объекта фильтр списка ни на что не влияет."""
+    body = client.get(f"{BASE}/objects?id=501&filter=removed").text
+    assert _tile_labels(body)[0] == "Всего объектов"
+    assert afina_api.counts_of() == []
+
+
+def test_removals_view_keeps_the_whole_base_tiles(client, afina_api):
+    """История снятий — события, а плитки описывают состояние на сейчас."""
+    body = client.get(f"{BASE}/objects?view=removals").text
+    assert _tile_labels(body)[0] == "Всего объектов"
+
+
 def test_search_reaches_afina(client, afina_api):
     client.get(f"{BASE}/objects?q=Кубанская")
     assert afina_api.kwargs_of("listings")["search"] == "Кубанская"
@@ -416,7 +520,12 @@ def test_a_missing_object_is_not_reported_as_an_outage(client, afina_api):
     """
     response = client.get(f"{BASE}/api/objects?id=999")
     assert response.status_code == 404
-    assert response.json()["summary"] == SUMMARY
+    # Карточка не сужает выдачу, поэтому плитки остаются по всей базе.
+    assert response.json()["scoped"] is False
+    assert [tile["value"] for tile in response.json()["tiles"]] == [
+        SUMMARY["total"], SUMMARY["in_ad"], SUMMARY["is_published"],
+        SUMMARY["removed_from_ad"],
+    ]
 
 
 def test_a_missing_endpoint_is_not_reported_as_a_missing_object():

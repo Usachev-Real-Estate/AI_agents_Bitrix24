@@ -119,7 +119,8 @@ def api_objects(request: Request) -> JSONResponse:
     return JSONResponse({
         "view": selected["view"],
         "filter": selected["filter"],
-        "summary": data["summary"],
+        "tiles": data["tiles"],
+        "scoped": data["scoped"],
         "table": data["table"],
         "card": data["card"],
         "error": data["error"],
