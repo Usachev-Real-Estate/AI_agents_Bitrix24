@@ -108,6 +108,31 @@ class AfinaClient:
         payload = self._get("/listings", _query(dict(filters, page=1, size=1)))
         return _int(payload.get("total")) if isinstance(payload, dict) else 0
 
+    def fetch_all(self, *, cap: int = 5000, **filters: Any) -> list[dict[str, Any]]:
+        """Вся выборка постранично, а не одна страница.
+
+        Нужна там, где считать приходится у себя: по отделам, брокерам и
+        датам Афина фильтровать не умеет, а поля для этого в карточке есть.
+        Берём страницами по максимуму (100), чтобы запросов было меньше.
+
+        `cap` — предохранитель. Без него опечатка в фильтре утащила бы все
+        38 тысяч карточек в 773 запроса и подвесила бы страницу; лучше
+        честно оборвать и сказать об этом, чем ждать.
+        """
+        collected: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            payload = self._page(
+                "/listings", dict(filters, page=page, size=MAX_PAGE_SIZE),
+            )
+            items = payload.get("items") or []
+            collected.extend(items)
+            pages = _int(payload.get("total_pages")) or 1
+            if page >= pages or not items or len(collected) >= cap:
+                break
+            page += 1
+        return collected[:cap]
+
     def listing(self, flat_id: int) -> dict[str, Any] | None:
         """Один объект по id CRM. None — такого объекта в Афине нет."""
         try:
