@@ -36,7 +36,6 @@ EXPECTED_TILES = (
     ("Всего объектов", "128"),
     ("В рекламе", "41"),
     ("На сайте", "33"),
-    ("Сняты с рекламы", "17"),
 )
 
 # Ответ Афины в том виде, в каком его отдаёт /listings: даты наивные, без
@@ -397,6 +396,103 @@ def test_site_removed_tile_admits_it_has_no_period(client, wide_afina):
     assert "даты снятия Афина не хранит" in body
 
 
+def test_the_whole_base_no_longer_shows_removed_from_ad(client, afina_api):
+    """Плитку «Сняты с рекламы» из общего вида убрали."""
+    labels = _tile_labels(client.get(f"{BASE}/objects").text)
+    assert labels == ["Всего объектов", "В рекламе", "На сайте"]
+
+
+# --- что считается снятием ---
+
+
+@pytest.mark.parametrize("reason, category, comment, counted", [
+    ("Другое: собственник уехал", "Другое", "собственник уехал", True),
+    ("Другое", "Другое", None, False),
+    ("Другое:", "Другое", None, False),
+    ("Продано нами", "Продано нами", None, True),
+    ("По истечению срока публикации", "По истечению срока публикации", None, True),
+    (None, None, None, False),
+])
+def test_only_an_explained_removal_counts(reason, category, comment, counted):
+    """«Другое» без пояснения — не причина, а несделанная работа.
+
+    Требовать комментарий от всех причин нельзя: у словарных его нет по
+    устройству Афины, и тогда не засчитывалось бы вообще ничего.
+    """
+    item = dict(REMOVED, removal_reason=reason, removal_reason_category=category,
+                removal_comment=comment)
+    assert objects.counts_as_removal(item) is counted
+
+
+def test_an_object_in_ad_is_never_a_removal():
+    """Причина у вернувшегося в рекламу остаётся в поле, снятием он не стал."""
+    assert objects.counts_as_removal(dict(LISTING, removal_reason="Продано нами",
+                                          removal_reason_category="Продано нами")) is False
+
+
+def test_unexplained_removals_are_not_counted_on_the_page(app_factory, monkeypatch):
+    """Снятое с «Другое» без пояснения не попадает в счётчик снятий."""
+    vague = dict(REMOVED, id=505, removal_reason="Другое",
+                 removal_reason_category="Другое", removal_comment=None)
+    fake = FakeAfina(listings=[LISTING, REMOVED, vague])
+    monkeypatch.setattr(objects, "client_for", lambda settings: fake)
+    body = _login(app_factory()).get(f"{BASE}/objects?filter=in_ad").text
+    # Снятых объектов два, но засчитано одно — у второго причина пустая.
+    assert _tile_values(body)[2] == "1"
+
+
+# --- прирост к прошлому периоду ---
+
+
+def _published_at(flat_id, moment):
+    """Объект в рекламе с заданной датой публикации и своим брокером."""
+    return dict(LISTING, id=flat_id, published_to_ads_at=moment,
+                assignee_name=f"Брокер {flat_id}")
+
+
+@pytest.fixture
+def dated_afina(monkeypatch):
+    """Две публикации в окне «16–31 августа» и одна в предыдущем такой же длины.
+
+    Окно считается по московскому календарю, поэтому даты взяты с запасом от
+    границ: проверяется рост, а не арифметика полуночи.
+    """
+    fake = FakeAfina(listings=[
+        _published_at(601, "2026-08-20T10:00:00"),
+        _published_at(602, "2026-08-21T10:00:00"),
+        _published_at(603, "2026-08-05T10:00:00"),
+    ])
+    monkeypatch.setattr(objects, "client_for", lambda settings: fake)
+    return fake
+
+
+def test_period_tile_shows_growth_against_the_previous_window(client, dated_afina):
+    """Процент считается к периоду той же длины, как в остальном дашборде.
+
+    В окне 16–31 августа две публикации, в предыдущем такой же длины — одна:
+    рост вдвое.
+    """
+    body = client.get(
+        f"{BASE}/objects?filter=in_ad&start=2026-08-16&end=2026-08-31").text
+    assert _tile_values(body)[3] == "2"
+    # При наличии процента макет плитки печатает «к прошлому периоду» вместо
+    # подсказки — так же, как на остальных страницах дашборда.
+    assert "+100%" in _tile_hints(body)[3]
+    assert "к прошлому периоду" in _tile_hints(body)[3]
+
+
+def test_growth_from_zero_is_words_not_a_number(client, dated_afina):
+    """Рост с нуля — не «+∞» и не «+100%», а «в прошлом периоде не было».
+
+    Окно 01–15 августа: одна публикация, а в предыдущем (17–31 июля) ни одной.
+    """
+    body = client.get(
+        f"{BASE}/objects?filter=in_ad&start=2026-08-01&end=2026-08-15").text
+    assert _tile_values(body)[3] == "1"
+    assert "За прошлый период — ни одного" in body
+    assert "%" not in _tile_hints(body)[3]
+
+
 # --- отделы ---
 
 
@@ -429,6 +525,22 @@ def test_breakdown_replaces_the_object_list(client, wide_afina):
     # Заголовков старого списка объектов на странице быть не должно.
     assert "Период рекламы" not in body
     assert "Рекламный аккаунт" not in body
+
+
+@pytest.mark.parametrize("chip, expected", [
+    ("in_ad", ["В рекламе", "На сайте", "Выставлено в рекламу за период"]),
+    ("published", ["На сайте", "Сняты с сайта", "Выставлено на сайт за период"]),
+    ("removed", ["Сняты с рекламы", "На сайте", "Снято с рекламы за период"]),
+])
+def test_breakdown_columns_follow_the_chip(client, wide_afina, chip, expected):
+    """Колонки таблицы — про выбранный фильтр, а не все срезы сразу.
+
+    Под «в рекламе» колонка «сняты с сайта» ни о чём не говорит, а пять
+    колонок подряд читаются хуже трёх.
+    """
+    body = client.get(f"{BASE}/objects?filter={chip}").text
+    head = body.split("Отдел и брокер", 1)[1].split("</thead>", 1)[0]
+    assert re.findall(r'<th class="num nowrap">([^<]+)</th>', head) == expected
 
 
 def test_breakdown_counts_every_broker(client, wide_afina):
@@ -567,6 +679,11 @@ def _tile_labels(body):
     return re.findall(r'<div class="tile-label">([^<]+)</div>', body)
 
 
+def _tile_hints(body):
+    """Подписи под числами: там живут и проценты, и пояснения."""
+    return re.findall(r'<div class="tile-delta">(.*?)</div>', body, re.S)
+
+
 # --- отказ источника ---
 
 
@@ -603,7 +720,6 @@ def test_a_missing_object_is_not_reported_as_an_outage(client, afina_api):
     assert response.json()["scoped"] is False
     assert [tile["value"] for tile in response.json()["tiles"]] == [
         SUMMARY["total"], SUMMARY["in_ad"], SUMMARY["is_published"],
-        SUMMARY["removed_from_ad"],
     ]
 
 
@@ -636,7 +752,7 @@ def test_a_truncated_summary_shows_a_dash_instead_of_crashing(app_factory, monke
     response = _login(app_factory()).get(f"{BASE}/objects")
     assert response.status_code == 200
     # Недостающие ключи превращаются в прочерк, а не в пятисотую.
-    assert _tile_values(response.text) == ["5", "2", "—", "—"]
+    assert _tile_values(response.text) == ["5", "2", "—"]
 
 
 def test_period_control_is_hidden_on_a_single_object(client, afina_api):

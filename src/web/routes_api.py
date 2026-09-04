@@ -111,6 +111,7 @@ def api_objects(request: Request) -> JSONResponse:
     data = objects.load(
         objects.client_for(settings), selected, period,
         settings.afina_api_page_size,
+        previous=metrics.previous_period(period),
     )
     # 502 — отказ источника: дашборд жив, недоступна Афина за ним. 404 —
     # ответ самой Афины «такого объекта нет», и выдавать его за аварию значит

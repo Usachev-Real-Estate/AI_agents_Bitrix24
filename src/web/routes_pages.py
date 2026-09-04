@@ -229,6 +229,7 @@ def objects_page(request: Request) -> HTMLResponse:
         context.update(objects.load(
             objects.client_for(settings), selected, context["period"],
             settings.afina_api_page_size,
+            previous=metrics.previous_period(context["period"]),
         ))
     return _render(request, "objects.html", context)
 
