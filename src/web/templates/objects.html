@@ -99,7 +99,8 @@
   {% if tiles %}
     <div class="grid grid-kpi">
       {% for tile in tiles %}
-        {{ ui.tile(tile.label, tile.value | int_ru, hint=tile.hint) }}
+        {{ ui.tile(tile.label, tile.value | int_ru,
+                   delta=tile.delta, hint=tile.hint) }}
       {% endfor %}
     </div>
     {% if scoped %}
@@ -188,48 +189,41 @@
           <thead>
             <tr>
               <th>Отдел и брокер</th>
-              <th class="num">В рекламе</th>
-              <th class="num">На сайте</th>
-              <th class="num">Сняты с рекламы</th>
-              <th class="num">Сняты с сайта</th>
-              <th class="num nowrap">{{ breakdown.period_label }}</th>
+              {% for key, label in breakdown.columns %}
+                <th class="num nowrap">{{ label }}</th>
+              {% endfor %}
             </tr>
           </thead>
           <tbody>
             {% for group in breakdown.groups %}
               <tr>
                 <td><strong>{{ group.department }}</strong></td>
-                <td class="num"><strong>{{ group.totals.in_ad | int_ru }}</strong></td>
-                <td class="num"><strong>{{ group.totals.is_published | int_ru }}</strong></td>
-                <td class="num"><strong>{{ group.totals.removed_from_ad | int_ru }}</strong></td>
-                <td class="num"><strong>{{ group.totals.site_removed | int_ru }}</strong></td>
-                <td class="num"><strong>{{ group.totals.period | int_ru }}</strong></td>
+                {% for key, label in breakdown.columns %}
+                  <td class="num"><strong>{{ group.totals[key] | int_ru }}</strong></td>
+                {% endfor %}
               </tr>
               {% for row in group.brokers %}
                 <tr>
                   <td class="ellipsis" title="{{ row.broker }}">
                     <a href="?{{ qs(request, broker=row.broker, page=None) }}">
                       {{ row.broker }}</a></td>
-                  <td class="num">{{ row.in_ad | int_ru }}</td>
-                  <td class="num">{{ row.is_published | int_ru }}</td>
-                  <td class="num">{{ row.removed_from_ad | int_ru }}</td>
-                  <td class="num">{{ row.site_removed | int_ru }}</td>
-                  <td class="num">{{ row.period | int_ru }}</td>
+                  {% for key, label in breakdown.columns %}
+                    <td class="num">{{ row[key] | int_ru }}</td>
+                  {% endfor %}
                 </tr>
               {% endfor %}
             {% else %}
-              <tr><td colspan="6" class="empty">Ничего не найдено</td></tr>
+              <tr><td colspan="{{ breakdown.columns | length + 1 }}"
+                class="empty">Ничего не найдено</td></tr>
             {% endfor %}
           </tbody>
           {% if breakdown.groups %}
             <tbody>
               <tr>
                 <td><strong>Итого</strong></td>
-                <td class="num"><strong>{{ breakdown.totals.in_ad | int_ru }}</strong></td>
-                <td class="num"><strong>{{ breakdown.totals.is_published | int_ru }}</strong></td>
-                <td class="num"><strong>{{ breakdown.totals.removed_from_ad | int_ru }}</strong></td>
-                <td class="num"><strong>{{ breakdown.totals.site_removed | int_ru }}</strong></td>
-                <td class="num"><strong>{{ breakdown.totals.period | int_ru }}</strong></td>
+                {% for key, label in breakdown.columns %}
+                  <td class="num"><strong>{{ breakdown.totals[key] | int_ru }}</strong></td>
+                {% endfor %}
               </tr>
             </tbody>
           {% endif %}

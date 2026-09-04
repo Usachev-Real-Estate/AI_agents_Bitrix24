@@ -46,6 +46,12 @@ STATUS_IN_AD = "В рекламе"
 # «снят с сайта» за период посчитать нечем и плитка всегда про «сейчас».
 SITE_UNPUBLISHED = "unpublished"
 
+# «Другое» без пояснения — не причина, а несделанная работа: брокер выбрал
+# пункт и ничего не написал. Такие снятия не засчитываются. У словарных
+# причин («Продано нами», «Задаток наш») комментария нет по устройству Афины,
+# и требовать его от них значило бы не засчитывать вообще ничего.
+REASON_OTHER = "Другое"
+
 # Чипы над таблицей. Чип выбирает, о чём таблица ниже и какая метрика
 # считается за период; сами плитки он не сужает — иначе «в рекламе» под
 # фильтром «в рекламе» было бы равно выборке, а «сняты» — нулю.
@@ -69,7 +75,6 @@ SUMMARY_TILES = (
     ("total", "Всего объектов", "Все карточки Афины, включая черновики и копии"),
     ("in_ad", "В рекламе", "Статус «В рекламе» прямо сейчас"),
     ("is_published", "На сайте", "Опубликованы на сайте прямо сейчас"),
-    ("removed_from_ad", "Сняты с рекламы", "Статус «Снят с рекламы» прямо сейчас"),
 )
 
 # Плитки состояния под каждый чип, кроме «за период» — её добавляем отдельно,
@@ -90,6 +95,14 @@ FILTER_TILES: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("is_published", "На сайте", "Из них всё ещё опубликованы на сайте"),
         ("site_removed", "Сняты с сайта", "Сняты с сайта сейчас; даты снятия Афина не хранит"),
     ),
+}
+
+# Колонки разбивки под каждый чип: показываем то, о чём сейчас смотрят, а
+# не все пять срезов сразу. Метрика за период добавляется последней.
+BREAKDOWN_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
+    "in_ad": (("in_ad", "В рекламе"), ("is_published", "На сайте")),
+    "published": (("is_published", "На сайте"), ("site_removed", "Сняты с сайта")),
+    "removed": (("removed_from_ad", "Сняты с рекламы"), ("is_published", "На сайте")),
 }
 
 # Снимок живёт минуту: за это время чипы, отделы и периоды переключаются без
@@ -227,27 +240,69 @@ def _matches(item: dict[str, Any], needle: str) -> bool:
 
 
 def tiles_for(items: list[dict[str, Any]], selected: dict[str, Any],
-              period: dict[str, str]) -> list[dict[str, Any]]:
+              period: dict[str, str],
+              previous: dict[str, str] | None = None) -> list[dict[str, Any]]:
     """Плитки под выбранный чип: состояние сейчас плюс метрика за период."""
-    tiles = [
-        {"label": label, "value": _count(items, key), "hint": hint}
+    tiles: list[dict[str, Any]] = [
+        {"label": label, "value": _count(items, key), "hint": hint, "delta": None}
         for key, label, hint in FILTER_TILES[selected["filter"]]
     ]
     field, title, _ = FILTER_METRICS[selected["filter"]]
-    tiles.append({
-        "label": f"{title} за период",
-        "value": len([r for r in items if _in_period(r.get(field), period)]),
-        "hint": f"Событие попало в период «{period.get('label', '')}»",
-    })
+    current = _events_in(items, field, period)
+    tiles.append(dict(
+        _growth(current, _events_in(items, field, previous) if previous else None),
+        label=f"{title} за период",
+        value=current,
+    ))
     return tiles
+
+
+def _events_in(items: list[dict[str, Any]], field: str,
+               window: dict[str, str]) -> int:
+    return len([r for r in items if _in_period(r.get(field), window)])
+
+
+def _growth(current: int, previous: int | None) -> dict[str, Any]:
+    """Прирост к прошлому периоду той же длины — в процентах.
+
+    От нуля процент не считается: рост с нуля до пяти — это не «+500%» и не
+    «+∞», а просто «в прошлом периоде не было». Показываем это словами, а не
+    выдуманным числом.
+    """
+    if previous is None:
+        return {"delta": None, "hint": "События за выбранный период"}
+    if not previous:
+        return {"delta": None,
+                "hint": f"За прошлый период — {current and 'ни одного' or 'тоже ни одного'}"}
+    return {"delta": round((current - previous) / previous * 100, 1),
+            "hint": f"За прошлый период — {previous}"}
 
 
 def summary_tiles(summary: dict[str, Any]) -> list[dict[str, Any]]:
     """Плитки по всей базе — единственное, что считает сама Афина."""
+    # delta нужен всегда: в Jinja отсутствующий ключ — не None, а Undefined,
+    # и плитка уходит в ветку сравнения с прошлым периодом, которого здесь нет.
     return [
-        {"label": label, "value": summary.get(key), "hint": hint}
+        {"label": label, "value": summary.get(key), "hint": hint, "delta": None}
         for key, label, hint in SUMMARY_TILES
     ]
+
+
+def counts_as_removal(item: dict[str, Any]) -> bool:
+    """Засчитывать ли снятие с рекламы.
+
+    Снятое без причины и снятое с «Другое» без пояснения не считаются: в
+    первом случае причины нет, во втором она ничего не объясняет. Остальные
+    причины — из справочника Афины, они конкретны и комментария не требуют.
+    """
+    if (item.get("status") or "").strip() != STATUS_REMOVED:
+        return False
+    category = (item.get("removal_reason_category") or "").strip()
+    if not category:
+        return False
+    if category == REASON_OTHER:
+        return bool((item.get("removal_comment") or "").strip())
+    return True
 
 
 def _count(items: list[dict[str, Any]], key: str) -> int:
@@ -310,7 +365,10 @@ def breakdown(items: list[dict[str, Any]], selected: dict[str, Any],
     return {
         "groups": rendered,
         "metric": metric,
-        "period_label": f"{title} за период",
+        # Колонки идут за чипом: под «в рекламе» незачем колонка «сняты с
+        # сайта», под «на сайте» — «сняты с рекламы».
+        "columns": list(BREAKDOWN_COLUMNS[selected["filter"]])
+        + [("period", f"{title} за период")],
         "totals": _totals([b for g in rendered for b in g["brokers"]]),
     }
 
@@ -330,7 +388,7 @@ def _totals(rows: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def load(client: AfinaClient, selected: dict[str, Any], period: dict[str, str],
-         page_size: int) -> dict[str, Any]:
+         page_size: int, previous: dict[str, str] | None = None) -> dict[str, Any]:
     """Собрать данные раздела. Отказ Афины — не исключение, а состояние.
 
     Страница обязана отрисоваться и когда Афина молчит: человеку нужнее
@@ -365,7 +423,7 @@ def load(client: AfinaClient, selected: dict[str, Any], period: dict[str, str],
             # сама Афина, и не предлагаем ни отделов, ни периода.
             data["tiles"] = summary_tiles(client.summary())
         else:
-            data.update(_workspace(client, selected, period, page_size))
+            data.update(_workspace(client, selected, period, page_size, previous))
             data["scoped"] = True
     except AfinaError as exc:
         data["failed"] = True
@@ -374,12 +432,13 @@ def load(client: AfinaClient, selected: dict[str, Any], period: dict[str, str],
 
 
 def _workspace(client: AfinaClient, selected: dict[str, Any],
-               period: dict[str, str], page_size: int) -> dict[str, Any]:
+               period: dict[str, str], page_size: int,
+               previous: dict[str, str] | None) -> dict[str, Any]:
     """Плитки, разбивка и — если выбран брокер — его объекты."""
     taken = snapshot(client)
     scoped = scope(taken["items"], selected)
     result = {
-        "tiles": tiles_for(scoped, selected, period),
+        "tiles": tiles_for(scoped, selected, period, previous),
         "departments": departments_of(taken["items"]),
         "breakdown": breakdown(scoped, selected, period),
         "truncated": taken["truncated"],
@@ -436,7 +495,7 @@ def _listing_row(item: dict[str, Any]) -> dict[str, Any]:
     # Афина отдаёт снятие с сайта состоянием, а не флагом; приводим к флагу,
     # чтобы считать его так же, как остальные срезы.
     row["site_removed"] = (item.get("site_sync_status") or "").strip() == SITE_UNPUBLISHED
-    row["removed_from_ad"] = (item.get("status") or "").strip() == STATUS_REMOVED
+    row["removed_from_ad"] = counts_as_removal(item)
     return row
 
 
