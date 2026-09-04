@@ -217,6 +217,10 @@ def objects_page(request: Request) -> HTMLResponse:
         "scoped": False,
         "table": None,
         "card": None,
+        "breakdown": None,
+        "departments": [],
+        "objects": None,
+        "truncated": False,
         "error": None,
     })
     if not context["is_admin"]:

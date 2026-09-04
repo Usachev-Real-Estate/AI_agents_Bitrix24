@@ -2,16 +2,15 @@
 {% import "macros.html" as ui %}
 {% block title %}Объекты{% endblock %}
 
-{# Воронка и отдел к объектам Афины не относятся: у неё свой справочник
-   отделов и никаких воронок Битрикса. Период применяется только к истории
-   снятий — у остальных цифр это состояние «прямо сейчас», и переключатель
-   периода над ними читался бы как неработающий фильтр. #}
+{# Воронка к объектам Афины не относится, а отдел здесь свой: справочник у
+   Афины отдельный, с отделами Битрикса он не сопоставлен. Период на «Все» не
+   показывается — там 38 тысяч карточек, и события по ним не считаются. #}
 {% block filters %}
 <form class="filters" method="get" action="" data-autosubmit>
   <div class="chips">
     {% for key, label in views %}
       <a class="chip {{ 'active' if selected.view == key else '' }}"
-         href="?{{ qs(request, view=key, page=None, id=None) }}">{{ label }}</a>
+         href="?{{ qs(request, view=key, page=None, id=None, broker=None) }}">{{ label }}</a>
     {% endfor %}
   </div>
   {% if selected.view == 'removals' and selected.object_id is none %}
@@ -29,21 +28,41 @@
     <div class="chips">
       {% for key, item in listing_filters.items() %}
         <a class="chip {{ 'active' if selected.filter == key else '' }}"
-           href="?{{ qs(request, filter=key, page=None, id=None) }}">{{ item[0] }}</a>
+           href="?{{ qs(request, filter=key, page=None, id=None, broker=None) }}">{{ item[0] }}</a>
       {% endfor %}
     </div>
+    {% if scoped and selected.object_id is none %}
+      <div class="chips">
+        {% for key, label in period_presets.items() %}
+          <a class="chip {{ 'active' if period.preset == key else '' }}"
+             href="?{{ qs(request, period=key, start=None, end=None, page=None) }}">{{ label }}</a>
+        {% endfor %}
+      </div>
+      <label class="field">с
+        <input type="date" name="start" value="{{ period.start }}"></label>
+      <label class="field">по
+        <input type="date" name="end" value="{{ period.end }}"></label>
+      <label class="field">Отдел
+        <select name="department">
+          <option value="">Все отделы</option>
+          {% for name in departments %}
+            <option value="{{ name }}"
+              {{ 'selected' if selected.department == name else '' }}>{{ name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    {% endif %}
   {% endif %}
   <label class="field">
     <input type="search" name="q" placeholder="адрес, ЖК или ID"
            value="{{ selected.q }}"></label>
   <input type="hidden" name="view" value="{{ selected.view }}">
   <input type="hidden" name="filter" value="{{ selected.filter }}">
-  {% if selected.view == 'removals' %}
+  {% if selected.broker %}
+    <input type="hidden" name="broker" value="{{ selected.broker }}">
+  {% endif %}
+  {% if selected.view == 'removals' or scoped %}
     <input type="hidden" name="period" value="{{ period.preset }}">
-    {% if selected.object_id is not none %}
-      <input type="hidden" name="start" value="{{ period.start }}">
-      <input type="hidden" name="end" value="{{ period.end }}">
-    {% endif %}
   {% endif %}
   <button class="btn" type="submit">Найти</button>
 </form>
@@ -69,6 +88,14 @@
     </div>
   {% endif %}
 
+  {% if truncated %}
+    <div class="notice notice-warn">
+      <span>⚠</span>
+      <span>Рабочих объектов в Афине оказалось больше, чем помещается в один
+        снимок. Числа ниже посчитаны по началу выборки и занижены.</span>
+    </div>
+  {% endif %}
+
   {% if tiles %}
     <div class="grid grid-kpi">
       {% for tile in tiles %}
@@ -76,17 +103,16 @@
       {% endfor %}
     </div>
     {% if scoped %}
-      {{ ui.definition('Числа — по выбранной выборке, а не по всей базе. Срезы
-        внутри неё пересекаются: объект бывает одновременно в рекламе и на
-        сайте, поэтому складывать их нельзя. Фильтр и срез складываются, так
-        что под «Сняты с рекламы» плитка «В рекламе» показывает ноль: статус у
-        объекта один.') }}
+      {{ ui.definition('Три первых числа — состояние прямо сейчас, четвёртое —
+        события за выбранный период. Чип выбирает, о чём таблица ниже и что
+        считается за период; сами числа он не сужает, поэтому отдел видно
+        целиком. Снятие с сайта Афина хранит только состоянием, даты у него
+        нет — за период его посчитать нечем.') }}
     {% else %}
-      {{ ui.definition('Числа — по всей базе Афины; выберите фильтр, чтобы
-        увидеть их по выборке. Счётчики независимы и пересекаются: объект может
-        быть одновременно в рекламе и на сайте, поэтому складывать их нельзя.
-        Копии считаются отдельно — одна квартира в двух рекламных аккаунтах
-        даёт две карточки.') }}
+      {{ ui.definition('Числа — по всей базе Афины, включая черновики и копии.
+        Выберите фильтр, чтобы получить период, отделы и разбивку по брокерам:
+        там считаются только рабочие объекты, и их меньше тысячи. Счётчики
+        пересекаются: объект бывает одновременно в рекламе и на сайте.') }}
     {% endif %}
   {% endif %}
 
@@ -100,7 +126,7 @@
             {{ card.district }}{% endif %}</p>
         </div>
         <div class="chips">
-          <a class="chip" href="?{{ qs(request, id=None) }}">← ко всем объектам</a>
+          <a class="chip" href="?{{ qs(request, id=None) }}">← назад</a>
         </div>
       </div>
       <div class="table-wrap">
@@ -111,6 +137,8 @@
               <td>{{ 'да' if card.in_ad else 'нет' }}</td></tr>
             <tr><td class="muted">На сайте</td>
               <td>{{ 'да' if card.is_published else 'нет' }}</td></tr>
+            <tr><td class="muted">Снят с сайта</td>
+              <td>{{ 'да' if card.site_removed else 'нет' }}</td></tr>
             <tr><td class="muted">Период размещения</td>
               <td>{{ card.ad_period or '—' }}</td></tr>
             <tr><td class="muted">Причина снятия</td>
@@ -144,6 +172,141 @@
         живёт в поле объекта и не стирается при возврате в рекламу, поэтому
         здесь она показана только у снятых.') }}
     </div>
+
+  {% elif breakdown %}
+    <div class="card mt-16">
+      <div class="card-head">
+        <div>
+          <h2>Отделы и брокеры</h2>
+          <p class="card-sub">Отсортировано по «{{ listing_filters[selected.filter][0] }}».
+            {% if selected.department %}Отдел: {{ selected.department }}.{% endif %}
+            Нажмите на брокера, чтобы увидеть его объекты.</p>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Отдел и брокер</th>
+              <th class="num">В рекламе</th>
+              <th class="num">На сайте</th>
+              <th class="num">Сняты с рекламы</th>
+              <th class="num">Сняты с сайта</th>
+              <th class="num nowrap">{{ breakdown.period_label }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for group in breakdown.groups %}
+              <tr>
+                <td><strong>{{ group.department }}</strong></td>
+                <td class="num"><strong>{{ group.totals.in_ad | int_ru }}</strong></td>
+                <td class="num"><strong>{{ group.totals.is_published | int_ru }}</strong></td>
+                <td class="num"><strong>{{ group.totals.removed_from_ad | int_ru }}</strong></td>
+                <td class="num"><strong>{{ group.totals.site_removed | int_ru }}</strong></td>
+                <td class="num"><strong>{{ group.totals.period | int_ru }}</strong></td>
+              </tr>
+              {% for row in group.brokers %}
+                <tr>
+                  <td class="ellipsis" title="{{ row.broker }}">
+                    <a href="?{{ qs(request, broker=row.broker, page=None) }}">
+                      {{ row.broker }}</a></td>
+                  <td class="num">{{ row.in_ad | int_ru }}</td>
+                  <td class="num">{{ row.is_published | int_ru }}</td>
+                  <td class="num">{{ row.removed_from_ad | int_ru }}</td>
+                  <td class="num">{{ row.site_removed | int_ru }}</td>
+                  <td class="num">{{ row.period | int_ru }}</td>
+                </tr>
+              {% endfor %}
+            {% else %}
+              <tr><td colspan="6" class="empty">Ничего не найдено</td></tr>
+            {% endfor %}
+          </tbody>
+          {% if breakdown.groups %}
+            <tbody>
+              <tr>
+                <td><strong>Итого</strong></td>
+                <td class="num"><strong>{{ breakdown.totals.in_ad | int_ru }}</strong></td>
+                <td class="num"><strong>{{ breakdown.totals.is_published | int_ru }}</strong></td>
+                <td class="num"><strong>{{ breakdown.totals.removed_from_ad | int_ru }}</strong></td>
+                <td class="num"><strong>{{ breakdown.totals.site_removed | int_ru }}</strong></td>
+                <td class="num"><strong>{{ breakdown.totals.period | int_ru }}</strong></td>
+              </tr>
+            </tbody>
+          {% endif %}
+        </table>
+      </div>
+      {{ ui.definition('Отдел — это отдел брокера в справочнике Афины, а не в
+        Битриксе: сопоставить их нечем. Объект без ответственного попадает в
+        «Без отдела». Копии считаются отдельно: одна квартира в двух рекламных
+        аккаунтах — две строки у своих брокеров.') }}
+    </div>
+
+    {% if objects %}
+      <div class="card mt-16">
+        <div class="card-head">
+          <div>
+            <h2>{{ selected.broker }} · {{ listing_filters[selected.filter][0] }} ·
+              найдено {{ objects.total | int_ru }}</h2>
+            <p class="card-sub">Объекты, из которых сложилось число в строке брокера.</p>
+          </div>
+          <div class="chips">
+            <a class="chip" href="?{{ qs(request, broker=None, page=None) }}">
+              ← ко всем брокерам</a>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Объект</th>
+                <th>Статус</th>
+                <th class="nowrap">Период рекламы</th>
+                <th class="num nowrap">В рекламе с</th>
+                <th class="num nowrap">На сайте с</th>
+                <th class="num nowrap">Снят</th>
+                <th>Причина снятия</th>
+                <th>Аккаунт</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in objects.rows %}
+                <tr>
+                  <td class="num"><a href="?{{ qs(request, id=row.id) }}">{{ row.id }}</a></td>
+                  <td class="ellipsis" title="{{ row.address or row.title or '' }}">
+                    {{ row.title or row.address or '—' }}
+                    {% if row.is_copy %}<span class="badge"
+                      title="Копия объекта #{{ row.original_flat_id }}">копия</span>{% endif %}</td>
+                  <td class="nowrap">{{ row.status or '—' }}</td>
+                  <td class="nowrap muted">{{ row.ad_period or '—' }}</td>
+                  <td class="num nowrap">{{ row.published_to_ads_at | date_ru }}</td>
+                  <td class="num nowrap">{{ row.published_to_site_at | date_ru }}</td>
+                  <td class="num nowrap">{{ row.removed_from_ad_at | date_ru }}</td>
+                  <td class="ellipsis" title="{{ row.removal.reason if row.removal else '' }}">
+                    {% if row.removal %}{{ row.removal.category or '—' }}
+                    {% else %}—{% endif %}</td>
+                  <td class="muted">{{ row.ad_account_name or '—' }}</td>
+                </tr>
+              {% else %}
+                <tr><td colspan="9" class="empty">Ничего не найдено</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% if objects.pages > 1 %}
+        <div class="pagination">
+          {% if objects.page > 1 %}
+            <a class="btn" href="?{{ qs(request, page=objects.page - 1) }}">← назад</a>
+          {% endif %}
+          <span>страница {{ objects.page }} из {{ objects.pages }}</span>
+          {% if objects.page < objects.pages %}
+            <a class="btn" href="?{{ qs(request, page=objects.page + 1) }}">вперёд →</a>
+          {% endif %}
+        </div>
+        {% endif %}
+      </div>
+    {% endif %}
+
   {% elif table and selected.view == 'removals' %}
     <div class="card mt-16">
       <div class="card-head">
@@ -205,86 +368,6 @@
       {{ ui.definition('Границы периода — календарные дни по UTC, обе
         включающие. Снятия по истечению срока размещения Афина в журнал не
         пишет: такой объект виден в списке «Сняты с рекламы», но не здесь.') }}
-    </div>
-  {% elif table %}
-    <div class="card mt-16">
-      <div class="card-head">
-        <div>
-          <h2>{{ listing_filters[selected.filter][0] }} ·
-            найдено {{ table.total | int_ru }}</h2>
-          <p class="card-sub">Состояние на сейчас: реклама, сайт и даты событий
-            из журнала Афины.</p>
-        </div>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Объект</th>
-              <th>Статус</th>
-              <th class="nowrap">Период рекламы</th>
-              <th class="num nowrap">В рекламе с</th>
-              <th class="num nowrap">На сайте с</th>
-              <th class="num nowrap">Продлён</th>
-              <th class="num nowrap">Снят</th>
-              <th>Причина снятия</th>
-              <th>Брокер</th>
-              <th>Отдел</th>
-              <th>Аккаунт</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for row in table.rows %}
-              <tr>
-                <td class="num"><a href="?{{ qs(request, id=row.id) }}">
-                  {{ row.id }}</a></td>
-                <td class="ellipsis" title="{{ row.address or row.title or '' }}">
-                  {{ row.title or row.address or '—' }}
-                  {% if row.complex_name %}<span class="muted">·
-                    {{ row.complex_name }}</span>{% endif %}
-                  {% if row.is_copy %}<span class="badge"
-                    title="Копия объекта #{{ row.original_flat_id }} в другом
-                    рекламном аккаунте">копия</span>{% endif %}</td>
-                <td class="nowrap">{{ row.status or '—' }}
-                  {% if row.is_published %}<span class="badge badge-won"
-                    title="Опубликован на сайте">сайт</span>{% endif %}</td>
-                <td class="nowrap muted">{{ row.ad_period or '—' }}</td>
-                <td class="num nowrap">{{ row.published_to_ads_at | date_ru }}</td>
-                <td class="num nowrap">{{ row.published_to_site_at | date_ru }}</td>
-                <td class="num nowrap">{{ row.last_renewed_at | date_ru }}</td>
-                <td class="num nowrap">{{ row.removed_from_ad_at | date_ru }}</td>
-                <td class="ellipsis" title="{{ row.removal.reason if row.removal else '' }}">
-                  {% if row.removal %}{{ row.removal.category or '—' }}
-                    {% if row.removal.comment %}<span class="muted">·
-                      {{ row.removal.comment }}</span>{% endif %}
-                  {% else %}—{% endif %}</td>
-                <td>{{ row.assignee_name or '—' }}</td>
-                <td class="muted">{{ row.department_name or '—' }}</td>
-                <td class="muted">{{ row.ad_account_name or '—' }}</td>
-              </tr>
-            {% else %}
-              <tr><td colspan="12" class="empty">Ничего не найдено</td></tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-      {% if table.pages > 1 %}
-      <div class="pagination">
-        {% if table.page > 1 %}
-          <a class="btn" href="?{{ qs(request, page=table.page - 1) }}">← назад</a>
-        {% endif %}
-        <span>страница {{ table.page }} из {{ table.pages }}</span>
-        {% if table.page < table.pages %}
-          <a class="btn" href="?{{ qs(request, page=table.page + 1) }}">вперёд →</a>
-        {% endif %}
-      </div>
-      {% endif %}
-      {{ ui.definition('Даты «в рекламе с» и «на сайте с» — первое событие
-        публикации в журнале Афины. У объектов, заведённых до журнала, они
-        пусты; период рекламы в такой строке остаётся единственным
-        ориентиром. Причина снятия показана только у снятых: у вернувшихся в
-        рекламу поле причины остаётся заполненным старым значением.') }}
     </div>
   {% endif %}
 

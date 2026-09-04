@@ -137,6 +137,14 @@ class FakeAfina:
         self._maybe_fail()
         return _page(afina._with_utc_dates(dict(item)) for item in self._listings)
 
+    def fetch_all(self, *, cap=5000, **filters):
+        """Вся выборка сразу — так же, как её собирает настоящий клиент."""
+        self.calls.append(("fetch_all", filters))
+        self._maybe_fail()
+        rows = [afina._with_utc_dates(dict(x))
+                for x in self._listings if self._matches(x, filters)]
+        return rows[:cap]
+
     def count(self, **filters):
         """Считает по тем же правилам, что и Афина, — иначе плитки не проверить."""
         self.calls.append(("count", filters))
@@ -186,6 +194,18 @@ class FakeAfina:
     def _maybe_fail(self):
         if self._fail is not None:
             raise self._fail
+
+
+@pytest.fixture(autouse=True)
+def _fresh_snapshot():
+    """Снимок кэшируется в модуле, а не в приложении.
+
+    Без сброса второй тест увидел бы объекты первого и прошёл бы по чужим
+    данным — или упал бы, не объяснив почему.
+    """
+    objects.reset_cache()
+    yield
+    objects.reset_cache()
 
 
 @pytest.fixture
@@ -271,13 +291,47 @@ def test_configured_section_appears_in_navigation(client, afina_api):
     assert "Объекты" in client.get(f"{BASE}/").text
 
 
-# --- цифры и строки ---
+# --- цифры и плитки ---
+
+# Третий объект — другой отдел и другой брокер: без него разбивка состоит из
+# одной группы и не проверяет ни группировку, ни сортировку.
+OTHER = dict(
+    LISTING,
+    id=503,
+    title="Трёшка у моря",
+    address="Морская, 7",
+    assignee_name="Петров Пётр",
+    department_name="Отдел Ким",
+    published_to_ads_at="2026-08-15T10:00:00",
+    published_to_site_at="2026-08-15T10:00:00",
+)
+
+# Снят и с рекламы, и с сайта: единственный способ проверить плитку «Сняты с
+# сайта», которую Афина отдаёт состоянием site_sync_status.
+OFF_SITE = dict(
+    REMOVED,
+    id=504,
+    title="Студия на Ленина",
+    site_sync_status="unpublished",
+    published_to_ads_at="2026-01-20T10:00:00",
+    assignee_name="Петров Пётр",
+    department_name="Отдел Ким",
+)
+
+
+@pytest.fixture
+def wide_afina(monkeypatch):
+    """Четыре объекта, два отдела, два брокера — минимум для разбивки."""
+    fake = FakeAfina(listings=[LISTING, REMOVED, OTHER, OFF_SITE],
+                     removals=[REMOVAL_EVENT])
+    monkeypatch.setattr(objects, "client_for", lambda settings: fake)
+    return fake
 
 
 def test_counters_come_from_afina(client, afina_api):
-    """Каждая плитка показывает своё число, а не соседнее.
+    """Без фильтра плитки — по всей базе, парами «подпись — число».
 
-    Проверяется пара «подпись — значение»: перепутанные ключи дают четыре
+    Проверяется пара, а не набор чисел: перепутанные ключи дают четыре
     правильных числа на странице и четыре неправильные подписи.
     """
     body = client.get(f"{BASE}/objects").text
@@ -287,22 +341,142 @@ def test_counters_come_from_afina(client, afina_api):
         assert value in body.split(marker, 1)[1][:200], label
 
 
-def test_listing_row_shows_address_broker_and_ad_period(client, afina_api):
-    body = client.get(f"{BASE}/objects").text
-    assert "Двушка у парка" in body
-    assert "Тестов Иван" in body
-    assert "01.08.2026 — 31.08.2026" in body
+def test_the_whole_base_view_does_not_download_the_base(client, afina_api):
+    """«Все» считает сама Афина: 38 тысяч карточек постранично не собрать."""
+    client.get(f"{BASE}/objects")
+    assert [name for name, _ in afina_api.calls if name == "fetch_all"] == []
 
 
-def test_removal_reason_is_split_into_category_and_comment(client, afina_api):
-    """Причина и комментарий — разные колонки.
+def test_tiles_describe_the_scope_not_the_chip(client, wide_afina):
+    """Чип не сужает плитки — иначе половина из них показывала бы ноль.
 
-    «Другое: собственник уехал» без разделения не сгруппировать: в отчёте по
-    причинам каждый такой объект стал бы отдельной категорией.
+    Под фильтром «в рекламе» плитка «Сняты с рекламы» обязана показать
+    снятые объекты отдела, а не ноль: чип выбирает метрику и таблицу, а не
+    выборку для счётчиков.
     """
-    body = _visible(client.get(f"{BASE}/objects?filter=removed").text)
-    assert "Другое" in body
-    assert "собственник уехал" in body
+    body = client.get(f"{BASE}/objects?filter=in_ad{PERIOD.replace('?', '&')}").text
+    values = _tile_values(body)
+    labels = _tile_labels(body)
+    assert labels[:3] == ["В рекламе", "На сайте", "Сняты с рекламы"]
+    # Два в рекламе (501, 503), два снятых (502, 504).
+    assert values[0] == "2"
+    assert values[2] == "2"
+
+
+def test_period_tile_counts_only_events_inside_the_window(client, wide_afina):
+    """Четвёртая плитка — события за период, а не состояние.
+
+    В окне 01–31 августа лежат обе публикации в рекламу; за пределами окна
+    плитка обязана обнулиться, иначе период ни на что не влияет.
+    """
+    inside = client.get(f"{BASE}/objects?filter=in_ad{PERIOD.replace('?', '&')}").text
+    assert _tile_labels(inside)[3] == "Выставлено в рекламу за период"
+    # Три публикации в августе; четвёртая — в январе и сюда не попадает.
+    assert _tile_values(inside)[3] == "3"
+
+    january = client.get(
+        f"{BASE}/objects?filter=in_ad&start=2026-01-01&end=2026-01-31").text
+    assert _tile_values(january)[3] == "1"
+
+
+def test_site_filter_shows_site_tiles(client, wide_afina):
+    """У фильтра «на сайте» свой набор: сайт, снятые с сайта, выставлено."""
+    body = client.get(f"{BASE}/objects?filter=published{PERIOD.replace('?', '&')}").text
+    assert _tile_labels(body)[:2] == ["На сайте", "Сняты с сайта"]
+    assert _tile_labels(body)[3] == "Выставлено на сайт за период"
+    # Снят с сайта ровно один объект — тот, у кого site_sync_status=unpublished.
+    assert _tile_values(body)[1] == "1"
+
+
+def test_site_removed_tile_admits_it_has_no_period(client, wide_afina):
+    """Даты снятия с сайта в Афине нет, и плитка обязана про это сказать.
+
+    Иначе её прочитают как «снято за выбранный период» и посчитают неверно.
+    """
+    body = client.get(f"{BASE}/objects?filter=published").text
+    assert "даты снятия Афина не хранит" in body
+
+
+# --- отделы ---
+
+
+def test_department_options_come_from_the_data(client, wide_afina):
+    """Справочник отделов Афина по API не отдаёт — собираем из снимка."""
+    body = client.get(f"{BASE}/objects?filter=in_ad").text
+    assert "Отдел Трофимовой" in body
+    assert "Отдел Ким" in body
+
+
+def test_department_narrows_tiles_and_table(client, wide_afina):
+    """Выбранный отдел сужает и плитки, и разбивку.
+
+    В отделе Ким один объект в рекламе из двух и один снятый из двух.
+    """
+    body = client.get(
+        f"{BASE}/objects?filter=in_ad&department=Отдел+Ким{PERIOD.replace('?', '&')}").text
+    assert _tile_values(body)[0] == "1"
+    assert "Петров Пётр" in body
+    assert "Тестов Иван" not in body
+
+
+# --- таблица по отделам и брокерам ---
+
+
+def test_breakdown_replaces_the_object_list(client, wide_afina):
+    """Основная таблица теперь про отделы и брокеров, а не про объекты."""
+    body = client.get(f"{BASE}/objects?filter=in_ad").text
+    assert "Отделы и брокеры" in body
+    # Заголовков старого списка объектов на странице быть не должно.
+    assert "Период рекламы" not in body
+    assert "Рекламный аккаунт" not in body
+
+
+def test_breakdown_counts_every_broker(client, wide_afina):
+    """У каждого брокера своя строка со своими числами."""
+    body = _visible(client.get(f"{BASE}/objects?filter=in_ad").text)
+    assert "Тестов Иван" in body
+    assert "Петров Пётр" in body
+    assert "Итого" in body
+
+
+def test_broker_row_opens_his_objects(client, wide_afina):
+    """Строка брокера без раскрытия — тупик: число есть, объектов не видно."""
+    body = client.get(f"{BASE}/objects?filter=in_ad&broker=Петров+Пётр").text
+    assert "Трёшка у моря" in body
+    # Чужие объекты в раскрытии не показываются.
+    assert "Двушка у парка" not in body
+
+
+def test_broker_drilldown_respects_the_chip(client, wide_afina):
+    """Раскрытие показывает те объекты, по которым считалась колонка чипа."""
+    body = client.get(f"{BASE}/objects?filter=removed&broker=Петров+Пётр").text
+    assert "Студия на Ленина" in body
+    assert "Трёшка у моря" not in body
+
+
+# --- снимок ---
+
+
+def test_snapshot_is_taken_once_and_reused(client, wide_afina):
+    """Снимок живёт минуту: переключение чипов не должно бить по Афине.
+
+    Иначе каждый клик — десяток запросов, и раздел становится дороже всего
+    остального дашборда вместе взятого.
+    """
+    client.get(f"{BASE}/objects?filter=in_ad")
+    first = len([1 for name, _ in wide_afina.calls if name == "fetch_all"])
+    client.get(f"{BASE}/objects?filter=published")
+    client.get(f"{BASE}/objects?filter=removed")
+    assert first == 3, "снимок собирается из трёх выборок"
+    assert len([1 for name, _ in wide_afina.calls if name == "fetch_all"]) == first
+
+
+def test_snapshot_merges_selections_instead_of_summing_them(client, wide_afina):
+    """Объект бывает и в рекламе, и на сайте — считать его дважды нельзя."""
+    body = client.get(f"{BASE}/objects?filter=in_ad").text
+    # 501 и 503 в рекламе и одновременно на сайте; без слияния по id
+    # «В рекламе» показало бы четыре вместо двух.
+    assert _tile_values(body)[0] == "2"
 
 
 def test_stale_reason_is_not_shown_for_an_object_back_in_ad(app_factory, monkeypatch):
@@ -315,117 +489,11 @@ def test_stale_reason_is_not_shown_for_an_object_back_in_ad(app_factory, monkeyp
                  removal_reason_category="Продано другими")
     fake = FakeAfina(listings=[stale])
     monkeypatch.setattr(objects, "client_for", lambda settings: fake)
-    body = _login(app_factory()).get(f"{BASE}/objects").text
+    body = _login(app_factory()).get(f"{BASE}/objects?filter=in_ad&broker=Тестов+Иван").text
     assert "Продано другими" not in body
 
 
-def test_copies_are_not_collapsed(app_factory, monkeypatch):
-    """Одна квартира в двух аккаунтах — две строки, и копия помечена.
-
-    Схлопывание спрятало бы второе размещение, у которого своя судьба:
-    его могут снять отдельно от оригинала.
-    """
-    copy = dict(LISTING, id=777, is_copy=True, original_flat_id=501,
-                ad_account_name="Второй аккаунт")
-    fake = FakeAfina(listings=[LISTING, copy])
-    monkeypatch.setattr(objects, "client_for", lambda settings: fake)
-    body = _login(app_factory()).get(f"{BASE}/objects").text
-    assert "777" in body and "501" in body
-    assert "копия" in body
-
-
-# --- фильтры и период ---
-
-
-@pytest.mark.parametrize("chip, expected", [
-    ("in_ad", {"in_ad": True}),
-    ("published", {"is_published": True}),
-    ("removed", {"removed_from_ad": True}),
-])
-def test_filter_chip_reaches_afina(client, afina_api, chip, expected):
-    client.get(f"{BASE}/objects?filter={chip}")
-    kwargs = afina_api.kwargs_of("listings")
-    for key, value in expected.items():
-        assert kwargs[key] is value
-
-
-def _tile_values(body):
-    """Числа плиток в порядке слева направо."""
-    return re.findall(r'<div class="tile-value[^"]*">([^<]+)</div>', body)
-
-
-def _tile_labels(body):
-    return re.findall(r'<div class="tile-label">([^<]+)</div>', body)
-
-
-def test_tiles_show_the_whole_base_until_a_filter_is_chosen(client, afina_api):
-    """Без фильтра плитки — про всю базу, одним запросом к /summary."""
-    body = client.get(f"{BASE}/objects").text
-    assert _tile_labels(body)[0] == "Всего объектов"
-    assert "128" in _tile_values(body)[0]
-    # Считать по одной строке незачем: /summary отдал всё сразу.
-    assert afina_api.counts_of() == []
-
-
-def test_tiles_follow_the_chosen_filter(client, afina_api):
-    """Чип переключили — числа обязаны переехать за ним.
-
-    Иначе фильтр меняет таблицу, а плитки над ней стоят на месте, и человек
-    читает их как сломанные: ровно это и увидели на боевом дашборде.
-    """
-    body = client.get(f"{BASE}/objects?filter=removed").text
-    assert _tile_labels(body)[0] == "Найдено"
-    # В выборке один снятый объект из двух: он же и «найден», он же снят,
-    # а «в рекламе» под этим фильтром пусто — статус у объекта один.
-    assert _tile_values(body) == ["1", "0", "0", "1"]
-    assert "Сняты с рекламы" in body
-
-
-def test_tiles_follow_the_search(client, afina_api):
-    """Поиск сужает выборку так же, как чип."""
-    body = client.get(f"{BASE}/objects?q=Кубанская").text
-    assert _tile_labels(body)[0] == "Найдено"
-    assert _tile_values(body)[0] == "2"
-    assert "Поиск «Кубанская»" in body
-    body = client.get(f"{BASE}/objects?q=такого-адреса-нет").text
-    assert _tile_values(body) == ["0", "0", "0", "0"]
-
-
-def test_scoped_tiles_say_they_are_not_the_whole_base(client, afina_api):
-    """Суженные числа обязаны быть подписаны, иначе их примут за общие."""
-    body = client.get(f"{BASE}/objects?filter=in_ad&q=парка").text
-    assert "Фильтр «Сейчас в рекламе», поиск «парка»" in body
-    assert "по выбранной выборке, а не по всей базе" in _visible(body)
-
-
-def test_counts_ask_afina_for_one_row_not_the_whole_page(client, afina_api):
-    """Счётчику нужен только total, а не строки: страница в одну запись.
-
-    38 тысяч объектов по 50 в строку — 773 страницы; тянуть их ради числа
-    нельзя, и total в конверте считается до OFFSET/LIMIT.
-    """
-    client.get(f"{BASE}/objects?filter=in_ad")
-    requested = afina_api.counts_of()
-    assert requested, "счётчики не запрашивались"
-    assert all(kw.get("in_ad") for kw in requested)
-
-
-def test_the_card_keeps_the_whole_base_tiles(client, afina_api):
-    """На карточке объекта фильтр списка ни на что не влияет."""
-    body = client.get(f"{BASE}/objects?id=501&filter=removed").text
-    assert _tile_labels(body)[0] == "Всего объектов"
-    assert afina_api.counts_of() == []
-
-
-def test_removals_view_keeps_the_whole_base_tiles(client, afina_api):
-    """История снятий — события, а плитки описывают состояние на сейчас."""
-    body = client.get(f"{BASE}/objects?view=removals").text
-    assert _tile_labels(body)[0] == "Всего объектов"
-
-
-def test_search_reaches_afina(client, afina_api):
-    client.get(f"{BASE}/objects?q=Кубанская")
-    assert afina_api.kwargs_of("listings")["search"] == "Кубанская"
+# --- период, карточка, снятия ---
 
 
 def test_removals_view_asks_for_the_chosen_period(client, afina_api):
@@ -441,11 +509,7 @@ def test_removals_view_asks_for_the_chosen_period(client, afina_api):
 
 
 def test_removals_view_shows_the_event_reason(client, afina_api):
-    """Причина на момент события и статус на сейчас стоят рядом.
-
-    Ради этого вкладка и существует: объект сняли по одной причине, а
-    сегодня он уже в другом состоянии.
-    """
+    """Причина на момент события и статус на сейчас стоят рядом."""
     body = _visible(client.get(f"{BASE}/objects?view=removals").text)
     assert "собственник уехал" in body
     assert "Отложенный спрос" in body
@@ -456,12 +520,6 @@ def test_page_size_never_exceeds_afinas_ceiling():
     assert afina.MAX_PAGE_SIZE == 100
     assert afina._clamp_size(500) == 100
     assert afina._clamp_size(0) == 1
-
-
-def test_configured_page_size_reaches_afina(app_factory, afina_api):
-    """AFINA_API_PAGE_SIZE не должен остаться украшением .env.example."""
-    _login(app_factory(page_size=25)).get(f"{BASE}/objects")
-    assert afina_api.kwargs_of("listings")["size"] == 25
 
 
 def test_single_object_card_opens_by_id(client, afina_api):
@@ -486,6 +544,27 @@ def test_missing_object_says_so(app_factory, monkeypatch):
     monkeypatch.setattr(objects, "client_for", lambda settings: fake)
     body = _login(app_factory()).get(f"{BASE}/objects?id=999").text
     assert "Объект 999 в Афине не найден" in body
+
+
+def test_the_card_keeps_the_whole_base_tiles(client, afina_api):
+    """На карточке объекта фильтр списка ни на что не влияет."""
+    body = client.get(f"{BASE}/objects?id=501&filter=removed").text
+    assert _tile_labels(body)[0] == "Всего объектов"
+
+
+def test_removals_view_keeps_the_whole_base_tiles(client, afina_api):
+    """История снятий — события, а плитки описывают состояние на сейчас."""
+    body = client.get(f"{BASE}/objects?view=removals").text
+    assert _tile_labels(body)[0] == "Всего объектов"
+
+
+def _tile_values(body):
+    """Числа плиток в порядке слева направо."""
+    return re.findall(r'<div class="tile-value[^"]*">([^<]+)</div>', body)
+
+
+def _tile_labels(body):
+    return re.findall(r'<div class="tile-label">([^<]+)</div>', body)
 
 
 # --- отказ источника ---
@@ -556,7 +635,8 @@ def test_a_truncated_summary_shows_a_dash_instead_of_crashing(app_factory, monke
     monkeypatch.setattr(objects, "client_for", lambda settings: fake)
     response = _login(app_factory()).get(f"{BASE}/objects")
     assert response.status_code == 200
-    assert "Двушка у парка" in response.text
+    # Недостающие ключи превращаются в прочерк, а не в пятисотую.
+    assert _tile_values(response.text) == ["5", "2", "—", "—"]
 
 
 def test_period_control_is_hidden_on_a_single_object(client, afina_api):
