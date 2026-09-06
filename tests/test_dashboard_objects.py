@@ -30,6 +30,13 @@ LOGIN_ROP = "rop"
 PASSWORD = "correct-horse-battery"
 PERIOD = "?start=2026-08-01&end=2026-08-31"
 
+# Снятия с рекламы временно выключены в objects.py (три закомментированные
+# строки). Тесты на них не удаляем и не переписываем: они проверяют рабочий
+# код, до которого сейчас просто нет ссылок с экрана. Снимут комментарии —
+# уберут и этот маркер, и проверки вернутся такими же, какими были.
+removals_off = pytest.mark.skip(
+    reason="снятия с рекламы временно выключены в objects.py")
+
 SUMMARY = {"total": 128, "in_ad": 41, "is_published": 33, "removed_from_ad": 17}
 
 # Подпись плитки и её число заданы парами руками. Взять ожидание из
@@ -468,6 +475,7 @@ def test_a_period_from_another_section_falls_back(client, wide_afina):
     assert objects.clamp_period({"preset": "custom"})["preset"] == "custom"
 
 
+@removals_off
 def test_removal_metric_needs_a_date_and_a_reason(client, removal_afina):
     """Снятие за период — это дата плюс причина, которая что-то объясняет.
 
@@ -490,6 +498,7 @@ def test_empty_other_and_missing_reason_never_count(client, removal_afina):
         assert objects.removal_reason_counts(item) is True, item["id"]
 
 
+@removals_off
 def test_a_removal_survives_the_return_to_the_ad(client, removal_afina):
     """Событие в истории и состояние сейчас — разные вопросы.
 
@@ -506,6 +515,30 @@ def test_a_removal_survives_the_return_to_the_ad(client, removal_afina):
     assert _tile_values(body)[-1] == "3"
 
 
+def test_removals_are_switched_off_everywhere_at_once(client, wide_afina):
+    """Снятия выключены — значит, их нет ни в одном из трёх мест.
+
+    Этот тест — единственное, что стоит между «выключили» и «выключили
+    наполовину»: чип, вид и плитка живут в разных местах файла, и вернуть
+    один из них по недосмотру легче лёгкого. Он же напомнит, что выключение
+    временное, когда снятия понадобятся обратно.
+    """
+    body = client.get(f"{BASE}/objects?filter=in_ad").text
+    assert "filter=removed" not in body
+    assert "view=removals" not in body
+    assert "Снято с рекламы за период" not in _tile_labels(body)
+
+
+def test_switched_off_removals_are_not_reachable_by_the_address(client, wide_afina):
+    """И правкой адреса тоже: ссылок нет, но адрес набирают руками."""
+    chip = client.get(f"{BASE}/objects?filter=removed").text
+    view = client.get(f"{BASE}/objects?view=removals").text
+    # Откат к разрешённому срезу, а не пустая страница и не пятисотая.
+    assert "Снято с рекламы за период" not in _tile_labels(chip)
+    assert "Снятия за период" not in _visible(view)
+
+
+@removals_off
 def test_removed_chip_keeps_only_the_tile_that_follows_the_period(client, wide_afina):
     """В чипе снятий не должно быть неподвижного числа снятых.
 
@@ -520,6 +553,7 @@ def test_removed_chip_keeps_only_the_tile_that_follows_the_period(client, wide_a
     assert [x for x in labels if "рекламы" in x] == ["Снято с рекламы за период"]
 
 
+@removals_off
 def test_removal_tile_moves_with_the_period(client, wide_afina):
     """И она обязана двигаться: иначе замена ничего не исправила."""
     inside = client.get(f"{BASE}/objects?filter=removed{PERIOD.replace('?', '&')}").text
@@ -530,6 +564,7 @@ def test_removal_tile_moves_with_the_period(client, wide_afina):
     assert _tile_values(outside)[-1] == "0"
 
 
+@removals_off
 def test_the_ad_chip_shows_the_outflow_as_an_event(client, wide_afina):
     """Под фильтром «в рекламе» снятия — это событие за период, а не состояние.
 
@@ -545,6 +580,7 @@ def test_the_ad_chip_shows_the_outflow_as_an_event(client, wide_afina):
                            "Снято с рекламы за период"]
 
 
+@removals_off
 def test_the_outflow_tile_follows_the_period(client, wide_afina):
     """И оно обязано двигаться: иначе замена ничего не исправила."""
     august = client.get(f"{BASE}/objects?filter=in_ad{PERIOD.replace('?', '&')}").text
@@ -555,6 +591,7 @@ def test_the_outflow_tile_follows_the_period(client, wide_afina):
     assert _tile(march, "Снято с рекламы за период") == "0"
 
 
+@removals_off
 def test_the_outflow_obeys_the_reason_rule_too(client, removal_afina):
     """Вторая метрика считает по тому же правилу, что и своя у чипа снятий.
 
@@ -584,9 +621,8 @@ def test_state_tiles_say_they_are_about_now(client, wide_afina):
     # Состояние одно и то же в обоих окнах...
     for label in state:
         assert _tile(inside, label) == _tile(outside, label), label
-    # ...а обе метрики за период в марте пусты.
-    for label in ("Выставлено в рекламу за период", "Снято с рекламы за период"):
-        assert _tile(outside, label) == "0", label
+    # ...а метрика за период в марте пуста.
+    assert _tile(outside, "Выставлено в рекламу за период") == "0"
 
 
 def test_the_whole_base_no_longer_shows_removed_from_ad(client, afina_api):
@@ -623,6 +659,7 @@ def test_an_object_in_ad_is_never_a_removal():
                                           removal_reason_category="Продано нами")) is False
 
 
+@removals_off
 def test_unexplained_removals_are_not_counted_on_the_page(app_factory, monkeypatch):
     """Снятое с «Другое» без пояснения не попадает в счётчик снятий."""
     vague = dict(REMOVED, id=505, removal_reason="Другое",
@@ -728,8 +765,8 @@ def test_breakdown_replaces_the_object_list(client, wide_afina):
                "Выставлено в рекламу за период"]),
     ("published", ["На сайте сейчас", "Сняты с сайта сейчас",
                    "Выставлено на сайт за период"]),
-    ("removed", ["Сняты с рекламы сейчас", "На сайте сейчас",
-                 "Снято с рекламы за период"]),
+    pytest.param("removed", ["Сняты с рекламы сейчас", "На сайте сейчас",
+                             "Снято с рекламы за период"], marks=removals_off),
 ])
 def test_breakdown_columns_follow_the_chip(client, wide_afina, chip, expected):
     """Колонки таблицы — про выбранный фильтр, а не все срезы сразу.
@@ -760,9 +797,10 @@ def test_broker_row_opens_his_objects(client, wide_afina):
 
 def test_broker_drilldown_respects_the_chip(client, wide_afina):
     """Раскрытие показывает те объекты, по которым считалась колонка чипа."""
-    body = client.get(f"{BASE}/objects?filter=removed&broker=Петров+Пётр").text
-    assert "Студия на Ленина" in body
-    assert "Трёшка у моря" not in body
+    body = client.get(f"{BASE}/objects?filter=published&broker=Петров+Пётр").text
+    # У Петрова две карточки: 503 на сайте и 504 снятая и с сайта убранная.
+    assert "Трёшка у моря" in body
+    assert "Студия на Ленина" not in body
 
 
 # --- снимок ---
@@ -807,6 +845,7 @@ def test_stale_reason_is_not_shown_for_an_object_back_in_ad(app_factory, monkeyp
 # --- период, карточка, снятия ---
 
 
+@removals_off
 def test_removals_view_asks_for_the_chosen_period(client, afina_api):
     """История снятий берёт границы из фильтра периода.
 
@@ -819,6 +858,7 @@ def test_removals_view_asks_for_the_chosen_period(client, afina_api):
     assert kwargs["until"] == "2026-08-31"
 
 
+@removals_off
 def test_removals_view_shows_the_event_reason(client, afina_api):
     """Причина на момент события и статус на сейчас стоят рядом."""
     body = _visible(client.get(f"{BASE}/objects?view=removals").text)
@@ -970,8 +1010,8 @@ def test_period_control_is_hidden_on_a_single_object(client, afina_api):
 
     Переключатель, который ничего не меняет, читается как сломанный фильтр.
     """
-    card = client.get(f"{BASE}/objects?view=removals&id=501").text
-    listing = client.get(f"{BASE}/objects?view=removals").text
+    card = client.get(f"{BASE}/objects?filter=in_ad&id=501").text
+    listing = client.get(f"{BASE}/objects?filter=in_ad").text
     assert "Текущий квартал" in listing
     assert "Текущий квартал" not in card
 
