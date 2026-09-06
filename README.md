@@ -250,10 +250,10 @@ docker run --rm --env-file .env -v $(pwd)/logs:/app/logs b24-ai-auditor:latest
 
 ```bash
 # Вариант 1: прямой запуск на хосте
-echo "0 7,14 * * 1-5 cd /opt/b24-ai-auditor && venv/bin/python src/main.py >> logs/cron.log 2>&1" | crontab -
+echo "0 7,14 * * 1-5 cd /home/Ai_agents_crm && venv/bin/python src/main.py >> logs/cron.log 2>&1" | crontab -
 
 # Вариант 2: запуск через Docker
-echo "0 7,14 * * 1-5 cd /opt/b24-ai-auditor && docker run --rm --env-file .env -v \$(pwd)/logs:/app/logs b24-ai-auditor:latest >> logs/cron.log 2>&1" | crontab -
+echo "0 7,14 * * 1-5 cd /home/Ai_agents_crm && docker run --rm --env-file .env -v \$(pwd)/logs:/app/logs b24-ai-auditor:latest >> logs/cron.log 2>&1" | crontab -
 ```
 
 Или скопировать готовую строку из `crontab.txt`:

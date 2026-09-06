@@ -64,3 +64,12 @@
 #     Инкремент принципиально не видит удалений: удалённая сделка навсегда
 #     осталась бы в счётчиках воронки. Эта задача помечает пропавшие записи.
 30 2 * * * cd /home/Ai_agents_crm && scripts/cron_job.sh analytics-full docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/analytics/etl.py --full >> logs/cron.log 2>&1
+
+# 18. Чистка Docker: еженедельно в воскресенье 03:00 МСК (00:00 UTC).
+#     Каждая пересборка дашборда оставляет слой кэша и старый образ без тега.
+#     Без чистки они копятся молча, пока диск не встанет на 100% — и тогда
+#     падает не только следующая сборка, но и всё, чему нужно место на диске.
+#     Сносится только неиспользуемое: кэш сборок целиком и образы без тегов.
+#     Тегированные образы (b24-ai-auditor:latest для задач выше) не трогаются,
+#     поэтому флага -a у image prune здесь нет и быть не должно.
+0 0 * * 0 cd /home/Ai_agents_crm && scripts/cron_job.sh docker-prune bash -c "docker builder prune -af && docker image prune -f" >> logs/cron.log 2>&1

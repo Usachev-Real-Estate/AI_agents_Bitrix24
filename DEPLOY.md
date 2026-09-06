@@ -13,14 +13,27 @@ sudo usermod -aG docker $USER
 ## 2. Клонирование и настройка
 
 ```bash
-cd /opt
-git clone https://github.com/Usachevofishial-git/AI_agents_Bitrix24.git b24-ai-auditor
-cd b24-ai-auditor
+cd /home
+git clone https://github.com/Usachevofishial-git/AI_agents_Bitrix24.git Ai_agents_crm
+cd Ai_agents_crm
 
 # Создать .env из примера
 cp .env.example .env
 nano .env  # Вставить реальные ключи и URL
 ```
+
+**Каталог на уже развёрнутой машине не угадывают, а спрашивают у Docker:**
+
+```bash
+docker inspect b24-dashboard \
+    --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}'
+```
+
+Compose записывает в контейнер каталог, из которого его собрали, — это
+единственный источник правды. Гадать по имени бесполезно: папка называется
+не так, как репозиторий, а в этом документе до сентября 2026 стоял путь
+`/opt/b24-ai-auditor`, которого на сервере нет вовсе. Поиски развёртывания
+начинались с него и упирались в пустой `/opt`.
 
 **Важно:** в `.env` установить:
 
@@ -74,25 +87,44 @@ mkdir -p logs
 
 ```bash
 # Логи аудита
-tail -f /opt/b24-ai-auditor/logs/audit.log
+tail -f /home/Ai_agents_crm/logs/audit.log
 
 # Логи cron
-tail -f /opt/b24-ai-auditor/logs/cron.log
+tail -f /home/Ai_agents_crm/logs/cron.log
 ```
 
 ## 7. Обновление
 
+Сначала место: сборка занимает несколько гигабайт, и на заполненном диске она
+падает на середине, оставляя сервис на старом образе.
+
 ```bash
-cd /opt/b24-ai-auditor
-git pull
-docker build -t b24-ai-auditor:latest .
-# Cron продолжит использовать новый образ при следующем запуске
+df -h /                    # нужно хотя бы 5 ГБ свободных
+docker builder prune -af   # если мало: кэш сборок сносится без последствий
 ```
+
+Дальше — код и образы:
+
+```bash
+cd /home/Ai_agents_crm
+git pull
+
+# Cron-задачи: собирают образ по тегу, подхватят его при следующем запуске
+docker build -t b24-ai-auditor:latest .
+
+# Дашборд: отдельный контейнер, обновляется только с --build
+docker compose up -d --build dashboard
+curl -si localhost:8080/healthz     # {"status":"ok"}
+```
+
+Флаг `--build` обязателен. Без него `docker compose up -d` видит, что образ
+сервиса уже есть, и просто перезапускает контейнер на старом коде — выкатка
+выглядит успешной, а изменений на странице нет.
 
 ## 8. Откат
 
 ```bash
-cd /opt/b24-ai-auditor
+cd /home/Ai_agents_crm
 git checkout <previous-commit>
 docker build -t b24-ai-auditor:latest .
 ```
