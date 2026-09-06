@@ -356,7 +356,8 @@ def test_tiles_describe_the_scope_not_the_chip(client, wide_afina):
     body = client.get(f"{BASE}/objects?filter=in_ad{PERIOD.replace('?', '&')}").text
     values = _tile_values(body)
     labels = _tile_labels(body)
-    assert labels[:3] == ["В рекламе", "На сайте", "Сняты с рекламы"]
+    assert labels[:3] == ["В рекламе сейчас", "На сайте сейчас",
+                          "Сняты с рекламы сейчас"]
     # Два в рекламе (501, 503), два снятых (502, 504).
     assert values[0] == "2"
     assert values[2] == "2"
@@ -381,7 +382,7 @@ def test_period_tile_counts_only_events_inside_the_window(client, wide_afina):
 def test_site_filter_shows_site_tiles(client, wide_afina):
     """У фильтра «на сайте» свой набор: сайт, снятые с сайта, выставлено."""
     body = client.get(f"{BASE}/objects?filter=published{PERIOD.replace('?', '&')}").text
-    assert _tile_labels(body)[:2] == ["На сайте", "Сняты с сайта"]
+    assert _tile_labels(body)[:2] == ["На сайте сейчас", "Сняты с сайта сейчас"]
     assert _tile_labels(body)[3] == "Выставлено на сайт за период"
     # Снят с сайта ровно один объект — тот, у кого site_sync_status=unpublished.
     assert _tile_values(body)[1] == "1"
@@ -394,6 +395,49 @@ def test_site_removed_tile_admits_it_has_no_period(client, wide_afina):
     """
     body = client.get(f"{BASE}/objects?filter=published").text
     assert "даты снятия Афина не хранит" in body
+
+
+EMPTY_PERIOD = "?start=2026-03-01&end=2026-03-31"
+
+
+def test_removed_chip_keeps_only_the_tile_that_follows_the_period(client, wide_afina):
+    """В чипе снятий не должно быть неподвижного числа снятых.
+
+    Раньше рядом стояли «Сняты с рекламы» (состояние) и «Снято с рекламы за
+    период» (события): один и тот же предмет, два разных числа, и понять,
+    почему одно ходит за фильтром дат, а второе нет, было невозможно.
+    """
+    body = client.get(f"{BASE}/objects?filter=removed{PERIOD.replace('?', '&')}").text
+    labels = _tile_labels(body)
+    assert "Сняты с рекламы сейчас" not in labels
+    # Единственная плитка про снятие — та, что считает события за период.
+    assert [x for x in labels if "рекламы" in x] == ["Снято с рекламы за период"]
+
+
+def test_removal_tile_moves_with_the_period(client, wide_afina):
+    """И она обязана двигаться: иначе замена ничего не исправила."""
+    inside = client.get(f"{BASE}/objects?filter=removed{PERIOD.replace('?', '&')}").text
+    outside = client.get(
+        f"{BASE}/objects?filter=removed{EMPTY_PERIOD.replace('?', '&')}").text
+    # Оба снятия (502 и 504) датированы августом, в марте — ни одного.
+    assert _tile_values(inside)[-1] == "2"
+    assert _tile_values(outside)[-1] == "0"
+
+
+def test_state_tiles_say_they_are_about_now(client, wide_afina):
+    """Плитки состояния подписаны «сейчас» и период не слушают.
+
+    Истории статусов Афина не хранит, так что двигаться они и не могут.
+    Слово в подписи — единственное, что отличает «не меняется, потому что
+    так задумано» от «залипло».
+    """
+    inside = client.get(f"{BASE}/objects?filter=in_ad{PERIOD.replace('?', '&')}").text
+    outside = client.get(
+        f"{BASE}/objects?filter=in_ad{EMPTY_PERIOD.replace('?', '&')}").text
+    assert all(label.endswith("сейчас") for label in _tile_labels(inside)[:-1])
+    # Состояние одно и то же, а событий за период в марте нет.
+    assert _tile_values(inside)[:-1] == _tile_values(outside)[:-1]
+    assert _tile_values(outside)[-1] == "0"
 
 
 def test_the_whole_base_no_longer_shows_removed_from_ad(client, afina_api):
@@ -528,9 +572,12 @@ def test_breakdown_replaces_the_object_list(client, wide_afina):
 
 
 @pytest.mark.parametrize("chip, expected", [
-    ("in_ad", ["В рекламе", "На сайте", "Выставлено в рекламу за период"]),
-    ("published", ["На сайте", "Сняты с сайта", "Выставлено на сайт за период"]),
-    ("removed", ["Сняты с рекламы", "На сайте", "Снято с рекламы за период"]),
+    ("in_ad", ["В рекламе сейчас", "На сайте сейчас",
+               "Выставлено в рекламу за период"]),
+    ("published", ["На сайте сейчас", "Сняты с сайта сейчас",
+                   "Выставлено на сайт за период"]),
+    ("removed", ["Сняты с рекламы сейчас", "На сайте сейчас",
+                 "Снято с рекламы за период"]),
 ])
 def test_breakdown_columns_follow_the_chip(client, wide_afina, chip, expected):
     """Колонки таблицы — про выбранный фильтр, а не все срезы сразу.
