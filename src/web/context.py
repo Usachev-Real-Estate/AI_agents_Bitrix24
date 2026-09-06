@@ -100,12 +100,18 @@ def visible_nav(request: Request, settings: Any, is_admin: bool,
                 active: str, department_id: int | None) -> list[dict[str, Any]]:
     """Навигация под конкретного пользователя: что видно и куда ведёт.
 
-    «Объекты» появляются, только когда связь с Афиной настроена и смотрит
-    администратор. Пункт меню, который ведёт на отказ или на плашку «не
-    настроено», хуже отсутствующего: по нему нельзя понять, поломка это или
-    так и задумано.
+    «Объекты» появляются, когда связь с Афиной настроена и пользователю есть
+    что там увидеть: администратору — всё, РОПу — свой отдел, и только если
+    этот отдел сопоставлен с отделом Афины. Пункт меню, ведущий на отказ или
+    на плашку «не настроено», хуже отсутствующего: по нему нельзя понять,
+    поломка это или так и задумано.
     """
-    shown = NAV if (objects.is_configured(settings) and is_admin) else [
+    allowed = objects.allowed_departments(
+        getattr(request.state, "user", None),
+        getattr(settings, "afina_department_map", {}) or {},
+    )
+    has_objects = objects.is_configured(settings) and (allowed is None or allowed)
+    shown = NAV if has_objects else [
         item for item in NAV if item[0] != objects.SLUG
     ]
     return [

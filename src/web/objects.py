@@ -28,7 +28,9 @@ import time
 from datetime import datetime
 from typing import Any
 
+import metrics
 from afina import AfinaClient, AfinaError
+from scope import ROLE_ADMIN
 
 SLUG = "objects"
 
@@ -52,6 +54,28 @@ SITE_UNPUBLISHED = "unpublished"
 # и требовать его от них значило бы не засчитывать вообще ничего.
 REASON_OTHER = "Другое"
 
+
+def removal_reason_counts(item: dict[str, Any]) -> bool:
+    """Засчитывается ли причина снятия сама по себе, без оглядки на статус."""
+    category = (item.get("removal_reason_category") or "").strip()
+    if not category:
+        return False
+    if category == REASON_OTHER:
+        return bool((item.get("removal_comment") or "").strip())
+    return True
+
+
+def counts_as_removal(item: dict[str, Any]) -> bool:
+    """Снят ли объект с рекламы сейчас — и засчитывается ли причина.
+
+    Состояние, а не событие: для плитки «сняты с рекламы сейчас» и колонки
+    таблицы. Метрика за период смотрит на дату и причину, но не на статус,
+    иначе снятие, за которым объект вернули в рекламу, пропало бы из истории.
+    """
+    return ((item.get("status") or "").strip() == STATUS_REMOVED
+            and removal_reason_counts(item))
+
+
 # Чипы над таблицей. Чип выбирает, о чём таблица ниже и какая метрика
 # считается за период; сами плитки он не сужает — иначе «в рекламе» под
 # фильтром «в рекламе» было бы равно выборке, а «сняты» — нулю.
@@ -63,12 +87,40 @@ LISTING_FILTERS: dict[str, tuple[str, dict[str, bool]]] = {
 }
 DEFAULT_FILTER = "all"
 
+# Что доступно РОПу. «Все» считает сама Афина одним ответом /summary по всей
+# базе — сузить его до отдела нечем, и показывать РОПу цифры всей компании
+# нельзя. Снятия разбирает администратор, у РОПа для них нет ни причин, ни
+# полномочий. Остаются два чипа про его собственные объекты.
+ROP_FILTERS = ("in_ad", "published")
+
+# Периоды раздела — подмножество общих пресетов дашборда. Раздел считает по
+# снимку рабочих карточек, и на длинных окнах («12 месяцев», «прошлый месяц»)
+# метрика за период спрашивала бы о событиях, которых в снимке уже нет:
+# объект давно ушёл в архив и в выборку не попадает. Оставлены окна, на
+# которых снимок и события сходятся, плюс произвольные даты.
+PERIOD_PRESETS: dict[str, str] = {
+    key: metrics.PERIOD_PRESETS[key]
+    for key in ("today", "7d", "30d", "quarter")
+}
+DEFAULT_PERIOD = "30d"
+
 # Что чип считает «своим» событием: поле даты и подпись метрики за период.
 FILTER_METRICS: dict[str, tuple[str, str, str]] = {
     "in_ad": ("published_to_ads_at", "Выставлено в рекламу", "in_ad"),
     "published": ("published_to_site_at", "Выставлено на сайт", "is_published"),
     "removed": ("removed_from_ad_at", "Снято с рекламы", "removed_from_ad"),
 }
+
+# Дополнительное условие к дате события. У снятий одной даты мало: Афина не
+# чистит причину при возврате в рекламу и проставляет дату даже там, где
+# причину не выбрали вовсе. Без этого условия в метрику попадали снятия без
+# причины и с пустым «Другое» — то есть та самая несделанная работа, ради
+# исключения которой правило и заведено.
+#
+# Статус здесь не проверяется, в отличие от плитки состояния: объект, снятый
+# внутри периода и потом возвращённый в рекламу, всё равно был снят, и в
+# истории периода ему место.
+EVENT_FILTERS = {"removed": removal_reason_counts}
 
 # Плитки по всей базе: ключ ответа `/summary` → подпись и пояснение.
 SUMMARY_TILES = (
@@ -90,11 +142,12 @@ FILTER_TILES: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("is_published", "На сайте сейчас", "Опубликованы на сайте прямо сейчас"),
         ("removed_from_ad", "Сняты с рекламы сейчас", "Статус «Снят с рекламы» сейчас"),
     ),
+    # Про рекламу здесь плитки нет намеренно: чип выбран, чтобы смотреть
+    # сайт, и «в рекламе» рядом с ним отвечает на незаданный вопрос.
     "published": (
         ("is_published", "На сайте сейчас", "Опубликованы на сайте прямо сейчас"),
         ("site_removed", "Сняты с сайта сейчас",
          "Сняты с сайта сейчас; даты снятия Афина не хранит"),
-        ("in_ad", "В рекламе сейчас", "Статус «В рекламе» прямо сейчас"),
     ),
     # Константной «Сняты с рекламы» здесь нет намеренно: она стояла вплотную
     # к «Снято с рекламы за период» — тот же предмет, два разных числа, и
@@ -165,15 +218,78 @@ def client_for(settings: Any) -> AfinaClient:
     )
 
 
-def resolve(params: Any) -> dict[str, Any]:
-    """Разобрать параметры адреса раздела."""
+def allowed_departments(user: dict | None,
+                        mapping: dict[int, str]) -> tuple[str, ...] | None:
+    """Отделы Афины, доступные пользователю. None — ограничений нет.
+
+    Администратор видит всё. Остальным нужен явный перевод отдела Битрикса в
+    название отдела Афины: справочники разные и по имени не сходятся —
+    «Трофимова» против «Отдел Трофимовой». Подобрать пару автоматически
+    значило бы угадывать падеж, а ошибка здесь — чужой отдел на экране РОПа.
+
+    Нет перевода — нет доступа. Конструкция закрывается при сбое: пустой
+    кортеж означает «не видно ничего», и раздел такому пользователю не
+    открывается вовсе.
+    """
+    if (user or {}).get("role") == ROLE_ADMIN:
+        return None
+    return tuple(sorted({mapping[key]
+                         for key in (user or {}).get("department_ids") or ()
+                         if key in mapping}))
+
+
+def filters_for(allowed: tuple[str, ...] | None) -> dict[str, tuple[str, dict]]:
+    """Чипы, доступные пользователю: РОПу — только про его объекты."""
+    if allowed is None:
+        return dict(LISTING_FILTERS)
+    return {key: LISTING_FILTERS[key] for key in ROP_FILTERS}
+
+
+def views_for(allowed: tuple[str, ...] | None) -> tuple[tuple[str, str], ...]:
+    """Виды раздела. «Снятия за период» — только администратору.
+
+    Этот вид не считается по снимку: он спрашивает у Афины журнал снятий
+    напрямую, а фильтра по отделу у неё нет. Отдать его РОПу значило бы
+    показать снятия всей компании в обход всех остальных ограничений.
+    """
+    if allowed is None:
+        return VIEWS
+    return VIEWS[:1]
+
+
+def clamp_period(period: dict[str, str]) -> dict[str, str]:
+    """Свести период к тем окнам, которые раздел умеет считать.
+
+    Пресет не из своего набора приходит либо по ссылке из другого раздела,
+    либо правкой адреса. Молча считать по нему нельзя: чипы тогда стоят все
+    неактивные, и по экрану не понять, за что показаны числа.
+    """
+    if period.get("preset") in PERIOD_PRESETS or period.get("preset") == "custom":
+        return period
+    return metrics.resolve_period(DEFAULT_PERIOD)
+
+
+def resolve(params: Any, allowed: tuple[str, ...] | None = None) -> dict[str, Any]:
+    """Разобрать параметры адреса раздела.
+
+    Отдел и чип не просто читаются, а сверяются с правами: адрес правится
+    руками, и `?department=` чужого отдела не должен ничего открывать.
+    """
     view = params.get("view")
+    views = dict(views_for(allowed))
+    available = filters_for(allowed)
     requested = params.get("filter")
+    default = DEFAULT_FILTER if DEFAULT_FILTER in available else next(iter(available))
+    department = (params.get("department") or "").strip()
+    if allowed is not None and department not in allowed:
+        # Не ошибка и не отказ: просто «без уточнения». Ниже выборка всё
+        # равно сузится до разрешённых отделов, так что чужого не покажет.
+        department = ""
     return {
-        "view": view if view in dict(VIEWS) else VIEW_LISTINGS,
-        "filter": requested if requested in LISTING_FILTERS else DEFAULT_FILTER,
+        "view": view if view in views else VIEW_LISTINGS,
+        "filter": requested if requested in available else default,
         "q": (params.get("q") or "").strip(),
-        "department": (params.get("department") or "").strip(),
+        "department": department,
         "broker": (params.get("broker") or "").strip(),
         "page": _page(params.get("page")),
         "object_id": _optional_int(params.get("id")),
@@ -222,14 +338,19 @@ def departments_of(items: list[dict[str, Any]]) -> list[str]:
                    for item in items} - {""})
 
 
-def scope(items: list[dict[str, Any]], selected: dict[str, Any]) -> list[dict[str, Any]]:
-    """Сузить снимок отделом, брокером и поиском.
+def scope(items: list[dict[str, Any]], selected: dict[str, Any],
+          allowed: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
+    """Сузить снимок правами, отделом, брокером и поиском.
 
-    Чип сюда не входит намеренно: он выбирает метрику и содержимое таблицы,
-    а плитки описывают отдел целиком — иначе «Сняты с рекламы» под фильтром
-    «в рекламе» всегда показывали бы ноль.
+    Права идут первыми и не зависят от параметров адреса: всё остальное
+    только сужает уже разрешённое. Чип сюда не входит намеренно — он выбирает
+    метрику и содержимое таблицы, а плитки описывают отдел целиком, иначе
+    «Сняты с рекламы» под фильтром «в рекламе» всегда показывали бы ноль.
     """
     rows = items
+    if allowed is not None:
+        rows = [r for r in rows
+                if (r.get("department_name") or "").strip() in allowed]
     if selected["department"]:
         rows = [r for r in rows
                 if (r.get("department_name") or "").strip() == selected["department"]]
@@ -264,19 +385,29 @@ def tiles_for(items: list[dict[str, Any]], selected: dict[str, Any],
         {"label": label, "value": _count(items, key), "hint": hint, "delta": None}
         for key, label, hint in FILTER_TILES[selected["filter"]]
     ]
-    field, title, _ = FILTER_METRICS[selected["filter"]]
-    current = _events_in(items, field, period)
+    chip = selected["filter"]
+    field, title, _ = FILTER_METRICS[chip]
+    current = _events_in(items, field, period, chip)
     tiles.append(dict(
-        _growth(current, _events_in(items, field, previous) if previous else None),
+        _growth(current, _events_in(items, field, previous, chip) if previous else None),
         label=f"{title} за период",
         value=current,
     ))
     return tiles
 
 
+def _is_event(item: dict[str, Any], field: str, window: dict[str, str],
+              chip: str) -> bool:
+    """Засчитывается ли объект в метрику чипа за это окно."""
+    extra = EVENT_FILTERS.get(chip)
+    if extra is not None and not extra(item):
+        return False
+    return _in_period(item.get(field), window)
+
+
 def _events_in(items: list[dict[str, Any]], field: str,
-               window: dict[str, str]) -> int:
-    return len([r for r in items if _in_period(r.get(field), window)])
+               window: dict[str, str], chip: str) -> int:
+    return len([r for r in items if _is_event(r, field, window, chip)])
 
 
 def _growth(current: int, previous: int | None) -> dict[str, Any]:
@@ -303,23 +434,6 @@ def summary_tiles(summary: dict[str, Any]) -> list[dict[str, Any]]:
         {"label": label, "value": summary.get(key), "hint": hint, "delta": None}
         for key, label, hint in SUMMARY_TILES
     ]
-
-
-def counts_as_removal(item: dict[str, Any]) -> bool:
-    """Засчитывать ли снятие с рекламы.
-
-    Снятое без причины и снятое с «Другое» без пояснения не считаются: в
-    первом случае причины нет, во втором она ничего не объясняет. Остальные
-    причины — из справочника Афины, они конкретны и комментария не требуют.
-    """
-    if (item.get("status") or "").strip() != STATUS_REMOVED:
-        return False
-    category = (item.get("removal_reason_category") or "").strip()
-    if not category:
-        return False
-    if category == REASON_OTHER:
-        return bool((item.get("removal_comment") or "").strip())
-    return True
 
 
 def _count(items: list[dict[str, Any]], key: str) -> int:
@@ -367,7 +481,7 @@ def breakdown(items: list[dict[str, Any]], selected: dict[str, Any],
         row["is_published"] += 1 if item.get("is_published") else 0
         row["removed_from_ad"] += 1 if item.get("removed_from_ad") else 0
         row["site_removed"] += 1 if item.get("site_removed") else 0
-        row["period"] += 1 if _in_period(item.get(field), period) else 0
+        row["period"] += 1 if _is_event(item, field, period, selected["filter"]) else 0
 
     rendered = []
     for group in groups.values():
@@ -405,7 +519,8 @@ def _totals(rows: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def load(client: AfinaClient, selected: dict[str, Any], period: dict[str, str],
-         page_size: int, previous: dict[str, str] | None = None) -> dict[str, Any]:
+         page_size: int, previous: dict[str, str] | None = None,
+         allowed: tuple[str, ...] | None = None) -> dict[str, Any]:
     """Собрать данные раздела. Отказ Афины — не исключение, а состояние.
 
     Страница обязана отрисоваться и когда Афина молчит: человеку нужнее
@@ -420,6 +535,13 @@ def load(client: AfinaClient, selected: dict[str, Any], period: dict[str, str],
         # различать их надо здесь, пока известно, что именно случилось.
         "failed": False, "not_found": False,
     }
+    # Ниже трижды повторяется `allowed is None`, и это не лишняя
+    # осторожность. Всё, что за этим условием, спрашивает у Афины /summary —
+    # число по всей базе, сузить которое до отдела нечем. Ограниченному
+    # пользователю такие плитки не положены нигде: ни на карточке объекта, ни
+    # в срезе «Все», ни в журнале снятий. Чипов и видов у него для этого и так
+    # нет, но проверка стоит там, где происходит обращение, а не там, где
+    # рисуется ссылка: до второго можно добраться правкой адреса.
     try:
         if selected["object_id"] is not None:
             found = client.listing(selected["object_id"])
@@ -427,20 +549,27 @@ def load(client: AfinaClient, selected: dict[str, Any], period: dict[str, str],
             # размещения и причина снятия молча пропадут именно там, где
             # человек и открыл объект, чтобы их прочитать.
             data["card"] = _listing_row(found) if found else None
+            # /listings/{id} отдаёт любой объект по номеру, мимо снимка и мимо
+            # прав. Без этой проверки чужую карточку открывал бы перебор id.
+            if data["card"] is not None and allowed is not None:
+                if (data["card"].get("department_name") or "").strip() not in allowed:
+                    data["card"] = None
             if data["card"] is None:
                 data["not_found"] = True
                 data["error"] = f"Объект {selected['object_id']} в Афине не найден"
-            data["tiles"] = summary_tiles(client.summary())
-        elif selected["view"] == VIEW_REMOVALS:
+            if allowed is None:
+                data["tiles"] = summary_tiles(client.summary())
+        elif selected["view"] == VIEW_REMOVALS and allowed is None:
             data["tiles"] = summary_tiles(client.summary())
             data["table"] = _removals_table(client, selected, period, page_size)
-        elif selected["filter"] == DEFAULT_FILTER:
+        elif selected["filter"] == DEFAULT_FILTER and allowed is None:
             # «Все» — единственный срез, который снимком не покрыть: карточек
             # 38 тысяч, и постранично их не собрать. Отдаём то, что считает
             # сама Афина, и не предлагаем ни отделов, ни периода.
             data["tiles"] = summary_tiles(client.summary())
         else:
-            data.update(_workspace(client, selected, period, page_size, previous))
+            data.update(
+                _workspace(client, selected, period, page_size, previous, allowed))
             data["scoped"] = True
     except AfinaError as exc:
         data["failed"] = True
@@ -450,13 +579,18 @@ def load(client: AfinaClient, selected: dict[str, Any], period: dict[str, str],
 
 def _workspace(client: AfinaClient, selected: dict[str, Any],
                period: dict[str, str], page_size: int,
-               previous: dict[str, str] | None) -> dict[str, Any]:
+               previous: dict[str, str] | None,
+               allowed: tuple[str, ...] | None = None) -> dict[str, Any]:
     """Плитки, разбивка и — если выбран брокер — его объекты."""
     taken = snapshot(client)
-    scoped = scope(taken["items"], selected)
+    scoped = scope(taken["items"], selected, allowed)
+    # Список отделов — тоже часть выдачи: показать РОПу чужие названия в
+    # выпадающем списке значит рассказать ему структуру компании.
+    visible = scope(taken["items"], dict(selected, department="", broker="", q=""),
+                    allowed)
     result = {
         "tiles": tiles_for(scoped, selected, period, previous),
-        "departments": departments_of(taken["items"]),
+        "departments": departments_of(visible),
         "breakdown": breakdown(scoped, selected, period),
         "truncated": taken["truncated"],
         "objects": None,

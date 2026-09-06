@@ -7,12 +7,16 @@
    показывается — там 38 тысяч карточек, и события по ним не считаются. #}
 {% block filters %}
 <form class="filters" method="get" action="" data-autosubmit>
-  <div class="chips">
-    {% for key, label in views %}
-      <a class="chip {{ 'active' if selected.view == key else '' }}"
-         href="?{{ qs(request, view=key, page=None, id=None, broker=None) }}">{{ label }}</a>
-    {% endfor %}
-  </div>
+  {# Один вид — выбирать не из чего, и одинокий чип только занимает строку.
+     Так выглядит страница РОПа: журнал снятий ему недоступен. #}
+  {% if views | length > 1 %}
+    <div class="chips">
+      {% for key, label in views %}
+        <a class="chip {{ 'active' if selected.view == key else '' }}"
+           href="?{{ qs(request, view=key, page=None, id=None, broker=None) }}">{{ label }}</a>
+      {% endfor %}
+    </div>
+  {% endif %}
   {% if selected.view == 'removals' and selected.object_id is none %}
     <div class="chips">
       {% for key, label in period_presets.items() %}
