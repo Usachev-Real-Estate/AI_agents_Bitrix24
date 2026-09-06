@@ -386,36 +386,33 @@ def test_the_whole_base_view_does_not_download_the_base(client, afina_api):
 
 
 def test_tiles_describe_the_scope_not_the_chip(client, wide_afina):
-    """Чип не сужает плитки — иначе половина из них показывала бы ноль.
+    """Чип не сужает плитки состояния — иначе они показывали бы выборку.
 
-    Под фильтром «в рекламе» плитка «Сняты с рекламы» обязана показать
-    снятые объекты отдела, а не ноль: чип выбирает метрику и таблицу, а не
+    Под фильтром «в рекламе» плитка «На сайте» обязана показать сайт всего
+    отдела, а не только рекламируемых: чип выбирает метрику и таблицу, а не
     выборку для счётчиков.
     """
     body = client.get(f"{BASE}/objects?filter=in_ad{PERIOD.replace('?', '&')}").text
-    values = _tile_values(body)
-    labels = _tile_labels(body)
-    assert labels[:3] == ["В рекламе сейчас", "На сайте сейчас",
-                          "Сняты с рекламы сейчас"]
-    # Два в рекламе (501, 503), два снятых (502, 504).
-    assert values[0] == "2"
-    assert values[2] == "2"
+    assert _tile_labels(body)[:2] == ["В рекламе сейчас", "На сайте сейчас"]
+    # Два в рекламе (501, 503) и двое на сайте (501, 503) — разные множества
+    # совпали числом, но плитка сайта считает по всему отделу.
+    assert _tile(body, "В рекламе сейчас") == "2"
+    assert _tile(body, "На сайте сейчас") == "2"
 
 
 def test_period_tile_counts_only_events_inside_the_window(client, wide_afina):
-    """Четвёртая плитка — события за период, а не состояние.
+    """Плитка за период считает события, а не состояние.
 
     В окне 01–31 августа лежат обе публикации в рекламу; за пределами окна
     плитка обязана обнулиться, иначе период ни на что не влияет.
     """
     inside = client.get(f"{BASE}/objects?filter=in_ad{PERIOD.replace('?', '&')}").text
-    assert _tile_labels(inside)[3] == "Выставлено в рекламу за период"
     # Три публикации в августе; четвёртая — в январе и сюда не попадает.
-    assert _tile_values(inside)[3] == "3"
+    assert _tile(inside, "Выставлено в рекламу за период") == "3"
 
     january = client.get(
         f"{BASE}/objects?filter=in_ad&start=2026-01-01&end=2026-01-31").text
-    assert _tile_values(january)[3] == "1"
+    assert _tile(january, "Выставлено в рекламу за период") == "1"
 
 
 def test_site_filter_shows_site_tiles(client, wide_afina):
@@ -533,6 +530,45 @@ def test_removal_tile_moves_with_the_period(client, wide_afina):
     assert _tile_values(outside)[-1] == "0"
 
 
+def test_the_ad_chip_shows_the_outflow_as_an_event(client, wide_afina):
+    """Под фильтром «в рекламе» снятия — это событие за период, а не состояние.
+
+    Раньше на этом месте стояло «Сняты с рекламы сейчас»: число не двигалось
+    при смене периода и читалось как поломка. Подвижным его не сделать —
+    истории статусов Афина не хранит, — зато сами снятия датированы, и
+    состояние заменено событием: приток и отток за одно и то же окно.
+    """
+    labels = _tile_labels(
+        client.get(f"{BASE}/objects?filter=in_ad{PERIOD.replace('?', '&')}").text)
+    assert "Сняты с рекламы сейчас" not in labels
+    assert labels[-2:] == ["Выставлено в рекламу за период",
+                           "Снято с рекламы за период"]
+
+
+def test_the_outflow_tile_follows_the_period(client, wide_afina):
+    """И оно обязано двигаться: иначе замена ничего не исправила."""
+    august = client.get(f"{BASE}/objects?filter=in_ad{PERIOD.replace('?', '&')}").text
+    march = client.get(
+        f"{BASE}/objects?filter=in_ad{EMPTY_PERIOD.replace('?', '&')}").text
+    # Оба снятия (502 и 504) датированы августом, в марте — ни одного.
+    assert _tile(august, "Снято с рекламы за период") == "2"
+    assert _tile(march, "Снято с рекламы за период") == "0"
+
+
+def test_the_outflow_obeys_the_reason_rule_too(client, removal_afina):
+    """Вторая метрика считает по тому же правилу, что и своя у чипа снятий.
+
+    Иначе одно и то же снятие засчитывалось бы по-разному в двух местах
+    дашборда, и сойтись эти числа не могли бы никогда.
+    """
+    ad = client.get(f"{BASE}/objects?filter=in_ad{PERIOD.replace('?', '&')}").text
+    removed = client.get(
+        f"{BASE}/objects?filter=removed{PERIOD.replace('?', '&')}").text
+    assert _tile(ad, "Снято с рекламы за период") == "3"
+    assert _tile(ad, "Снято с рекламы за период") == _tile(
+        removed, "Снято с рекламы за период")
+
+
 def test_state_tiles_say_they_are_about_now(client, wide_afina):
     """Плитки состояния подписаны «сейчас» и период не слушают.
 
@@ -543,10 +579,14 @@ def test_state_tiles_say_they_are_about_now(client, wide_afina):
     inside = client.get(f"{BASE}/objects?filter=in_ad{PERIOD.replace('?', '&')}").text
     outside = client.get(
         f"{BASE}/objects?filter=in_ad{EMPTY_PERIOD.replace('?', '&')}").text
-    assert all(label.endswith("сейчас") for label in _tile_labels(inside)[:-1])
-    # Состояние одно и то же, а событий за период в марте нет.
-    assert _tile_values(inside)[:-1] == _tile_values(outside)[:-1]
-    assert _tile_values(outside)[-1] == "0"
+    state = [label for label in _tile_labels(inside) if label.endswith("сейчас")]
+    assert state == ["В рекламе сейчас", "На сайте сейчас"]
+    # Состояние одно и то же в обоих окнах...
+    for label in state:
+        assert _tile(inside, label) == _tile(outside, label), label
+    # ...а обе метрики за период в марте пусты.
+    for label in ("Выставлено в рекламу за период", "Снято с рекламы за период"):
+        assert _tile(outside, label) == "0", label
 
 
 def test_the_whole_base_no_longer_shows_removed_from_ad(client, afina_api):
@@ -589,9 +629,10 @@ def test_unexplained_removals_are_not_counted_on_the_page(app_factory, monkeypat
                  removal_reason_category="Другое", removal_comment=None)
     fake = FakeAfina(listings=[LISTING, REMOVED, vague])
     monkeypatch.setattr(objects, "client_for", lambda settings: fake)
-    body = _login(app_factory()).get(f"{BASE}/objects?filter=in_ad").text
+    body = _login(app_factory()).get(
+        f"{BASE}/objects?filter=in_ad{PERIOD.replace('?', '&')}").text
     # Снятых объектов два, но засчитано одно — у второго причина пустая.
-    assert _tile_values(body)[2] == "1"
+    assert _tile(body, "Снято с рекламы за период") == "1"
 
 
 # --- прирост к прошлому периоду ---
@@ -627,11 +668,12 @@ def test_period_tile_shows_growth_against_the_previous_window(client, dated_afin
     """
     body = client.get(
         f"{BASE}/objects?filter=in_ad&start=2026-08-16&end=2026-08-31").text
-    assert _tile_values(body)[3] == "2"
+    assert _tile(body, "Выставлено в рекламу за период") == "2"
     # При наличии процента макет плитки печатает «к прошлому периоду» вместо
     # подсказки — так же, как на остальных страницах дашборда.
-    assert "+100%" in _tile_hints(body)[3]
-    assert "к прошлому периоду" in _tile_hints(body)[3]
+    hint = _tile_hints(body)[_tile_labels(body).index("Выставлено в рекламу за период")]
+    assert "+100%" in hint
+    assert "к прошлому периоду" in hint
 
 
 def test_growth_from_zero_is_words_not_a_number(client, dated_afina):
@@ -641,9 +683,10 @@ def test_growth_from_zero_is_words_not_a_number(client, dated_afina):
     """
     body = client.get(
         f"{BASE}/objects?filter=in_ad&start=2026-08-01&end=2026-08-15").text
-    assert _tile_values(body)[3] == "1"
+    assert _tile(body, "Выставлено в рекламу за период") == "1"
     assert "За прошлый период — ни одного" in body
-    assert "%" not in _tile_hints(body)[3]
+    hint = _tile_hints(body)[_tile_labels(body).index("Выставлено в рекламу за период")]
+    assert "%" not in hint
 
 
 # --- отделы ---
@@ -833,6 +876,17 @@ def _tile_values(body):
 
 def _tile_labels(body):
     return re.findall(r'<div class="tile-label">([^<]+)</div>', body)
+
+
+def _tile(body, label):
+    """Значение плитки по подписи.
+
+    По номеру искать нельзя: набор плиток меняется вместе с чипом, и после
+    каждой перестановки половина тестов начинала проверять соседа.
+    """
+    tiles = dict(zip(_tile_labels(body), _tile_values(body)))
+    assert label in tiles, f"нет плитки «{label}», есть: {list(tiles)}"
+    return tiles[label]
 
 
 def _tile_hints(body):

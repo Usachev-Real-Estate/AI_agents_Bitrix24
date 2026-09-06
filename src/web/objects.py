@@ -122,6 +122,16 @@ FILTER_METRICS: dict[str, tuple[str, str, str]] = {
 # истории периода ему место.
 EVENT_FILTERS = {"removed": removal_reason_counts}
 
+# Вторая метрика за период — отток рядом с притоком. Под фильтром «в рекламе»
+# на этом месте стояло состояние «сняты с рекламы сейчас»: число не двигалось
+# при смене периода и читалось как поломка, а сделать его подвижным нельзя —
+# истории статусов Афина не хранит. Зато сами снятия датированы, поэтому
+# состояние заменено событием: сколько выставили и сколько сняли за одно и то
+# же окно. Третий элемент — чей EVENT_FILTERS применять, здесь правило снятий.
+SECOND_METRICS: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "in_ad": (("removed_from_ad_at", "Снято с рекламы", "removed"),),
+}
+
 # Плитки по всей базе: ключ ответа `/summary` → подпись и пояснение.
 SUMMARY_TILES = (
     ("total", "Всего объектов", "Все карточки Афины, включая черновики и копии"),
@@ -140,7 +150,6 @@ FILTER_TILES: dict[str, tuple[tuple[str, str, str], ...]] = {
     "in_ad": (
         ("in_ad", "В рекламе сейчас", "Статус «В рекламе» прямо сейчас"),
         ("is_published", "На сайте сейчас", "Опубликованы на сайте прямо сейчас"),
-        ("removed_from_ad", "Сняты с рекламы сейчас", "Статус «Снят с рекламы» сейчас"),
     ),
     # Про рекламу здесь плитки нет намеренно: чип выбран, чтобы смотреть
     # сайт, и «в рекламе» рядом с ним отвечает на незаданный вопрос.
@@ -385,15 +394,21 @@ def tiles_for(items: list[dict[str, Any]], selected: dict[str, Any],
         {"label": label, "value": _count(items, key), "hint": hint, "delta": None}
         for key, label, hint in FILTER_TILES[selected["filter"]]
     ]
-    chip = selected["filter"]
-    field, title, _ = FILTER_METRICS[chip]
-    current = _events_in(items, field, period, chip)
-    tiles.append(dict(
-        _growth(current, _events_in(items, field, previous, chip) if previous else None),
-        label=f"{title} за период",
-        value=current,
-    ))
+    for field, title, rule in _metrics_of(selected["filter"]):
+        current = _events_in(items, field, period, rule)
+        was = _events_in(items, field, previous, rule) if previous else None
+        tiles.append(dict(
+            _growth(current, was),
+            label=f"{title} за период",
+            value=current,
+        ))
     return tiles
+
+
+def _metrics_of(chip: str) -> list[tuple[str, str, str]]:
+    """Метрики за период у чипа: своя всегда, вторая — где она осмысленна."""
+    field, title, _ = FILTER_METRICS[chip]
+    return [(field, title, chip), *SECOND_METRICS.get(chip, ())]
 
 
 def _is_event(item: dict[str, Any], field: str, window: dict[str, str],
