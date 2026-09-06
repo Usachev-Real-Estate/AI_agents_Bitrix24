@@ -34,9 +34,17 @@ from scope import ROLE_ADMIN
 
 SLUG = "objects"
 
+# ВРЕМЕННО ВЫКЛЮЧЕНО: снятия с рекламы пока не нужны на странице. Выключено
+# ровно в трёх местах — здесь, в LISTING_FILTERS и в SECOND_METRICS; всё
+# остальное (правило причины, метрики, колонки, журнал) осталось рабочим и
+# просто никем не вызывается. Чтобы вернуть раздел, снимите комментарий в
+# этих трёх местах и уберите removals_off в tests/test_dashboard_objects.py.
 VIEW_LISTINGS = "listings"
 VIEW_REMOVALS = "removals"
-VIEWS = ((VIEW_LISTINGS, "Объекты"), (VIEW_REMOVALS, "Снятия за период"))
+VIEWS = (
+    (VIEW_LISTINGS, "Объекты"),
+    # (VIEW_REMOVALS, "Снятия за период"),
+)
 
 # Статусы Афины. Причину снятия она не чистит при возврате в рекламу, поэтому
 # у объекта «В рекламе» может лежать прошлогоднее «Продано другими».
@@ -83,7 +91,8 @@ LISTING_FILTERS: dict[str, tuple[str, dict[str, bool]]] = {
     "all": ("Все", {}),
     "in_ad": ("Сейчас в рекламе", {"in_ad": True}),
     "published": ("Опубликованы на сайте", {"is_published": True}),
-    "removed": ("Сняты с рекламы", {"removed_from_ad": True}),
+    # ВРЕМЕННО ВЫКЛЮЧЕНО — см. VIEWS выше.
+    # "removed": ("Сняты с рекламы", {"removed_from_ad": True}),
 }
 DEFAULT_FILTER = "all"
 
@@ -129,7 +138,8 @@ EVENT_FILTERS = {"removed": removal_reason_counts}
 # состояние заменено событием: сколько выставили и сколько сняли за одно и то
 # же окно. Третий элемент — чей EVENT_FILTERS применять, здесь правило снятий.
 SECOND_METRICS: dict[str, tuple[tuple[str, str, str], ...]] = {
-    "in_ad": (("removed_from_ad_at", "Снято с рекламы", "removed"),),
+    # ВРЕМЕННО ВЫКЛЮЧЕНО — см. VIEWS выше.
+    # "in_ad": (("removed_from_ad_at", "Снято с рекламы", "removed"),),
 }
 
 # Плитки по всей базе: ключ ответа `/summary` → подпись и пояснение.
