@@ -1,14 +1,14 @@
-"""Факт «Пульса» считается по тем же людям, из которых сложен план.
+"""Сделка засчитывается отделу, в котором она закрыта.
 
-Иначе выполнение систематически завышено, и размера завышения никто не видит.
-План третьего квартала несут 29 названных человек; в тех же отделах работают
-ещё двадцать — новички без нормы и руководители. Их сделки это настоящие
-деньги компании, но не выполнение чьей-то цели.
+Решение агентства от 07.09. План третьего квартала несут 29 названных
+человек; в тех же отделах работают ещё двадцать — новички без нормы и
+руководители. Их сделки приносят отделу настоящие деньги, и вычитать их из
+выполнения значит недосчитывать работу отдела.
 
-Поэтому «прочие» стоят отдельной строкой, а итог компании — сумма обеих.
-Так число сходится по строкам: сумма сделок отдела равна факту планового
-состава плюс факту прочих, и на вопрос «почему не сходится» отвечать не
-приходится.
+Цена решения не спрятана: ``fact_on_plan`` показывает, сколько из факта
+сделали те, кто норму несёт. Отдел, закрывший план чужими руками,
+отличается от отдела, где сработали плановые люди, — на процент это не
+влияет, но на экране разница видна.
 """
 
 import pytest
@@ -76,21 +76,25 @@ def _pulse(scope=None):
 
 # --------------------------------------------------------------------------
 
-def test_a_newcomers_deal_is_money_but_not_someones_target(agency):
-    """Сделка новичка идёт в «прочие», а не в выполнение плана отдела."""
+def test_a_newcomers_deal_counts_for_the_department(agency):
+    """Сделка новичка без нормы — деньги отдела, и в выполнение она входит."""
     with analytics_session() as conn:
         _won(conn, 1, 2, 1_000_000)      # брокер с нормой
         _won(conn, 2, 4, 4_000_000)      # новичок без нормы
 
     result = _pulse()
 
-    assert result["fact"] == 1_000_000, "факт — только плановый состав"
+    assert result["fact"] == 5_000_000, "сделка засчитана отделу, где закрыта"
+    assert result["fact_on_plan"] == 1_000_000, "сколько сделали люди с нормой"
     assert result["others"]["fact"] == 4_000_000
-    assert result["company_fact"] == 5_000_000, "итог компании — сумма обеих строк"
 
 
-def test_the_rows_add_up_to_the_company_total(agency):
-    """Сумма по строкам сходится с итогом — иначе экрану не поверят."""
+def test_the_split_shows_who_actually_earned_it(agency):
+    """Два отдела с одинаковым процентом — разные отделы, и это видно.
+
+    Процент выполнения от разделения не зависит, но вопрос «сам отдел
+    вытянул или за счёт тех, кому плана не ставили» иначе не задать.
+    """
     with analytics_session() as conn:
         for deal_id, user_id, amount in (
             (1, 2, 1_500_000), (2, 3, 2_000_000), (3, 4, 700_000), (4, 1, 300_000),
@@ -100,20 +104,21 @@ def test_the_rows_add_up_to_the_company_total(agency):
     result = _pulse()
     dept = result["departments"][0]
 
-    assert dept["fact"] + dept["others_fact"] == result["company_fact"]
-    assert result["fact"] == 3_500_000, "два брокера с нормой"
-    assert result["others"]["fact"] == 1_000_000, "новичок и РОП"
+    assert dept["fact"] == 4_500_000, "все сделки отдела"
+    assert dept["fact_on_plan"] == 3_500_000, "из них у двух брокеров с нормой"
+    assert dept["others_fact"] == 1_000_000, "новичок и РОП"
+    assert dept["fact_on_plan"] + dept["others_fact"] == dept["fact"]
 
 
-def test_a_rop_without_a_norm_lands_in_others(agency):
-    """РОП плана не несёт, но его деньги компании не пропадают."""
+def test_a_rops_own_deal_counts_for_the_department(agency):
+    """РОП плана не несёт, но закрытая им сделка — деньги его отдела."""
     with analytics_session() as conn:
         _won(conn, 1, 1, 2_500_000)
 
     result = _pulse()
 
-    assert result["fact"] == 0
-    assert result["others"]["fact"] == 2_500_000
+    assert result["fact"] == 2_500_000
+    assert result["fact_on_plan"] == 0, "норму он не несёт"
     assert result["others"]["deals"] == 1
 
 
@@ -189,6 +194,7 @@ def test_a_rop_sees_only_their_own_department(agency):
 
     assert result["plan"] == 9_000_000, "чужая норма в план не попала"
     assert result["fact"] == 1_000_000, "чужой факт тоже"
+    assert result["fact_on_plan"] == 1_000_000
     assert [row["department_id"] for row in result["departments"]] == [60]
 
 
@@ -204,7 +210,8 @@ def test_no_plan_gives_no_verdict(analytics_db):
     assert result["plan_share"] is None
     assert result["behind"] is None
     assert result["reason"] == "план не задан"
-    assert result["others"]["fact"] == 5_000_000, "деньги никуда не делись"
+    assert result["fact"] == 5_000_000, "деньги никуда не делись"
+    assert result["fact_on_plan"] == 0
 
 
 def test_the_period_bounds_come_from_the_quarter_not_from_today(agency):
