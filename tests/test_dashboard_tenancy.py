@@ -319,7 +319,7 @@ def test_metrics_never_touch_raw_tables_directly():
         "fact_deal", "fact_lead", "fact_stage_event", "dim_user",
         "plan_norm", "plan_roster",
     )
-    for name in ("metrics.py", "plans.py"):
+    for name in ("metrics.py", "plans.py", "pulse.py"):
         source = (analytics / name).read_text(encoding="utf-8")
         found = {table for table in forbidden if re.search(rf"\b{table}\b", source)}
         assert not found, (
