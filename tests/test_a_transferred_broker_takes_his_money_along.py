@@ -194,3 +194,46 @@ def test_the_later_period_wins_over_the_open_ended_row(analytics_db):
 
     assert home["department_id"] == KRETOV
     assert [row["deal_id"] for row in deals] == [1]
+
+
+# --------------------------------------------------------------------------
+# витрина старее ростера
+# --------------------------------------------------------------------------
+
+def test_an_older_mart_still_opens(analytics_db):
+    """Витрина без plan_roster открывается, а не падает на подключении.
+
+    Правило «чей человек» считается сразу при открытии соединения, а не
+    лениво в представлении. Значит, отсутствующая таблица роняет уже
+    apply_scope — и сообщение про plan_roster получил бы тот, кто всего лишь
+    открыл старую витрину, чтобы прочитать сделки. Отсутствие ростера — это
+    «переносов нет», а не «работать нельзя».
+    """
+    with analytics_session() as conn:
+        _user(conn, 1, "Антон Кретов", "Кретов", KRETOV, "Кретов")
+        _won(conn, 1, 1, 2_000_000)
+        conn.execute("DROP TABLE plan_roster")
+
+    with scoped_session(Scope.departments([KRETOV])) as conn:
+        home = conn.execute(
+            "SELECT department_id FROM user_home WHERE user_id = 1"
+        ).fetchone()
+        deals = conn.execute("SELECT deal_id FROM v_deal").fetchall()
+
+    assert home["department_id"] == KRETOV, "отдел берётся из карточки"
+    assert [row["deal_id"] for row in deals] == [1]
+
+
+def test_an_empty_mart_opens_too(analytics_db):
+    """Пустой файл витрины — тоже не повод падать на подключении.
+
+    Так выглядит первый запуск до ETL и промах мимо пути к базе. Ошибку
+    должен выдать первый же запрос метрики, назвав нехватку данных, а не
+    apply_scope с именем служебной таблицы.
+    """
+    with analytics_session() as conn:
+        for table in ("plan_roster", "fact_stage_event", "fact_deal", "dim_user"):
+            conn.execute(f"DROP TABLE {table}")
+
+    with scoped_session(Scope.everything()) as conn:
+        assert conn.execute("SELECT COUNT(*) AS n FROM user_home").fetchone()["n"] == 0

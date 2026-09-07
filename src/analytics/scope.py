@@ -267,6 +267,26 @@ def _user_home(conn) -> None:
     conn.execute(
         "CREATE TEMP TABLE user_home (user_id INTEGER PRIMARY KEY, department_id INTEGER)"
     )
+    # Таблица заполняется сразу, а представления читают её потом. Отсюда
+    # разница в поведении: отсутствующую таблицу представление обнаружило бы
+    # только при запросе, а этот INSERT падает прямо в apply_scope. Витрина
+    # старее третьей версии схемы ростера не знает, и открывать на ней
+    # соединение всё равно нужно — например, чтобы метрика сказала «нет
+    # данных», а не чтобы дашборд упал на подключении с именем чужой таблицы
+    # в ошибке.
+    tables = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    if "dim_user" not in tables:
+        return
+    if "plan_roster" not in tables:
+        conn.execute(
+            "INSERT INTO user_home(user_id, department_id) "
+            "SELECT user_id, department_id FROM dim_user"
+        )
+        return
     conn.execute(
         """
         INSERT INTO user_home(user_id, department_id)
