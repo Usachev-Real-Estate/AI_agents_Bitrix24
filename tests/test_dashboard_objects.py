@@ -7,6 +7,9 @@
 нельзя сузить до своего отдела.
 """
 
+import importlib.util
+import json
+import pathlib
 import re
 import socket
 import ssl
@@ -26,6 +29,13 @@ LOGIN = "chief"
 LOGIN_ROP = "rop"
 PASSWORD = "correct-horse-battery"
 PERIOD = "?start=2026-08-01&end=2026-08-31"
+
+# Снятия с рекламы временно выключены в objects.py (три закомментированные
+# строки). Тесты на них не удаляем и не переписываем: они проверяют рабочий
+# код, до которого сейчас просто нет ссылок с экрана. Снимут комментарии —
+# уберут и этот маркер, и проверки вернутся такими же, какими были.
+removals_off = pytest.mark.skip(
+    reason="снятия с рекламы временно выключены в objects.py")
 
 SUMMARY = {"total": 128, "in_ad": 41, "is_published": 33, "removed_from_ad": 17}
 
@@ -215,6 +225,40 @@ def afina_api(monkeypatch):
     return fake
 
 
+# Пять снятий августа, различающиеся ровно причиной и статусом: только так
+# видно, что метрика смотрит на дату И на причину, а не на что-то одно.
+_REMOVED_BASE = dict(REMOVED, department_name="Отдел Трофимовой",
+                     assignee_name="Тестов Иван")
+R_DICT = dict(_REMOVED_BASE, id=601, removal_reason="Продано нами",
+              removal_reason_category="Продано нами", removal_comment=None,
+              removed_from_ad_at="2026-08-10T10:00:00")
+R_OTHER_OK = dict(_REMOVED_BASE, id=602, removal_reason="Другое: собственник уехал",
+                  removal_reason_category="Другое",
+                  removal_comment="собственник уехал",
+                  removed_from_ad_at="2026-08-11T10:00:00")
+R_OTHER_EMPTY = dict(_REMOVED_BASE, id=603, removal_reason="Другое",
+                     removal_reason_category="Другое", removal_comment=None,
+                     removed_from_ad_at="2026-08-12T10:00:00")
+R_NO_REASON = dict(_REMOVED_BASE, id=604, removal_reason=None,
+                   removal_reason_category=None, removal_comment=None,
+                   removed_from_ad_at="2026-08-13T10:00:00")
+# Сняли в августе, потом вернули в рекламу. Событие в периоде было, а
+# состояния «снят» уже нет: причину Афина при возврате не чистит.
+R_RETURNED = dict(_REMOVED_BASE, id=605, status="В рекламе", in_ad=True,
+                  removal_reason="Продано нами",
+                  removal_reason_category="Продано нами", removal_comment=None,
+                  removed_from_ad_at="2026-08-14T10:00:00")
+
+
+@pytest.fixture
+def removal_afina(monkeypatch):
+    """Афина, где снятия отличаются только причиной."""
+    fake = FakeAfina(listings=[R_DICT, R_OTHER_OK, R_OTHER_EMPTY,
+                               R_NO_REASON, R_RETURNED])
+    monkeypatch.setattr(objects, "client_for", lambda settings: fake)
+    return fake
+
+
 @pytest.fixture
 def app_factory(analytics_db, monkeypatch):
     """Приложение с настраиваемым ключом Афины.
@@ -222,11 +266,13 @@ def app_factory(analytics_db, monkeypatch):
     Ключ задаётся до create_app и до сброса кеша настроек: раздел решает,
     показываться ли ему, по настройкам, а не по запросу.
     """
-    def build(api_key="afina-test-key", page_size=None):
+    def build(api_key="afina-test-key", page_size=None, department_map=None):
         monkeypatch.setenv("DASHBOARD_SECRET_KEY", "o" * 48)
         monkeypatch.setenv("DASHBOARD_COOKIE_SECURE", "false")
         monkeypatch.setenv("AFINA_API_KEY", api_key)
         monkeypatch.setenv("AFINA_API_BASE_URL", "https://afina.example")
+        monkeypatch.setenv("AFINA_DEPARTMENT_MAP_JSON",
+                           json.dumps(department_map or {}, ensure_ascii=False))
         if page_size is not None:
             monkeypatch.setenv("AFINA_API_PAGE_SIZE", str(page_size))
         get_settings.cache_clear()
@@ -347,43 +393,45 @@ def test_the_whole_base_view_does_not_download_the_base(client, afina_api):
 
 
 def test_tiles_describe_the_scope_not_the_chip(client, wide_afina):
-    """Чип не сужает плитки — иначе половина из них показывала бы ноль.
+    """Чип не сужает плитки состояния — иначе они показывали бы выборку.
 
-    Под фильтром «в рекламе» плитка «Сняты с рекламы» обязана показать
-    снятые объекты отдела, а не ноль: чип выбирает метрику и таблицу, а не
+    Под фильтром «в рекламе» плитка «На сайте» обязана показать сайт всего
+    отдела, а не только рекламируемых: чип выбирает метрику и таблицу, а не
     выборку для счётчиков.
     """
     body = client.get(f"{BASE}/objects?filter=in_ad{PERIOD.replace('?', '&')}").text
-    values = _tile_values(body)
-    labels = _tile_labels(body)
-    assert labels[:3] == ["В рекламе сейчас", "На сайте сейчас",
-                          "Сняты с рекламы сейчас"]
-    # Два в рекламе (501, 503), два снятых (502, 504).
-    assert values[0] == "2"
-    assert values[2] == "2"
+    assert _tile_labels(body)[:2] == ["В рекламе сейчас", "На сайте сейчас"]
+    # Два в рекламе (501, 503) и двое на сайте (501, 503) — разные множества
+    # совпали числом, но плитка сайта считает по всему отделу.
+    assert _tile(body, "В рекламе сейчас") == "2"
+    assert _tile(body, "На сайте сейчас") == "2"
 
 
 def test_period_tile_counts_only_events_inside_the_window(client, wide_afina):
-    """Четвёртая плитка — события за период, а не состояние.
+    """Плитка за период считает события, а не состояние.
 
     В окне 01–31 августа лежат обе публикации в рекламу; за пределами окна
     плитка обязана обнулиться, иначе период ни на что не влияет.
     """
     inside = client.get(f"{BASE}/objects?filter=in_ad{PERIOD.replace('?', '&')}").text
-    assert _tile_labels(inside)[3] == "Выставлено в рекламу за период"
     # Три публикации в августе; четвёртая — в январе и сюда не попадает.
-    assert _tile_values(inside)[3] == "3"
+    assert _tile(inside, "Выставлено в рекламу за период") == "3"
 
     january = client.get(
         f"{BASE}/objects?filter=in_ad&start=2026-01-01&end=2026-01-31").text
-    assert _tile_values(january)[3] == "1"
+    assert _tile(january, "Выставлено в рекламу за период") == "1"
 
 
 def test_site_filter_shows_site_tiles(client, wide_afina):
-    """У фильтра «на сайте» свой набор: сайт, снятые с сайта, выставлено."""
+    """У фильтра «на сайте» свой набор — и только про сайт.
+
+    Плитки «В рекламе» здесь нет намеренно: чип выбран, чтобы смотреть сайт,
+    и реклама рядом отвечает на незаданный вопрос.
+    """
     body = client.get(f"{BASE}/objects?filter=published{PERIOD.replace('?', '&')}").text
-    assert _tile_labels(body)[:2] == ["На сайте сейчас", "Сняты с сайта сейчас"]
-    assert _tile_labels(body)[3] == "Выставлено на сайт за период"
+    assert _tile_labels(body) == [
+        "На сайте сейчас", "Сняты с сайта сейчас", "Выставлено на сайт за период",
+    ]
     # Снят с сайта ровно один объект — тот, у кого site_sync_status=unpublished.
     assert _tile_values(body)[1] == "1"
 
@@ -400,6 +448,97 @@ def test_site_removed_tile_admits_it_has_no_period(client, wide_afina):
 EMPTY_PERIOD = "?start=2026-03-01&end=2026-03-31"
 
 
+def test_only_the_periods_the_section_can_count_are_offered(client, wide_afina):
+    """Набор окон здесь свой, короче общего для дашборда.
+
+    Раздел считает по снимку рабочих карточек: на «12 месяцах» метрика
+    спрашивала бы о событиях, которых в снимке уже нет — объект давно в
+    архиве. Предлагать окно, на которое нельзя ответить, хуже, чем не
+    предлагать вовсе.
+    """
+    body = _visible(client.get(f"{BASE}/objects?filter=in_ad").text)
+    for label in ("Сегодня", "7 дней", "30 дней", "Текущий квартал"):
+        assert label in body, label
+    for label in ("90 дней", "Текущий месяц", "Прошлый месяц", "12 месяцев"):
+        assert label not in body, label
+
+
+def test_a_period_from_another_section_falls_back(client, wide_afina):
+    """Пресет не из своего набора приходит по ссылке или правкой адреса.
+
+    Молча считать по нему нельзя: все чипы стояли бы неактивными, и по экрану
+    не понять, за что показаны числа.
+    """
+    assert objects.clamp_period({"preset": "12m"})["preset"] == "30d"
+    # Свой пресет и произвольные даты остаются как есть.
+    assert objects.clamp_period({"preset": "quarter"})["preset"] == "quarter"
+    assert objects.clamp_period({"preset": "custom"})["preset"] == "custom"
+
+
+@removals_off
+def test_removal_metric_needs_a_date_and_a_reason(client, removal_afina):
+    """Снятие за период — это дата плюс причина, которая что-то объясняет.
+
+    Даты мало: Афина проставляет её и там, где причину не выбрали вовсе, а
+    «Другое» без пояснения — не причина, а несделанная работа. Из пяти
+    августовских снятий засчитываются три.
+    """
+    body = client.get(f"{BASE}/objects?filter=removed{PERIOD.replace('?', '&')}").text
+    assert _tile_labels(body)[-1] == "Снято с рекламы за период"
+    # 601 словарная причина, 602 «Другое» с пояснением, 605 снят и возвращён.
+    # 603 «Другое» пустое и 604 без причины не в счёт.
+    assert _tile_values(body)[-1] == "3"
+
+
+def test_empty_other_and_missing_reason_never_count(client, removal_afina):
+    """Именно эти два случая и есть смысл правила — проверяем их порознь."""
+    for item in (R_OTHER_EMPTY, R_NO_REASON):
+        assert objects.removal_reason_counts(item) is False, item["id"]
+    for item in (R_DICT, R_OTHER_OK, R_RETURNED):
+        assert objects.removal_reason_counts(item) is True, item["id"]
+
+
+@removals_off
+def test_a_removal_survives_the_return_to_the_ad(client, removal_afina):
+    """Событие в истории и состояние сейчас — разные вопросы.
+
+    Объект 605 сняли внутри периода и вернули в рекламу. В метрике за период
+    он есть: снятие было. В колонке «сняты сейчас» его нет: сейчас он в
+    рекламе. Одна проверка на оба ответа, потому что путают их вместе.
+    """
+    assert objects.removal_reason_counts(R_RETURNED) is True
+    assert objects.counts_as_removal(R_RETURNED) is False
+    body = client.get(f"{BASE}/objects?filter=removed{PERIOD.replace('?', '&')}").text
+    head = body.split("Отдел и брокер", 1)[1].split("</thead>", 1)[0]
+    assert "Сняты с рекламы сейчас" in head
+    # Строка итогов: снятых сейчас двое (601 и 602), событий за период трое.
+    assert _tile_values(body)[-1] == "3"
+
+
+def test_removals_are_switched_off_everywhere_at_once(client, wide_afina):
+    """Снятия выключены — значит, их нет ни в одном из трёх мест.
+
+    Этот тест — единственное, что стоит между «выключили» и «выключили
+    наполовину»: чип, вид и плитка живут в разных местах файла, и вернуть
+    один из них по недосмотру легче лёгкого. Он же напомнит, что выключение
+    временное, когда снятия понадобятся обратно.
+    """
+    body = client.get(f"{BASE}/objects?filter=in_ad").text
+    assert "filter=removed" not in body
+    assert "view=removals" not in body
+    assert "Снято с рекламы за период" not in _tile_labels(body)
+
+
+def test_switched_off_removals_are_not_reachable_by_the_address(client, wide_afina):
+    """И правкой адреса тоже: ссылок нет, но адрес набирают руками."""
+    chip = client.get(f"{BASE}/objects?filter=removed").text
+    view = client.get(f"{BASE}/objects?view=removals").text
+    # Откат к разрешённому срезу, а не пустая страница и не пятисотая.
+    assert "Снято с рекламы за период" not in _tile_labels(chip)
+    assert "Снятия за период" not in _visible(view)
+
+
+@removals_off
 def test_removed_chip_keeps_only_the_tile_that_follows_the_period(client, wide_afina):
     """В чипе снятий не должно быть неподвижного числа снятых.
 
@@ -414,6 +553,7 @@ def test_removed_chip_keeps_only_the_tile_that_follows_the_period(client, wide_a
     assert [x for x in labels if "рекламы" in x] == ["Снято с рекламы за период"]
 
 
+@removals_off
 def test_removal_tile_moves_with_the_period(client, wide_afina):
     """И она обязана двигаться: иначе замена ничего не исправила."""
     inside = client.get(f"{BASE}/objects?filter=removed{PERIOD.replace('?', '&')}").text
@@ -422,6 +562,48 @@ def test_removal_tile_moves_with_the_period(client, wide_afina):
     # Оба снятия (502 и 504) датированы августом, в марте — ни одного.
     assert _tile_values(inside)[-1] == "2"
     assert _tile_values(outside)[-1] == "0"
+
+
+@removals_off
+def test_the_ad_chip_shows_the_outflow_as_an_event(client, wide_afina):
+    """Под фильтром «в рекламе» снятия — это событие за период, а не состояние.
+
+    Раньше на этом месте стояло «Сняты с рекламы сейчас»: число не двигалось
+    при смене периода и читалось как поломка. Подвижным его не сделать —
+    истории статусов Афина не хранит, — зато сами снятия датированы, и
+    состояние заменено событием: приток и отток за одно и то же окно.
+    """
+    labels = _tile_labels(
+        client.get(f"{BASE}/objects?filter=in_ad{PERIOD.replace('?', '&')}").text)
+    assert "Сняты с рекламы сейчас" not in labels
+    assert labels[-2:] == ["Выставлено в рекламу за период",
+                           "Снято с рекламы за период"]
+
+
+@removals_off
+def test_the_outflow_tile_follows_the_period(client, wide_afina):
+    """И оно обязано двигаться: иначе замена ничего не исправила."""
+    august = client.get(f"{BASE}/objects?filter=in_ad{PERIOD.replace('?', '&')}").text
+    march = client.get(
+        f"{BASE}/objects?filter=in_ad{EMPTY_PERIOD.replace('?', '&')}").text
+    # Оба снятия (502 и 504) датированы августом, в марте — ни одного.
+    assert _tile(august, "Снято с рекламы за период") == "2"
+    assert _tile(march, "Снято с рекламы за период") == "0"
+
+
+@removals_off
+def test_the_outflow_obeys_the_reason_rule_too(client, removal_afina):
+    """Вторая метрика считает по тому же правилу, что и своя у чипа снятий.
+
+    Иначе одно и то же снятие засчитывалось бы по-разному в двух местах
+    дашборда, и сойтись эти числа не могли бы никогда.
+    """
+    ad = client.get(f"{BASE}/objects?filter=in_ad{PERIOD.replace('?', '&')}").text
+    removed = client.get(
+        f"{BASE}/objects?filter=removed{PERIOD.replace('?', '&')}").text
+    assert _tile(ad, "Снято с рекламы за период") == "3"
+    assert _tile(ad, "Снято с рекламы за период") == _tile(
+        removed, "Снято с рекламы за период")
 
 
 def test_state_tiles_say_they_are_about_now(client, wide_afina):
@@ -434,10 +616,13 @@ def test_state_tiles_say_they_are_about_now(client, wide_afina):
     inside = client.get(f"{BASE}/objects?filter=in_ad{PERIOD.replace('?', '&')}").text
     outside = client.get(
         f"{BASE}/objects?filter=in_ad{EMPTY_PERIOD.replace('?', '&')}").text
-    assert all(label.endswith("сейчас") for label in _tile_labels(inside)[:-1])
-    # Состояние одно и то же, а событий за период в марте нет.
-    assert _tile_values(inside)[:-1] == _tile_values(outside)[:-1]
-    assert _tile_values(outside)[-1] == "0"
+    state = [label for label in _tile_labels(inside) if label.endswith("сейчас")]
+    assert state == ["В рекламе сейчас", "На сайте сейчас"]
+    # Состояние одно и то же в обоих окнах...
+    for label in state:
+        assert _tile(inside, label) == _tile(outside, label), label
+    # ...а метрика за период в марте пуста.
+    assert _tile(outside, "Выставлено в рекламу за период") == "0"
 
 
 def test_the_whole_base_no_longer_shows_removed_from_ad(client, afina_api):
@@ -474,15 +659,17 @@ def test_an_object_in_ad_is_never_a_removal():
                                           removal_reason_category="Продано нами")) is False
 
 
+@removals_off
 def test_unexplained_removals_are_not_counted_on_the_page(app_factory, monkeypatch):
     """Снятое с «Другое» без пояснения не попадает в счётчик снятий."""
     vague = dict(REMOVED, id=505, removal_reason="Другое",
                  removal_reason_category="Другое", removal_comment=None)
     fake = FakeAfina(listings=[LISTING, REMOVED, vague])
     monkeypatch.setattr(objects, "client_for", lambda settings: fake)
-    body = _login(app_factory()).get(f"{BASE}/objects?filter=in_ad").text
+    body = _login(app_factory()).get(
+        f"{BASE}/objects?filter=in_ad{PERIOD.replace('?', '&')}").text
     # Снятых объектов два, но засчитано одно — у второго причина пустая.
-    assert _tile_values(body)[2] == "1"
+    assert _tile(body, "Снято с рекламы за период") == "1"
 
 
 # --- прирост к прошлому периоду ---
@@ -518,11 +705,12 @@ def test_period_tile_shows_growth_against_the_previous_window(client, dated_afin
     """
     body = client.get(
         f"{BASE}/objects?filter=in_ad&start=2026-08-16&end=2026-08-31").text
-    assert _tile_values(body)[3] == "2"
+    assert _tile(body, "Выставлено в рекламу за период") == "2"
     # При наличии процента макет плитки печатает «к прошлому периоду» вместо
     # подсказки — так же, как на остальных страницах дашборда.
-    assert "+100%" in _tile_hints(body)[3]
-    assert "к прошлому периоду" in _tile_hints(body)[3]
+    hint = _tile_hints(body)[_tile_labels(body).index("Выставлено в рекламу за период")]
+    assert "+100%" in hint
+    assert "к прошлому периоду" in hint
 
 
 def test_growth_from_zero_is_words_not_a_number(client, dated_afina):
@@ -532,9 +720,10 @@ def test_growth_from_zero_is_words_not_a_number(client, dated_afina):
     """
     body = client.get(
         f"{BASE}/objects?filter=in_ad&start=2026-08-01&end=2026-08-15").text
-    assert _tile_values(body)[3] == "1"
+    assert _tile(body, "Выставлено в рекламу за период") == "1"
     assert "За прошлый период — ни одного" in body
-    assert "%" not in _tile_hints(body)[3]
+    hint = _tile_hints(body)[_tile_labels(body).index("Выставлено в рекламу за период")]
+    assert "%" not in hint
 
 
 # --- отделы ---
@@ -576,8 +765,8 @@ def test_breakdown_replaces_the_object_list(client, wide_afina):
                "Выставлено в рекламу за период"]),
     ("published", ["На сайте сейчас", "Сняты с сайта сейчас",
                    "Выставлено на сайт за период"]),
-    ("removed", ["Сняты с рекламы сейчас", "На сайте сейчас",
-                 "Снято с рекламы за период"]),
+    pytest.param("removed", ["Сняты с рекламы сейчас", "На сайте сейчас",
+                             "Снято с рекламы за период"], marks=removals_off),
 ])
 def test_breakdown_columns_follow_the_chip(client, wide_afina, chip, expected):
     """Колонки таблицы — про выбранный фильтр, а не все срезы сразу.
@@ -608,9 +797,10 @@ def test_broker_row_opens_his_objects(client, wide_afina):
 
 def test_broker_drilldown_respects_the_chip(client, wide_afina):
     """Раскрытие показывает те объекты, по которым считалась колонка чипа."""
-    body = client.get(f"{BASE}/objects?filter=removed&broker=Петров+Пётр").text
-    assert "Студия на Ленина" in body
-    assert "Трёшка у моря" not in body
+    body = client.get(f"{BASE}/objects?filter=published&broker=Петров+Пётр").text
+    # У Петрова две карточки: 503 на сайте и 504 снятая и с сайта убранная.
+    assert "Трёшка у моря" in body
+    assert "Студия на Ленина" not in body
 
 
 # --- снимок ---
@@ -655,6 +845,7 @@ def test_stale_reason_is_not_shown_for_an_object_back_in_ad(app_factory, monkeyp
 # --- период, карточка, снятия ---
 
 
+@removals_off
 def test_removals_view_asks_for_the_chosen_period(client, afina_api):
     """История снятий берёт границы из фильтра периода.
 
@@ -667,6 +858,7 @@ def test_removals_view_asks_for_the_chosen_period(client, afina_api):
     assert kwargs["until"] == "2026-08-31"
 
 
+@removals_off
 def test_removals_view_shows_the_event_reason(client, afina_api):
     """Причина на момент события и статус на сейчас стоят рядом."""
     body = _visible(client.get(f"{BASE}/objects?view=removals").text)
@@ -724,6 +916,17 @@ def _tile_values(body):
 
 def _tile_labels(body):
     return re.findall(r'<div class="tile-label">([^<]+)</div>', body)
+
+
+def _tile(body, label):
+    """Значение плитки по подписи.
+
+    По номеру искать нельзя: набор плиток меняется вместе с чипом, и после
+    каждой перестановки половина тестов начинала проверять соседа.
+    """
+    tiles = dict(zip(_tile_labels(body), _tile_values(body)))
+    assert label in tiles, f"нет плитки «{label}», есть: {list(tiles)}"
+    return tiles[label]
 
 
 def _tile_hints(body):
@@ -807,8 +1010,8 @@ def test_period_control_is_hidden_on_a_single_object(client, afina_api):
 
     Переключатель, который ничего не меняет, читается как сломанный фильтр.
     """
-    card = client.get(f"{BASE}/objects?view=removals&id=501").text
-    listing = client.get(f"{BASE}/objects?view=removals").text
+    card = client.get(f"{BASE}/objects?filter=in_ad&id=501").text
+    listing = client.get(f"{BASE}/objects?filter=in_ad").text
     assert "Текущий квартал" in listing
     assert "Текущий квартал" not in card
 
@@ -825,19 +1028,139 @@ def test_navigation_does_not_carry_another_sections_filters(client, afina_api):
     assert "page=" not in link
 
 
+def test_the_department_map_helper_still_matches_the_code_it_calls(analytics_db):
+    """Помощник для карты отделов ломается тише всех: его запускают раз в год.
+
+    Проверяем не вывод, а сборку: что имена, которые он берёт из витрины и из
+    раздела, существуют и вызываются так, как он их вызывает. Один раз здесь
+    уже стояло выдуманное `restricted_connection`, и заметить это можно было
+    только запуском на сервере.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "afina_departments", pathlib.Path("scripts/afina_departments.py"))
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    # Отделы Битрикса берутся из витрины — она в тестах пустая, но запрос
+    # обязан пройти, а не упасть на неизвестном имени.
+    assert helper._bitrix() == []
+    assert callable(helper._afina)
+
+
 # --- доступ ---
 
 
 def test_rop_cannot_open_the_section(app_factory, afina_api):
-    """РОПу раздел не открывается, потому что его нечем сузить.
+    """Без карты отделов РОПу раздел не открывается.
 
-    Отделы Афины — её собственный справочник, сопоставить его с отделами
-    Битрикса нечем. Показать РОПу брокеров всей компании значит обойти то,
-    ради чего сделана область видимости витрины.
+    Отделы Афины — её собственный справочник, и по имени с отделами Битрикса
+    он не сходится. Пока перевод не задан в AFINA_DEPARTMENT_MAP_JSON, сузить
+    выборку нечем, а показать РОПу брокеров всей компании значит обойти то,
+    ради чего сделана область видимости витрины. Умолчание закрывает.
     """
     session = _login(app_factory(), username=LOGIN_ROP)
     assert session.get(f"{BASE}/objects").status_code == 403
     assert session.get(f"{BASE}/api/objects").status_code == 403
+
+
+# Отдел 44 у РОПа из app_factory; в снимке wide_afina это «Отдел Трофимовой»
+# (объекты 501 и 502), а «Отдел Ким» (503, 504) — чужой.
+ROP_MAP = {"44": "Отдел Трофимовой"}
+
+
+def _rop(app_factory, **kwargs):
+    return _login(app_factory(department_map=ROP_MAP, **kwargs), username=LOGIN_ROP)
+
+
+def test_rop_sees_the_section_once_the_department_is_mapped(app_factory, wide_afina):
+    """Сопоставили отдел — раздел открылся и появился в меню."""
+    session = _rop(app_factory)
+    assert session.get(f"{BASE}/objects").status_code == 200
+    assert "Объекты" in session.get(f"{BASE}/").text
+
+
+def test_rop_gets_only_two_chips(app_factory, wide_afina):
+    """«Все» и «Сняты с рекламы» РОПу не показываем.
+
+    «Все» — это ответ /summary по всей базе, сузить его до отдела нечем.
+    Снятия разбирает администратор.
+    """
+    body = _rop(app_factory).get(f"{BASE}/objects").text
+    assert "filter=in_ad" in body
+    assert "filter=published" in body
+    # Ссылок на недоступные срезы нет вовсе — не «есть, но ведут на отказ».
+    assert "filter=all" not in body
+    assert "filter=removed" not in body
+    assert "view=removals" not in body
+
+
+def test_rop_sees_only_their_own_department(app_factory, wide_afina):
+    """В разбивке — свой отдел, чужого нет ни строкой."""
+    body = _visible(_rop(app_factory).get(f"{BASE}/objects?filter=in_ad").text)
+    assert "Отдел Трофимовой" in body
+    assert "Отдел Ким" not in body
+    assert "Петров Пётр" not in body  # брокер чужого отдела
+
+
+def test_rop_cannot_widen_the_view_through_the_address(app_factory, wide_afina):
+    """Правка адреса — первое, что пробуют. Каждый параметр проверяем отдельно.
+
+    Здесь ошибка стоит дороже прочих: она означает чужой отдел на экране
+    РОПа, то есть ровно то, ради чего сделана область видимости витрины.
+    """
+    session = _rop(app_factory)
+
+    # Чужой отдел в параметре не открывает его и не оставляет пустой экран:
+    # выборка сужается до своего.
+    body = _visible(session.get(f"{BASE}/objects?department=Отдел+Ким").text)
+    assert "Отдел Ким" not in body
+    assert "Отдел Трофимовой" in body
+
+    # Недоступный чип откатывается к разрешённому, а не показывает всю базу.
+    body = session.get(f"{BASE}/objects?filter=all").text
+    assert "Всего объектов" not in _visible(body)
+
+    # Журнал снятий Афина отдаёт без фильтра по отделу — вида быть не должно.
+    body = session.get(f"{BASE}/objects?view=removals").text
+    assert "Снятия за период" not in _visible(body)
+
+
+def test_rop_cannot_open_a_foreign_object_by_id(app_factory, wide_afina):
+    """/listings/{id} отдаёт любой объект по номеру — мимо снимка и прав.
+
+    Без явной проверки отдела чужую карточку открывал бы перебор номеров.
+    """
+    session = _rop(app_factory)
+    own = session.get(f"{BASE}/objects?id=501")
+    foreign = session.get(f"{BASE}/objects?id=503")
+    assert own.status_code == 200
+    assert "Двушка у парка" in own.text
+    assert "Трёшка у моря" not in foreign.text
+    assert "не найден" in foreign.text
+
+
+def test_the_api_restricts_the_rop_the_same_way(app_factory, wide_afina):
+    """JSON запрашивают напрямую: проверка на странице этот путь не закрывает."""
+    session = _rop(app_factory)
+    payload = session.get(f"{BASE}/api/objects?filter=in_ad").json()
+    assert payload["departments"] == ["Отдел Трофимовой"]
+    brokers = [row["broker"]
+               for group in payload["breakdown"]["groups"]
+               for row in group["brokers"]]
+    assert brokers == ["Тестов Иван"]
+    assert session.get(f"{BASE}/api/objects?id=503").status_code == 404
+
+
+def test_an_unmapped_rop_is_refused_rather_than_shown_nothing(app_factory, wide_afina):
+    """Отдел без перевода — это отказ, а не пустой экран.
+
+    Пустая выдача неотличима от «объектов нет»: настроенный дашборд выглядел
+    бы так же, как ненастроенный, и никто бы не понял, что чинить.
+    """
+    session = _login(app_factory(department_map={"99": "Отдел Ким"}),
+                     username=LOGIN_ROP)
+    assert session.get(f"{BASE}/objects").status_code == 403
+    assert session.get(f"{BASE}/api/objects").status_code == 403
+    assert "Объекты" not in session.get(f"{BASE}/").text
 
 
 def test_rop_does_not_see_the_section_in_navigation(app_factory, afina_api):

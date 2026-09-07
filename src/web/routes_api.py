@@ -17,7 +17,6 @@ import metrics
 import objects
 from context import read_analytics, resolve_filters
 from links import crm_link
-from scope import ROLE_ADMIN
 
 router = APIRouter(prefix="/api")
 
@@ -97,21 +96,27 @@ async def api_quality(request: Request) -> JSONResponse:
 def api_objects(request: Request) -> JSONResponse:
     """Объекты Афины тем же ответом, что видит страница.
 
-    Раздел закрыт для всех, кроме администратора, — по той же причине, что и
-    страница: сопоставить отделы Афины с отделами Битрикса нечем, а значит
-    сузить выдачу до своего отдела невозможно.
+    Ограничение здесь считается заново, а не берётся со страницы: JSON
+    запрашивают напрямую, и проверка, стоящая только в обработчике страницы,
+    этот путь не закрывает.
     """
     settings = request.app.state.settings
-    if (getattr(request.state, "user", None) or {}).get("role") != ROLE_ADMIN:
+    allowed = objects.allowed_departments(
+        getattr(request.state, "user", None), settings.afina_department_map)
+    # Пустой кортеж — отдел не сопоставлен с Афиной либо не назначен вовсе.
+    # Отдавать в этом случае пустую выдачу нельзя: пустой ответ неотличим от
+    # «объектов нет», и настроенным он выглядел бы так же, как ненастроенный.
+    if allowed is not None and not allowed:
         return JSONResponse({"error": "forbidden"}, status_code=403)
     if not objects.is_configured(settings):
         return JSONResponse({"error": "afina_not_configured"}, status_code=503)
-    selected = objects.resolve(request.query_params)
-    period = resolve_filters(request)["period"]
+    selected = objects.resolve(request.query_params, allowed)
+    period = objects.clamp_period(resolve_filters(request)["period"])
     data = objects.load(
         objects.client_for(settings), selected, period,
         settings.afina_api_page_size,
         previous=metrics.previous_period(period),
+        allowed=allowed,
     )
     # 502 — отказ источника: дашборд жив, недоступна Афина за ним. 404 —
     # ответ самой Афины «такого объекта нет», и выдавать его за аварию значит

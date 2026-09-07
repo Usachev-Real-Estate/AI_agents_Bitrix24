@@ -510,6 +510,34 @@ class Settings(BaseSettings):
         default=50,
         validation_alias="AFINA_API_PAGE_SIZE",
     )
+    # Перевод отдела Битрикса (числовой ID) в название отдела Афины. Без него
+    # РОП раздела «Объекты» не видит вовсе.
+    #
+    # Составлять руками приходится потому, что справочники разные и по имени
+    # не сходятся: в Битриксе отдел зовётся «Трофимова», в Афине — «Отдел
+    # Трофимовой». Автоматически подобрать пару значило бы угадывать падеж, а
+    # ошибка здесь — это чужой отдел на экране РОПа. Готовую строку печатает
+    # scripts/afina_departments.py.
+    #
+    #   AFINA_DEPARTMENT_MAP_JSON={"44": "Отдел Трофимовой", "50": "Отдел Волковой"}
+    afina_department_map_json: str = Field(
+        default="",
+        validation_alias="AFINA_DEPARTMENT_MAP_JSON",
+    )
+
+    @property
+    def afina_department_map(self) -> dict[int, str]:
+        """Отдел Битрикса → отдел Афины. Кривой JSON = пустая карта.
+
+        Молча пустая карта здесь безопаснее исключения при старте: раздел
+        просто не откроется РОПам, а дашборд останется жив. Обратное — падение
+        всего сервиса из-за запятой в необязательной настройке.
+        """
+        try:
+            raw = json.loads(self.afina_department_map_json)
+            return {int(k): str(v).strip() for k, v in raw.items() if str(v).strip()}
+        except Exception:
+            return {}
 
     @property
     def analytics_amount_field_by_category(self) -> dict[int, str]:

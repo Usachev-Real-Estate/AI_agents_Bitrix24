@@ -229,11 +229,20 @@ def objects_page(request: Request) -> HTMLResponse:
     """
     context = base_context(request, active=objects.SLUG)
     settings = request.app.state.settings
-    selected = objects.resolve(request.query_params)
+    # None — администратор, видит всё. Кортеж — разрешённые отделы Афины;
+    # пустой означает «ничего», и это не полдоступа, а отказ.
+    allowed = objects.allowed_departments(
+        getattr(request.state, "user", None), settings.afina_department_map)
+    selected = objects.resolve(request.query_params, allowed)
+    period = objects.clamp_period(context["period"])
     context.update({
         "selected": selected,
-        "views": objects.VIEWS,
-        "listing_filters": objects.LISTING_FILTERS,
+        "period": period,
+        # Раздел показывает свой набор окон, а не общий для дашборда: на
+        # длинных периодах снимок и события расходятся (см. objects.py).
+        "period_presets": objects.PERIOD_PRESETS,
+        "views": objects.views_for(allowed),
+        "listing_filters": objects.filters_for(allowed),
         "configured": objects.is_configured(settings),
         "tiles": [],
         "scoped": False,
@@ -245,13 +254,14 @@ def objects_page(request: Request) -> HTMLResponse:
         "truncated": False,
         "error": None,
     })
-    if not context["is_admin"]:
+    if allowed is not None and not allowed:
         return _forbidden(request, context)
     if context["configured"]:
         context.update(objects.load(
-            objects.client_for(settings), selected, context["period"],
+            objects.client_for(settings), selected, period,
             settings.afina_api_page_size,
-            previous=metrics.previous_period(context["period"]),
+            previous=metrics.previous_period(period),
+            allowed=allowed,
         ))
     return _render(request, "objects.html", context)
 
