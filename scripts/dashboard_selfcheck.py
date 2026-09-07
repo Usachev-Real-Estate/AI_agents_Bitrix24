@@ -11,6 +11,7 @@
 """
 
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # Скрипт запускают и из репозитория, и примонтированным в контейнер одним
@@ -22,7 +23,8 @@ for _candidate in (_HERE.parent.parent / "src", _HERE.parent / "src",
         sys.path.insert(0, str(_candidate))
         break
 
-from analytics import metrics  # noqa: E402
+from analytics import metrics, plans  # noqa: E402
+from analytics import pulse as pulse_metrics  # noqa: E402
 from analytics.scope import Scope, scoped_session  # noqa: E402
 
 # Правки аудита добавили эти имена. Если их нет — крутится старый код, и
@@ -171,9 +173,20 @@ def main():
                   f"{' (список обрезан по лимиту 50)' if len(stuck) >= 50 else ''}, "
                   f"из них порог по воронке у {by_funnel}")
             print(f"{OK if dupes == 0 else BAD} дублей карточек в списке: {dupes}")
+            # Два набора, а не подмножество: норма считается по истории
+            # переходов, а список стадий — это воронка сегодня. Стадию
+            # переименовали или убрали — её интервалы в истории остались, и
+            # числитель без этой поправки оказывался больше знаменателя.
+            # «Норма есть у 10 стадий из 8» читается как поломка, хотя это
+            # два разных вопроса.
             norms = metrics.stage_norms(conn, cat)
             stages_all = metrics.stages(conn, cat)
-            print(f"{INFO} своя норма есть у {len(norms)} стадий из {len(stages_all)}")
+            current = {row["stage_id"] for row in stages_all}
+            covered = sum(1 for stage_id in norms if stage_id in current)
+            retired = len(norms) - covered
+            print(f"{INFO} своя норма есть у {covered} стадий из {len(stages_all)}"
+                  + (f"; ещё у {retired} — стадии, которых в воронке уже нет"
+                     if retired else ""))
 
         head("7. Лиды: скорость первой обработки")
         first = metrics.lead_first_move_days(conn, month["since"], month["until"])
@@ -201,6 +214,74 @@ def main():
             wider = len(export["rows"]) > len(page["rows"])
             print(f"{OK if wider else BAD} выгрузка шире страницы"
                   f"{'' if wider else ' — обрезка осталась, код старый'}")
+
+        head("9. Пульс: план и факт человека в одном отделе")
+        code = plans.quarter_code(datetime.now(metrics.BUSINESS_TZ).date())
+        data = pulse_metrics.pulse(conn, code)
+        bounds = plans.period(conn, code)
+        print(f"{INFO} {plans.quarter_label(code)}: план {money(data['plan'])} {base}, "
+              f"факт {money(data['fact'])} {base}")
+
+        by_dept = sum(row["fact"] for row in data["departments"])
+        same = abs(by_dept - data["fact"]) < 1
+        print(f"{OK if same else BAD} сумма по отделам {money(by_dept)} "
+              f"= итог {money(data['fact'])}")
+
+        split = all(
+            abs(row["fact_on_plan"] + row["others_fact"] - row["fact"]) < 1
+            for row in data["departments"]
+        )
+        print(f"{OK if split else BAD} в каждом отделе «с нормой» + «без нормы» = факт")
+
+        # Деньги вне плановых отделов. Исключённый из плана отдел продолжает
+        # работать и закрывать сделки — в «Пульс» они не входят, и это
+        # осознанное решение. Но разница между кассой агентства и суммой на
+        # экране обязана быть названа числом: молчащая, она однажды всплывёт
+        # как «дашборд врёт», и доверия к остальным цифрам не останется.
+        #
+        # Условие по валюте берётся у метрик (_money_of), а не пишется здесь
+        # заново: два ответа на вопрос «какие суммы можно складывать» разошлись
+        # бы молча, и самопроверка врала бы убедительнее проверяемого.
+        whole = metrics._one(
+            conn,
+            f"""
+            SELECT COALESCE(SUM(CASE WHEN {metrics._money_of()}
+                                     THEN opportunity ELSE 0 END), 0) AS amount
+            FROM v_deal
+            WHERE is_won = 1 AND closedate IS NOT NULL
+              AND closedate >= :since AND closedate < :until
+            """,
+            {"since": bounds["starts_at"], "until": bounds["ends_at"],
+             "base": base},
+        )
+        outside = float(whole.get("amount") or 0) - data["fact"]
+        print(f"{INFO} выиграно за квартал всего {money(float(whole['amount']))} {base}; "
+              f"вне отделов, несущих план: {money(outside)} {base}")
+
+        # Ростер решает, чей человек. Перенос в отдел, которого нет в списке
+        # плановых, тихо выносит его деньги из отчёта целиком — это не
+        # «занижено на процент», это вычеркнутый человек.
+        allowed = plans.sales_department_ids()
+        moved = metrics._rows(
+            conn,
+            "SELECT user_id, department_id FROM v_plan_roster "
+            "WHERE department_id IS NOT NULL AND period_code IN (:code, :any)",
+            {"code": code, "any": plans.ANY_PERIOD},
+        )
+        print(f"{INFO} ростер переносит людей между отделами: {len(moved)}")
+        if not allowed:
+            # Пустой список — это не «переносить некуда нельзя», а «сверять не
+            # с чем». Печатать здесь галочку значит отчитаться о проверке,
+            # которая не выполнялась, — а ей поверят ровно так же, как
+            # настоящей.
+            print(f"{BAD} список плановых отделов пуст: OWNER_SALES_DEPT_IDS_JSON "
+                  f"не прочитан, перенос сверять не с чем")
+        else:
+            lost = [row for row in moved if row["department_id"] not in allowed]
+            print(f"{OK if not lost else BAD} все перенесены в отделы, несущие план"
+                  + ("" if not lost
+                     else f" — {len(lost)} в отделы вне плана, "
+                          f"их деньги в отчёт не войдут"))
 
     print()
     print("=" * 60)
