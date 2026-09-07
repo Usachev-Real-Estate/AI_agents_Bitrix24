@@ -380,6 +380,45 @@ main { padding: 20px 24px 48px; max-width: 1560px; }
 
 /* ------------------------------------------------------------- таблицы */
 
+/* Отдел, раскрывающийся в список брокеров.
+ *
+ * <details> вместо скрипта: разметка родная, работает с клавиатуры и на
+ * телефоне, и переживает выключенный JS — а на этом экране цифры уже
+ * отрисованы сервером, скрипту тут делать нечего.
+ */
+details.dept { padding: 0; }
+details.dept > .dept-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 14px 16px;
+  cursor: pointer;
+  list-style: none;
+}
+/* Свой маркер вместо стандартного: display:flex в <summary> убирает
+ * системный треугольник, и блок перестаёт выглядеть раскрывающимся — на
+ * экране остаётся строка, по которой никто не догадается кликнуть. */
+details.dept > .dept-head::-webkit-details-marker { display: none; }
+details.dept > .dept-head::before {
+  content: "";
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid var(--text-muted);
+  border-bottom: 2px solid var(--text-muted);
+  transform: rotate(-45deg);
+  transition: transform .15s ease;
+}
+details.dept[open] > .dept-head::before { transform: rotate(45deg); }
+details.dept > .dept-head:hover { background: var(--surface-2); }
+details.dept[open] > .dept-head { border-bottom: 1px solid var(--grid); }
+.dept-name { font-weight: 620; }
+.dept-figures { display: flex; align-items: baseline; gap: 10px; margin-left: auto; }
+details.dept > .table-wrap { padding: 0 16px 14px; }
+details.dept > .empty { padding: 0 16px 14px; }
+
 .table-wrap { overflow-x: auto; }
 
 table {

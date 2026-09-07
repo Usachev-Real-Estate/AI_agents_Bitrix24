@@ -84,7 +84,7 @@ def verdict(data: dict[str, Any]) -> str:
 
 def format_company(data: dict[str, Any], yesterday: dict[str, Any], url: str) -> str:
     lines = [
-        f"📊 Пульс · {data['period']['label']}",
+        f"📊 Пульс{_funnel_note(data)} · {data['period']['label']}",
         "",
         _yesterday_line(yesterday),
         f"Квартал: {money(data['fact'])} из {money(data['plan'])} — "
@@ -128,7 +128,8 @@ def format_department(data: dict[str, Any], yesterday: dict[str, Any], url: str)
     if row is None:
         return ""
     lines = [
-        f"📊 Пульс отдела «{row['name']}» · {data['period']['label']}",
+        f"📊 Пульс отдела «{row['name']}»{_funnel_note(data)} "
+        f"· {data['period']['label']}",
         "",
         _yesterday_line(yesterday),
         f"Квартал: {money(row['fact'])} из {money(row['plan'])} — "
@@ -152,6 +153,17 @@ def format_department(data: dict[str, Any], yesterday: dict[str, Any], url: str)
             "цель отдела завышена на одну норму. Скажите админу — поправим.",
         ]
     return "\n".join(lines + _tail(data, url))
+
+
+def _funnel_note(data: dict[str, Any]) -> str:
+    """Воронка плана — в заголовке, а не в сноске.
+
+    Число в сводке меняется в тот день, когда меняется список воронок, и
+    объяснение обязано стоять рядом с числом. В сноске его прочитают после
+    того, как решат, что отчёт сломался.
+    """
+    names = [row["name"] for row in data.get("funnels") or []]
+    return f" · {', '.join('«' + name + '»' for name in names)}" if names else ""
 
 
 def _yesterday_line(yesterday: dict[str, Any]) -> str:
@@ -217,9 +229,16 @@ def _iso(moment: datetime) -> str:
 
 
 def closed_in(conn, window: dict[str, Any]) -> dict[str, Any]:
-    """Сколько закрыто за окно. Область видимости приходит соединением."""
+    """Сколько закрыто за окно. Область видимости приходит соединением.
+
+    Воронки те же, что и у квартала. Иначе первая строка сообщения считала
+    бы одно, а вторая другое: «вчера закрыто 3 сделки» из всех воронок над
+    кварталом, собранным по одной, — это два разных отчёта в одном письме, и
+    несовпадение заметят раньше, чем поймут причину.
+    """
     from metrics import _money_of, _one, base_currency
 
+    where, params = plans.category_filter("v_deal")
     row = _one(
         conn,
         f"""
@@ -229,8 +248,10 @@ def closed_in(conn, window: dict[str, Any]) -> dict[str, Any]:
         FROM v_deal
         WHERE is_won = 1 AND closedate IS NOT NULL
           AND closedate >= :since AND closedate < :until
+          AND {where}
         """,
-        {"since": window["since"], "until": window["until"], "base": base_currency()},
+        {"since": window["since"], "until": window["until"],
+         "base": base_currency(), **params},
     )
     return {**window, "deals": int(row.get("deals") or 0),
             "amount": float(row.get("amount") or 0)}

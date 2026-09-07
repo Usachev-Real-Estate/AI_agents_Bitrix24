@@ -125,6 +125,26 @@ def test_every_page_renders(client, path):
     assert response.headers["content-type"].startswith("text/html")
 
 
+def test_pulse_names_the_funnel_it_counted(client):
+    """Число, посчитанное по одной воронке, обязано назвать её на экране.
+
+    Рядом на «Обзоре» лежит факт по всем воронкам сразу. Два разных числа
+    без подписи читаются как ошибка одного из них, и разбираться пойдут не
+    в настройку, а в доверие к отчёту.
+    """
+    body = client.get(f"{BASE}/pulse").text
+    assert "План считается по" in body
+    assert "в выполнение не входят" in body
+
+
+def test_pulse_opens_a_department_into_its_brokers(client):
+    """Отдел раскрывается в поимённое выполнение, и ссылка ведёт именно туда."""
+    body = client.get(f"{BASE}/pulse").text
+    assert "По брокерам" in body
+    assert "<details" in body and 'id="dept-' in body
+    assert 'href="#dept-' in body, "имя отдела в таблице — ссылка на его блок"
+
+
 def test_overview_shows_money_with_coverage(client):
     """Сумма без покрытия вводит в заблуждение — покрытие обязано быть на странице."""
     body = client.get(f"{BASE}/{PERIOD}").text

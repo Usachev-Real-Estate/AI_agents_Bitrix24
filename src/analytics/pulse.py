@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -49,7 +50,11 @@ def pulse(
     """
     period = plans.period(conn, period_code)
     plan = plans.plan(conn, period_code, metric)
-    facts = _attribute(_facts(conn, period["starts_at"], period["ends_at"]), plan)
+    categories = plans.plan_category_ids()
+    facts = _attribute(
+        _facts(conn, period["starts_at"], period["ends_at"], categories), plan,
+    )
+    elapsed, total_days = _elapsed(period, today)
 
     on_plan_ids = {
         member["user_id"]
@@ -88,10 +93,10 @@ def pulse(
             "without_norm": row["without_norm"],
             "rop_known": row["rop_known"],
             "rops": row["rop_list"],
-            **plans.pace(fact, row["plan"], *_elapsed(period, today)),
+            "brokers": _brokers(row, own, elapsed, total_days),
+            **plans.pace(fact, row["plan"], elapsed, total_days),
         })
 
-    elapsed, total_days = _elapsed(period, today)
     # Отделы сортируются по плану, а не по факту: экран отвечает на вопрос
     # «где сосредоточена цель», и отдел с самой большой целью должен быть
     # сверху даже в месяц, когда он не продал ничего.
@@ -124,7 +129,14 @@ def pulse(
             round(total_fact * total_days / elapsed, 2)
             if elapsed >= PROJECTION_MIN_DAYS else None
         ),
-        "coverage": _coverage(conn, period["starts_at"], period["ends_at"]),
+        "coverage": _coverage(
+            conn, period["starts_at"], period["ends_at"], categories,
+        ),
+        # Воронки, по которым собран факт. Экран обязан их назвать: план
+        # считается по «Покупателям», а на «Обзоре» рядом лежат числа по
+        # всем воронкам сразу, и два разных факта без подписи читаются как
+        # ошибка одного из них.
+        "funnels": _funnels(conn, categories),
         "currency": base_currency(),
         **plans.pace(total_fact, plan["plan"], elapsed, total_days),
     }
@@ -178,18 +190,32 @@ def _attribute(
     ]
 
 
-def _facts(conn, since: str, until: str) -> list[dict[str, Any]]:
+def _facts(
+    conn, since: str, until: str, categories: Sequence[int],
+) -> list[dict[str, Any]]:
     """Выигранные деньги периода по людям и отделам.
+
+    Только воронки плана: решение агентства от 07.09 — план несут
+    «Покупатели». Сделка собственника или новостройки в выполнение не
+    входит, потому что там другой чек и другая работа, и сложить их значило
+    бы мерить план фактом, собранным по другому правилу.
 
     Валюта учитывается так же, как в money(): сделки не в базовой валюте в
     сумму не входят — курса у витрины нет, и сложить их с рублями значит
     напечатать неверное число, а не приблизительное.
+
+    Имя берётся здесь же: строки по брокерам должны показать и того, кого в
+    плановом составе уже нет — уволенного в середине квартала, — иначе они
+    не сложатся в факт отдела.
     """
+    where, params = plans.category_filter("d", categories)
     return _rows(
         conn,
         f"""
         SELECT d.assigned_by_id AS user_id,
                u.department_id AS department_id,
+               u.name AS name,
+               u.is_active AS is_active,
                COUNT(*) AS deals,
                COALESCE(SUM(CASE WHEN {_money_of('d')} THEN d.opportunity ELSE 0 END), 0)
                    AS amount
@@ -197,18 +223,101 @@ def _facts(conn, since: str, until: str) -> list[dict[str, Any]]:
         JOIN v_user u ON u.user_id = d.assigned_by_id
         WHERE d.is_won = 1 AND d.closedate IS NOT NULL
           AND d.closedate >= :since AND d.closedate < :until
-        GROUP BY d.assigned_by_id, u.department_id
+          AND {where}
+        GROUP BY d.assigned_by_id, u.department_id, u.name, u.is_active
         """,
-        {"since": since, "until": until, "base": base_currency()},
+        {"since": since, "until": until, "base": base_currency(), **params},
     )
 
 
-def _coverage(conn, since: str, until: str) -> dict[str, Any]:
+def _brokers(
+    row: dict[str, Any],
+    own: list[dict[str, Any]],
+    elapsed: int,
+    total_days: int,
+) -> list[dict[str, Any]]:
+    """Выполнение плана по людям отдела.
+
+    В список входят и те, кого в плановом составе нет: уволенный в середине
+    квартала оставил отделу настоящие деньги, и без него строки не сложились
+    бы в факт отдела. Таблица, не сходящаяся со своим же итогом, хуже
+    отсутствующей — её один раз проверят и перестанут верить обеим.
+
+    Порядок: сначала те, кто несёт норму, по выполнению сверху вниз; за ними
+    остальные по деньгам. Так первым читается тот, о ком и ставился вопрос.
+    """
+    by_user = {fact["user_id"]: fact for fact in own}
+    rows = [
+        _broker_row(
+            member["user_id"], member["name"], member.get("role"),
+            member.get("plan"), by_user.pop(member["user_id"], None),
+            elapsed, total_days,
+        )
+        for member in row["members"]
+    ]
+    rows.extend(
+        _broker_row(
+            fact["user_id"], fact.get("name") or f"ID {fact['user_id']}",
+            None, None, fact, elapsed, total_days,
+        )
+        for fact in by_user.values()
+    )
+    with_norm = sorted(
+        (item for item in rows if item["plan"] is not None),
+        key=lambda item: -(item["plan_share"] or 0),
+    )
+    rest = sorted(
+        (item for item in rows if item["plan"] is None),
+        key=lambda item: -item["fact"],
+    )
+    return with_norm + rest
+
+
+def _broker_row(
+    user_id: int,
+    name: str,
+    role: str | None,
+    plan_amount: float | None,
+    fact: dict[str, Any] | None,
+    elapsed: int,
+    total_days: int,
+) -> dict[str, Any]:
+    amount = round(float(fact["amount"]), 2) if fact else 0.0
+    return {
+        "user_id": user_id,
+        "name": name,
+        "role": role,
+        # Человек, которого нет в плановом составе: уволен или переведён.
+        # Его деньги отделу засчитаны, и строка обязана это объяснить.
+        "in_roster": role is not None,
+        "deals": int(fact["deals"]) if fact else 0,
+        **plans.pace(amount, plan_amount, elapsed, total_days),
+    }
+
+
+def _funnels(conn, categories: Sequence[int]) -> list[dict[str, Any]]:
+    """Названия воронок плана — чтобы экран мог их назвать, а не номер."""
+    known = {row["category_id"]: row["name"] for row in metrics.pipelines(conn)}
+    return [
+        {"category_id": int(value),
+         "name": known.get(int(value)) or f"Воронка {int(value)}"}
+        for value in categories
+    ]
+
+
+def _coverage(
+    conn, since: str, until: str, categories: Sequence[int],
+) -> dict[str, Any]:
     """Покрытие поля суммы у выигранных сделок периода.
 
     Обязательно рядом с планом: при заполненности в 70 процентов выполнение
     занижено, а не «маленькое», и решение по такому числу принимается другое.
+
+    Считается по тем же воронкам, что и факт. Покрытие по всем сделкам
+    подряд отвечало бы на вопрос о данных, которых в этом плане нет, и
+    подпись под суммой описывала бы не эту сумму.
     """
+    where, params = plans.category_filter("v_deal", categories)
     row = _one(
         conn,
         f"""
@@ -218,8 +327,9 @@ def _coverage(conn, since: str, until: str) -> dict[str, Any]:
         FROM v_deal
         WHERE is_won = 1 AND closedate IS NOT NULL
           AND closedate >= :since AND closedate < :until
+          AND {where}
         """,
-        {"since": since, "until": until, "base": base_currency()},
+        {"since": since, "until": until, "base": base_currency(), **params},
     )
     deals = int(row.get("deals") or 0)
     foreign = int(row.get("foreign_deals") or 0)
