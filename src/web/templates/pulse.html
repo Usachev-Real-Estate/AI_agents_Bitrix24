@@ -72,7 +72,19 @@
             {% if not row.rop_known %}<span class="badge">без РОПа</span>{% endif %}
           </td>
           <td class="num">{{ row.plan | money(short=True) if row.plan else '—' }}</td>
-          <td class="num">{{ row.fact | money(short=True) }}</td>
+          {#
+            Деньги вне плана показываются в строке отдела, а не только в
+            итоге под таблицей. Иначе РОП, у которого крупную сделку закрыл
+            новичок без нормы, видит в своей строке почти ноль и делает
+            вывод, что отдел не заработал ничего.
+          #}
+          <td class="num">
+            {{ row.fact | money(short=True) }}
+            {% if row.others_fact %}
+              <div class="tile-delta num-note">+{{ row.others_fact | money(short=True) }}
+                вне плана</div>
+            {% endif %}
+          </td>
           <td class="num">
             {% if row.plan_share is not none %}
               <span class="{{ 'delta-down' if row.behind else 'delta-up' }}">

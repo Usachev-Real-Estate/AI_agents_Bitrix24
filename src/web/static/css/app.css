@@ -369,6 +369,15 @@ main { padding: 20px 24px 48px; max-width: 1560px; }
 }
 .aside-row b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
 
+/* Приписка под числом в правой колонке. Собственный класс нужен, потому
+   что .tile-delta — flex со своим выравниванием, и в ячейке с
+   text-align:right он прижимал бы текст влево. */
+.num-note {
+  justify-content: flex-end;
+  white-space: nowrap;
+  font-size: 11.5px;
+}
+
 /* ------------------------------------------------------------- таблицы */
 
 .table-wrap { overflow-x: auto; }
