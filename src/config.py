@@ -437,6 +437,19 @@ class Settings(BaseSettings):
         default="/dashboard",
         validation_alias="DASHBOARD_BASE_PATH",
     )
+    # --- Утренний дайджест «Пульса» ---
+    # Выключен по умолчанию: новая рассылка, которая начинает ходить людям
+    # сразу после выкатки, — это рассылка, которую никто не согласовывал.
+    pulse_digest_enabled: bool = Field(
+        default=False,
+        validation_alias="PULSE_DIGEST_ENABLED",
+    )
+    # Внешний адрес дашборда для ссылки в сообщении. Пустой — ссылки не будет:
+    # неверный адрес хуже отсутствующего, он выглядит рабочим.
+    pulse_digest_url: str = Field(
+        default="",
+        validation_alias="PULSE_DIGEST_URL",
+    )
     dashboard_session_ttl_hours: int = Field(
         default=12,
         validation_alias="DASHBOARD_SESSION_TTL_HOURS",

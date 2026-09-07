@@ -1,0 +1,307 @@
+"""Утренний дайджест «Пульса»: план, факт и темп — в Битрикс.
+
+Экран есть, но открывать его каждое утро никто не будет. Сообщение прочитают,
+поэтому расчёт тот же самый, а меняется только доставка: ``pulse.pulse``
+возвращает данные, здесь они превращаются в текст и адресуются людям.
+
+**Дайджест ведёт со вчерашнего дня, а не с итога.** Квартальный план меняется
+медленно, и сообщение «14,5 из 127,5, отстаём» будет одинаковым девяносто
+дней подряд — такое перестают читать на третий раз. Новость — это то, что
+случилось со вчера: сколько закрыли и на сколько. Итог идёт следом, одной
+строкой, как опора.
+
+**Каждому РОПу считается своё, на суженном соединении.** Можно было бы взять
+общий расчёт и отфильтровать отделы в Python, но тогда правильность держалась
+бы на внимательности: одна ошибка в условии — и РОП получает в сообщении
+чужой отдел. Здесь чужих данных нет в том, из чего собрано сообщение.
+
+**Отдел без опознанного РОПа не теряется молча.** Он попадает в сводку
+директору отдельной строкой — как в рассылке QC, по тем же соображениям:
+отчёт, не дошедший ни до кого, выглядит точно так же, как отчёт, в котором
+всё хорошо.
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+_SRC = Path(__file__).resolve().parent
+for extra in (_SRC, _SRC / "analytics", _SRC / "web"):
+    if str(extra) not in sys.path:
+        sys.path.insert(0, str(extra))
+
+import metrics  # noqa: E402
+import plans  # noqa: E402
+import pulse as pulse_metrics  # noqa: E402
+from config import get_settings, setup_logging  # noqa: E402
+from notify import send_user_chat_message_chunked  # noqa: E402
+from scope import Scope, scoped_session  # noqa: E402
+
+logger = logging.getLogger(__name__)
+
+MILLION = 1_000_000
+
+
+# --------------------------------------------------------------------------
+# форматирование
+# --------------------------------------------------------------------------
+
+def money(value: float | None) -> str:
+    """Сумма в миллионах. В сообщении рубли до копейки не нужны никому."""
+    if value is None:
+        return "—"
+    text = f"{value / MILLION:.1f}".replace(".", ",")
+    return f"{text} млн ₽"
+
+
+def percent(value: float | None) -> str:
+    if value is None:
+        return "—"
+    return f"{value:.1f}".rstrip("0").rstrip(".").replace(".", ",") + "%"
+
+
+def verdict(data: dict[str, Any]) -> str:
+    """Одно слово о темпе. Без него два процента рядом надо сравнивать в уме."""
+    if data.get("plan_share") is None:
+        return "плана нет"
+    if data["behind"]:
+        return "отстаём"
+    return "идём с опережением"
+
+
+def format_company(data: dict[str, Any], yesterday: dict[str, Any], url: str) -> str:
+    lines = [
+        f"📊 Пульс · {data['period']['label']}",
+        "",
+        _yesterday_line(yesterday),
+        f"Квартал: {money(data['fact'])} из {money(data['plan'])} — "
+        f"{percent(data['plan_share'])} плана при {percent(data['time_share'])} "
+        f"срока ({verdict(data)})",
+    ]
+    if data.get("projection"):
+        lines.append(f"Если темп не изменится: {money(data['projection'])}")
+    if data["others"]["fact"]:
+        lines.append(
+            f"Из факта у людей с нормой: {money(data['fact_on_plan'])}, "
+            f"остальное у тех, кому норму не ставили"
+        )
+
+    # Отдел без плана и без факта в сводку не попадает: строка «0,0 из —»
+    # ничего не сообщает и только удлиняет сообщение. Если план есть, отдел
+    # показывается всегда — ноль при живом плане это и есть новость.
+    lines += ["", "По отделам:"]
+    for row in data["departments"]:
+        if not row["plan"] and not row["fact"]:
+            continue
+        target = money(row["plan"]) if row["plan"] else "плана нет"
+        lines.append(
+            f"  {row['name']}: {money(row['fact'])} из {target} — "
+            f"{percent(row['plan_share'])}"
+        )
+
+    missing = data.get("departments_without_rop") or []
+    if missing:
+        lines += [
+            "",
+            f"Без опознанного РОПа: {', '.join(missing)} — "
+            f"эти отделы отчёт лично не получили.",
+        ]
+    return "\n".join(lines + _tail(data, url))
+
+
+def format_department(data: dict[str, Any], yesterday: dict[str, Any], url: str) -> str:
+    """Сообщение РОПу. Данные уже сужены соединением, фильтровать нечего."""
+    row = data["departments"][0] if data["departments"] else None
+    if row is None:
+        return ""
+    lines = [
+        f"📊 Пульс отдела «{row['name']}» · {data['period']['label']}",
+        "",
+        _yesterday_line(yesterday),
+        f"Квартал: {money(row['fact'])} из {money(row['plan'])} — "
+        f"{percent(row['plan_share'])} плана при {percent(row['time_share'])} "
+        f"срока ({verdict(row)})",
+    ]
+    if data.get("projection"):
+        lines.append(f"Если темп не изменится: {money(data['projection'])}")
+    if row["others_fact"]:
+        lines.append(
+            f"Из них {money(row['others_fact'])} закрыли люди без нормы — "
+            f"в план отдела это входит, но обещали не они"
+        )
+    lines.append(
+        f"Норму несут {row['on_plan']} чел., без нормы ещё {row['without_norm']}"
+    )
+    if not row["rop_known"]:
+        lines += [
+            "",
+            "В составе отдела не опознан руководитель: если вы план не несёте, "
+            "цель отдела завышена на одну норму. Скажите админу — поправим.",
+        ]
+    return "\n".join(lines + _tail(data, url))
+
+
+def _yesterday_line(yesterday: dict[str, Any]) -> str:
+    if not yesterday["deals"]:
+        return f"За {yesterday['label']} закрытых сделок нет."
+    return (
+        f"За {yesterday['label']} закрыто {yesterday['deals']} "
+        f"{_deals_word(yesterday['deals'])} на {money(yesterday['amount'])}."
+    )
+
+
+def _deals_word(count: int) -> str:
+    if count % 10 == 1 and count % 100 != 11:
+        return "сделка"
+    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        return "сделки"
+    return "сделок"
+
+
+def _tail(data: dict[str, Any], url: str) -> list[str]:
+    tail = []
+    coverage = data.get("coverage") or {}
+    # Покрытие показывается, только когда оно способно изменить решение.
+    # Строка «заполнено 97%» каждый день — это шум; «заполнено 68%» — повод
+    # не верить сумме.
+    if coverage.get("deals") and coverage.get("share", 100) < 90:
+        tail.append(
+            f"\n⚠ Сумма заполнена у {percent(coverage['share'])} выигранных сделок — "
+            f"факт занижен на невнесённые комиссии."
+        )
+    if url:
+        tail.append(f"\n{url}")
+    return tail
+
+
+# --------------------------------------------------------------------------
+# сбор и доставка
+# --------------------------------------------------------------------------
+
+def yesterday_window(now: datetime | None = None) -> dict[str, Any]:
+    """Прошлый РАБОЧИЙ день по московскому календарю.
+
+    В понедельник «вчера» — это пятница: сообщение про воскресенье, в котором
+    закономерно ничего не закрыто, обесценивает всю рассылку. Выходные при
+    этом не теряются — в понедельник окно накрывает их целиком.
+    """
+    now = now or datetime.now(metrics.BUSINESS_TZ)
+    end = datetime(now.year, now.month, now.day, tzinfo=metrics.BUSINESS_TZ)
+    start = end - timedelta(days=1)
+    while start.weekday() >= 5:
+        start -= timedelta(days=1)
+    label = (
+        "вчера" if (end - start).days == 1
+        else f"{start:%d.%m}–{end - timedelta(days=1):%d.%m}"
+    )
+    return {"since": _iso(start), "until": _iso(end), "label": label}
+
+
+def _iso(moment: datetime) -> str:
+    from datetime import timezone
+
+    return moment.astimezone(timezone.utc).isoformat()
+
+
+def closed_in(conn, window: dict[str, Any]) -> dict[str, Any]:
+    """Сколько закрыто за окно. Область видимости приходит соединением."""
+    from metrics import _money_of, _one, base_currency
+
+    row = _one(
+        conn,
+        f"""
+        SELECT COUNT(*) AS deals,
+               COALESCE(SUM(CASE WHEN {_money_of()} THEN opportunity ELSE 0 END), 0)
+                   AS amount
+        FROM v_deal
+        WHERE is_won = 1 AND closedate IS NOT NULL
+          AND closedate >= :since AND closedate < :until
+        """,
+        {"since": window["since"], "until": window["until"], "base": base_currency()},
+    )
+    return {**window, "deals": int(row.get("deals") or 0),
+            "amount": float(row.get("amount") or 0)}
+
+
+def build(period_code: str, url: str, now: datetime | None = None) -> list[dict[str, Any]]:
+    """Собрать все сообщения. Ничего не отправляет — это делает вызывающий."""
+    window = yesterday_window(now)
+    deliveries: list[dict[str, Any]] = []
+    settings = get_settings()
+
+    with scoped_session(Scope.everything()) as conn:
+        company = pulse_metrics.pulse(conn, period_code)
+        rops = metrics.rop_by_department(conn)
+        yesterday = closed_in(conn, window)
+
+    if settings.admin_user_id:
+        deliveries.append({
+            "user_id": int(settings.admin_user_id),
+            "name": "Директор",
+            "text": format_company(company, yesterday, url),
+        })
+
+    for row in company["departments"]:
+        rop = rops.get(row["department_id"])
+        if not rop:
+            logger.info(
+                "Отдел %s без опознанного РОПа — только в сводке директору",
+                row["name"],
+            )
+            continue
+        # Своё соединение на отдел: чужих данных нет в том, из чего собрано
+        # сообщение, а не отфильтровано из общего расчёта.
+        with scoped_session(Scope.departments([row["department_id"]])) as conn:
+            data = pulse_metrics.pulse(conn, period_code)
+            own_yesterday = closed_in(conn, window)
+        text = format_department(data, own_yesterday, url)
+        if text:
+            deliveries.append({
+                "user_id": int(rop["user_id"]),
+                "name": f"РОП {row['name']}",
+                "text": text,
+            })
+    return deliveries
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Утренний дайджест «Пульса»")
+    parser.add_argument("--period", default="", help="код квартала, по умолчанию текущий")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="показать сообщения, но не отправлять")
+    args = parser.parse_args()
+
+    settings = get_settings()
+    setup_logging(settings.log_level)
+    if not settings.pulse_digest_enabled:
+        logger.info("PULSE_DIGEST_ENABLED=false — дайджест выключен")
+        return 0
+
+    period_code = args.period or plans.quarter_code(
+        datetime.now(metrics.BUSINESS_TZ).date()
+    )
+    deliveries = build(period_code, settings.pulse_digest_url)
+    if not deliveries:
+        logger.warning("Ни одного адресата: проверьте ADMIN_USER_ID и список РОПов")
+        return 0
+
+    if settings.dry_run or args.dry_run:
+        for item in deliveries:
+            print(f"\n{'=' * 60}\n{item['name']} (user_id={item['user_id']})\n{'=' * 60}")
+            print(item["text"])
+        print(f"\nDRY_RUN: {len(deliveries)} сообщений НЕ отправлено")
+        return 0
+
+    for item in deliveries:
+        chunks = send_user_chat_message_chunked(item["user_id"], item["text"])
+        logger.info("Отправлено: %s (%s сообщ.)", item["name"], chunks)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

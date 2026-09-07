@@ -73,3 +73,12 @@
 #     Тегированные образы (b24-ai-auditor:latest для задач выше) не трогаются,
 #     поэтому флага -a у image prune здесь нет и быть не должно.
 0 0 * * 0 cd /home/Ai_agents_crm && scripts/cron_job.sh docker-prune bash -c "docker builder prune -af && docker image prune -f" >> logs/cron.log 2>&1
+
+# 19. Утренний дайджест «Пульса»: пн–пт в 9:00 МСК (06:00 UTC).
+#     Директору — сводка по компании, каждому РОПу — лично его отдел.
+#     Выключен, пока PULSE_DIGEST_ENABLED=false: рассылка, которая начинает
+#     ходить людям сразу после выкатки, — это рассылка, которую никто не
+#     согласовывал. Проверить текст, ничего не отправляя:
+#       docker run --rm --env-file .env -v $(pwd)/data:/app/data \
+#         b24-ai-auditor:latest python src/pulse_digest.py --dry-run
+0 6 * * 1-5 cd /home/Ai_agents_crm && scripts/cron_job.sh pulse-digest docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/pulse_digest.py >> logs/cron.log 2>&1
