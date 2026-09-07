@@ -291,3 +291,30 @@ def test_a_redirected_department_is_not_dropped_without_an_owner(agency, monkeyp
     deliveries = pulse_digest.build(Q3, URL)
     assert all("Волкова" not in d["name"] for d in deliveries)
     assert all(d["user_id"] != 9 for d in deliveries)
+
+
+def test_a_rop_moved_by_the_roster_is_addressed(agency):
+    """Руководитель, переставленный ростером, получает отчёт своего отдела.
+
+    Ровно это и сломалось на боевом сервере. Рассылка спрашивала портал
+    напрямую, а портал считает руководителем того, кто в отделе ЧИСЛИТСЯ.
+    Волкова числится в служебном «Битриксе», ростер вернул её в отдел 50 —
+    на экране состав стал верным, а отчёт отдел молча перестал получать.
+    Теперь и состав, и адресация берутся из одного места.
+    """
+    with analytics_session() as conn:
+        _user(conn, 9, "Светлана Трофимова", "Трофимова", 99, "Битрикс")
+        conn.execute(
+            "INSERT INTO plan_roster(period_code, user_id, department_id,"
+            " plan_role, note, updated_at) VALUES ('*', 9, 50, 'rop', '', 'x')"
+        )
+
+    deliveries = pulse_digest.build(Q3, URL)
+
+    assert any(d["user_id"] == 9 for d in deliveries), (
+        "отдел остался без отчёта, хотя ростер вернул ему руководителя"
+    )
+    own = next(d for d in deliveries if d["user_id"] == 9)
+    assert "Пульс отдела «Волкова»" in own["text"]
+    boss = next(d for d in deliveries if d["user_id"] == 7)
+    assert "Без опознанного РОПа" not in boss["text"]

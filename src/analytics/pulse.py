@@ -87,6 +87,7 @@ def pulse(
             "on_plan": row["on_plan"],
             "without_norm": row["without_norm"],
             "rop_known": row["rop_known"],
+            "rops": row["rop_list"],
             **plans.pace(fact, row["plan"], *_elapsed(period, today)),
         })
 

@@ -244,7 +244,6 @@ def build(period_code: str, url: str, now: datetime | None = None) -> list[dict[
 
     with scoped_session(Scope.everything()) as conn:
         company = pulse_metrics.pulse(conn, period_code)
-        rops = metrics.rop_by_department(conn)
         yesterday = closed_in(conn, window)
 
     director = int(settings.admin_user_id or 0)
@@ -256,7 +255,12 @@ def build(period_code: str, url: str, now: datetime | None = None) -> list[dict[
         })
 
     for row in company["departments"]:
-        rop = rops.get(row["department_id"])
+        # РОП берётся из состава плана, а не из портала напрямую. Портал
+        # считает руководителем того, кто в отделе ЧИСЛИТСЯ; ростер знает,
+        # кто за отдел ОТВЕЧАЕТ. Спросив портал, рассылка не увидела бы
+        # руководителя, переставленного ростером, — и отдел молча остался бы
+        # без отчёта при исправленном составе на экране.
+        rop = row["rops"][0] if row["rops"] else None
         if not rop:
             logger.info(
                 "Отдел %s без опознанного РОПа — только в сводке директору",

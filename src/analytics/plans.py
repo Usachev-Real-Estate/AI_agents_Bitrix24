@@ -260,7 +260,7 @@ def headcount(
             "department_id": dept_id,
             "name": user["department_name"] or f"Отдел {dept_id}",
             "people": 0, "brokers": 0, "rops": 0, "excluded": 0,
-            "rop_names": [], "overridden": 0, "members": [],
+            "rop_list": [], "overridden": 0, "members": [],
         })
         # Название отдела берётся у того, кто в нём действительно числится:
         # у перенесённого ростером РОПа в карточке стоит чужое подразделение.
@@ -275,7 +275,16 @@ def headcount(
             bucket["overridden"] += 1
         if role == ROLE_ROP:
             bucket["rops"] += 1
-            bucket["rop_names"].append(user["name"])
+            # Поимённо, а не счётчиком: рассылке нужно, кому именно писать, и
+            # брать это из другого источника нельзя. Портал считает РОПом
+            # того, кто числится в отделе, ростер — того, кто за отдел
+            # отвечает. Два ответа на один вопрос рано или поздно разойдутся,
+            # и разойдутся молча: отдел просто перестанет получать отчёт.
+            bucket["rop_list"].append({
+                "user_id": user["user_id"],
+                "name": user["name"],
+                "surname": (user["last_name"] or "").strip().lower(),
+            })
         elif role == ROLE_EXCLUDED:
             bucket["excluded"] += 1
         else:
