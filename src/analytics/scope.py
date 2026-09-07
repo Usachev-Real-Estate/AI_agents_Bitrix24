@@ -107,12 +107,17 @@ _VIEW_DDL = (
        OR (e.entity_type = 'deal' AND e.entity_id IN (SELECT deal_id FROM scope_deal))
        OR (e.entity_type = 'lead' AND e.entity_id IN (SELECT lead_id FROM scope_lead))
     """,
-    # Последнее условие — про людей, которых ростер плана приписал к этому
-    # отделу. В портале РОП сплошь и рядом числится не там, где работает:
-    # руководитель отдела «Волкова» сидит в служебном подразделении
-    # «Битрикс». Без этой строки её РОП не увидел бы в своём составе
-    # собственного руководителя, и отдел так и остался бы «без РОПа» —
-    # ровно та поломка, которую ростер и заводился чинить.
+    # Отдел человека берётся из user_home, а не из карточки. В портале РОП
+    # сплошь и рядом числится не там, где работает: руководитель отдела
+    # «Волкова» сидит в служебном подразделении «Битрикс». По карточке её
+    # РОП не увидел бы в своём составе собственного руководителя, и отдел
+    # так и остался бы «без РОПа» — ровно та поломка, которую ростер и
+    # заводился чинить.
+    #
+    # Условие ЗАМЕЩАЮЩЕЕ, а не дополнительное: человек виден одному отделу —
+    # тому, которому его приписали. Дополнительное показывало бы его и
+    # старому отделу тоже, а тот, не видя строки ростера, посчитал бы его
+    # своим и ждал бы от него денег, которые уже уходят в новый отдел.
     #
     # Утечкой это не является: строки ростера пишет администратор, и
     # приписать человека к отделу — сознательное решение о том, чей он.
@@ -120,10 +125,8 @@ _VIEW_DDL = (
     CREATE TEMP VIEW v_user AS
     SELECT u.* FROM dim_user u
     WHERE (SELECT unrestricted FROM scope_flag) = 1
-       OR u.department_id IN (SELECT department_id FROM scope_department)
-       OR u.user_id IN (SELECT r.user_id FROM plan_roster r
-                        WHERE r.department_id IN
-                              (SELECT department_id FROM scope_department))
+       OR (SELECT h.department_id FROM user_home h WHERE h.user_id = u.user_id)
+           IN (SELECT department_id FROM scope_department)
     """,
     # Единственное представление, СОЗНАТЕЛЬНО не суженное по отделу, — норма
     # времени на стадии по всей воронке.
@@ -163,12 +166,8 @@ _VIEW_DDL = (
        OR (n.scope_kind = 'department'
            AND n.scope_id IN (SELECT department_id FROM scope_department))
        OR (n.scope_kind = 'user'
-           AND COALESCE(
-                 (SELECT r.department_id FROM plan_roster r
-                  WHERE r.user_id = n.scope_id AND r.department_id IS NOT NULL
-                  LIMIT 1),
-                 (SELECT u.department_id FROM dim_user u WHERE u.user_id = n.scope_id)
-               ) IN (SELECT department_id FROM scope_department))
+           AND (SELECT h.department_id FROM user_home h WHERE h.user_id = n.scope_id)
+               IN (SELECT department_id FROM scope_department))
     """,
     # Ручной ростер планового состава. Строка адресная — в ней конкретный
     # человек, — поэтому сужается по отделу. Отдел берётся из самой строки,
@@ -179,10 +178,8 @@ _VIEW_DDL = (
     CREATE TEMP VIEW v_plan_roster AS
     SELECT r.* FROM plan_roster r
     WHERE (SELECT unrestricted FROM scope_flag) = 1
-       OR COALESCE(
-              r.department_id,
-              (SELECT u.department_id FROM dim_user u WHERE u.user_id = r.user_id)
-          ) IN (SELECT department_id FROM scope_department)
+       OR (SELECT h.department_id FROM user_home h WHERE h.user_id = r.user_id)
+           IN (SELECT department_id FROM scope_department)
     """,
     # Периоды плана не сужаются: это календарь, в нём нет ни людей, ни денег.
     """
@@ -207,6 +204,7 @@ def apply_scope(conn, scope: Scope) -> None:
     conn.execute("CREATE TEMP TABLE scope_department (department_id INTEGER PRIMARY KEY)")
     conn.execute("CREATE TEMP TABLE scope_deal (deal_id INTEGER PRIMARY KEY)")
     conn.execute("CREATE TEMP TABLE scope_lead (lead_id INTEGER PRIMARY KEY)")
+    _user_home(conn)
 
     if not scope.unrestricted and scope.department_ids:
         placeholders = ",".join("?" * len(scope.department_ids))
@@ -218,12 +216,18 @@ def apply_scope(conn, scope: Scope) -> None:
         # назначений Bitrix не отдаёт. Карточка без ответственного не
         # принадлежит ни одному отделу и РОПам не видна; в общем доступе
         # она есть, и страница «Качество данных» такие карточки считает.
+        #
+        # Отдел берётся из user_home, то есть с учётом ростера. Иначе
+        # состав отдела и его деньги расходились бы: человек, приписанный
+        # ростером, попадал бы в план отдела, а его сделки оставались бы
+        # видны только прежнему. У нового отдела выполнение занижено, у
+        # прежнего завышено, и оба числа выглядят правдоподобно.
         conn.execute(
             f"""
             INSERT INTO scope_deal(deal_id)
             SELECT d.deal_id FROM fact_deal d
-            JOIN dim_user u ON u.user_id = d.assigned_by_id
-            WHERE d.is_deleted = 0 AND u.department_id IN ({placeholders})
+            JOIN user_home h ON h.user_id = d.assigned_by_id
+            WHERE d.is_deleted = 0 AND h.department_id IN ({placeholders})
             """,
             scope.department_ids,
         )
@@ -231,14 +235,54 @@ def apply_scope(conn, scope: Scope) -> None:
             f"""
             INSERT INTO scope_lead(lead_id)
             SELECT l.lead_id FROM fact_lead l
-            JOIN dim_user u ON u.user_id = l.assigned_by_id
-            WHERE l.is_deleted = 0 AND u.department_id IN ({placeholders})
+            JOIN user_home h ON h.user_id = l.assigned_by_id
+            WHERE l.is_deleted = 0 AND h.department_id IN ({placeholders})
             """,
             scope.department_ids,
         )
 
     for statement in _VIEW_DDL:
         conn.execute(statement)
+
+
+def _user_home(conn) -> None:
+    """Отдел каждого человека — один ответ на весь запрос.
+
+    Отделов у человека может быть названо два: подразделение в карточке
+    Битрикса и строка ростера, которой администратор сказал, за какой отдел
+    этот человек на самом деле работает. Ростер сильнее — он и заводился
+    затем, чтобы поправить портал, а не наоборот.
+
+    Правило вынесено в таблицу, а не повторено в каждом представлении, по
+    той же причине, по которой РОП берётся из состава плана: два места, где
+    считается «чей человек», однажды разойдутся, и разойдутся молча. Здесь
+    их четыре — видимость людей, видимость норм, видимость строк ростера и
+    отбор сделок, — и все четыре обязаны отвечать одинаково.
+
+    Строка периода перекрывает строку «на все периоды», а из нескольких
+    периодов побеждает поздний: ORDER BY, а не LIMIT 1 наугад — при двух
+    строках без него SQLite вернул бы любую, и область видимости РОПа
+    менялась бы от плана запроса.
+    """
+    conn.execute(
+        "CREATE TEMP TABLE user_home (user_id INTEGER PRIMARY KEY, department_id INTEGER)"
+    )
+    conn.execute(
+        """
+        INSERT INTO user_home(user_id, department_id)
+        SELECT ids.user_id,
+               COALESCE(
+                   (SELECT r.department_id FROM plan_roster r
+                     WHERE r.user_id = ids.user_id AND r.department_id IS NOT NULL
+                     ORDER BY r.period_code DESC LIMIT 1),
+                   (SELECT u.department_id FROM dim_user u
+                     WHERE u.user_id = ids.user_id)
+               )
+        FROM (SELECT user_id FROM dim_user
+              UNION
+              SELECT user_id FROM plan_roster) ids
+        """
+    )
 
 
 @contextmanager

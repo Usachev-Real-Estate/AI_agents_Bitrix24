@@ -49,7 +49,7 @@ def pulse(
     """
     period = plans.period(conn, period_code)
     plan = plans.plan(conn, period_code, metric)
-    facts = _facts(conn, period["starts_at"], period["ends_at"])
+    facts = _attribute(_facts(conn, period["starts_at"], period["ends_at"]), plan)
 
     on_plan_ids = {
         member["user_id"]
@@ -149,6 +149,33 @@ def _elapsed(period: dict[str, Any], today: str | None) -> tuple[int, int]:
     edge = min(tomorrow.astimezone(timezone.utc), ends)
     gone = plans.working_days(period["starts_at"], edge.isoformat())
     return min(max(gone, 0), total), total
+
+
+def _attribute(
+    facts: list[dict[str, Any]], plan: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Факт приписывается тому отделу, в котором человек несёт план.
+
+    Ростер переносит человека между отделами — так в состав плана попадает
+    РОП, числящийся в портале в чужом подразделении. Состав это учитывает, а
+    запрос факта видит только карточку в портале. Без этого шага норма
+    считалась бы одному отделу, а закрытые тем же человеком деньги — другому,
+    и оба отдела показали бы правдоподобную неправду: у одного выполнение
+    завышено, у другого занижено, и ни в одном из двух чисел ошибка не видна.
+
+    Кого в составе нет — уволенные в середине квартала, люди из отделов вне
+    продаж — остаются при отделе из портала. Деньги заработаны, и терять их
+    нельзя; если их отдела нет среди плановых, они и так не попадут никуда.
+    """
+    home = {
+        member["user_id"]: row["department_id"]
+        for row in plan["departments"]
+        for member in row["members"]
+    }
+    return [
+        {**fact, "department_id": home.get(fact["user_id"], fact["department_id"])}
+        for fact in facts
+    ]
 
 
 def _facts(conn, since: str, until: str) -> list[dict[str, Any]]:
