@@ -459,6 +459,18 @@ class Settings(BaseSettings):
         default="",
         validation_alias="PULSE_DIGEST_URL",
     )
+    # Воронки, сделки которых идут в план. Решение агентства от 07.09:
+    # только «Покупатели» (18).
+    #
+    # Настройкой, а не константой: воронки в портале заводят и закрывают, и
+    # день, когда план начнёт считаться по двум, наступит раньше, чем
+    # следующая выкатка. Пустой список означал бы «все воронки» — это
+    # молчаливое расширение плана, поэтому пустым он не бывает: разбор ниже
+    # падает обратно на [18], а не на «всё подряд».
+    pulse_category_ids_json: str = Field(
+        default='[18]',
+        validation_alias="PULSE_CATEGORY_IDS_JSON",
+    )
     dashboard_session_ttl_hours: int = Field(
         default=12,
         validation_alias="DASHBOARD_SESSION_TTL_HOURS",
@@ -593,6 +605,19 @@ class Settings(BaseSettings):
             else:
                 merged[key] = value
         return merged
+
+    @property
+    def pulse_category_ids(self) -> list[int]:
+        """Воронки плана. Никогда не пустой список — см. поле выше."""
+        raw = (self.pulse_category_ids_json or "").strip()
+        if raw:
+            try:
+                parsed = [int(x) for x in json.loads(raw)]
+                if parsed:
+                    return parsed
+            except Exception:
+                pass
+        return [18]
 
     @property
     def broker_rating_sales_dept_ids(self) -> list[int]:

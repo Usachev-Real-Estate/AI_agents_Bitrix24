@@ -148,6 +148,29 @@ def test_the_director_gets_the_whole_company(agency):
     assert "10,0 млн ₽ из 9,0 млн ₽" in boss["text"]
 
 
+def test_the_message_names_the_funnel_it_counted(agency):
+    """Сводка обязана сказать, по какой воронке посчитана.
+
+    В день, когда список воронок меняется, число в сообщении меняется вместе
+    с ним. Объяснение должно стоять в заголовке, рядом с числом, — в сноске
+    его прочитают уже после того, как решат, что отчёт сломался.
+    """
+    with analytics_session() as conn:
+        conn.execute(
+            "INSERT INTO dim_pipeline(category_id, name, is_active, sort, synced_at)"
+            " VALUES (18, 'Покупатели', 1, 10, 'x')"
+        )
+        _won(conn, 1, 2, 1_000_000, "2026-08-10T09:00:00+00:00")
+
+    deliveries = pulse_digest.build(Q3, URL)
+
+    assert deliveries, "сообщений нет — проверять нечего"
+    for delivery in deliveries:
+        first = delivery["text"].splitlines()[0]
+        assert "«" in first and "»" in first, first
+        assert "Покупатели" in first, first
+
+
 def test_a_department_without_a_rop_is_named_not_dropped(agency):
     """Отчёт, не дошедший ни до кого, выглядит как отчёт без замечаний."""
     deliveries = pulse_digest.build(Q3, URL)

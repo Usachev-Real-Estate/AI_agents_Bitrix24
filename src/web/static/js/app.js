@@ -73,9 +73,26 @@
       function (mark) { clamp(mark, 'data-at', 'left'); });
   }
 
+  /* Ссылка с отдела в таблице открывает его блок ниже.
+   *
+   * Часть браузеров раскрывает <details> при переходе по якорю внутрь него
+   * сама, часть — нет, и на «части» экран работает через раз. Восемь строк
+   * дешевле, чем объяснять РОПу, что ссылка зависит от браузера. Без
+   * скрипта блок всё равно раскрывается кликом — это запасной путь, а не
+   * единственный.
+   */
+  function openTargetDetails() {
+    var id = (window.location.hash || '').replace('#', '');
+    if (!id) return;
+    var node = document.getElementById(id);
+    if (node && node.tagName === 'DETAILS') node.open = true;
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     applyCoverageWidths();
     applyPaceWidths();
+    openTargetDetails();
+    window.addEventListener('hashchange', openTargetDetails);
     renderAll();
     wireFilters();
     // Раскладка подписей зависит от ширины, поэтому перерисовываем целиком.
