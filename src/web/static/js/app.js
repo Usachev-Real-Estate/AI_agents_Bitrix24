@@ -58,8 +58,24 @@
     });
   }
 
+  /* Полоса выполнения и засечка срока — по той же причине, что и покрытие:
+   * инлайновый style в разметке запрещён политикой, а CSSOM ей не подчинён. */
+  function applyPaceWidths() {
+    function clamp(node, attribute, property) {
+      var value = parseFloat(node.getAttribute(attribute));
+      node.style[property] = (isFinite(value) ? Math.max(0, Math.min(100, value)) : 0) + '%';
+    }
+    Array.prototype.forEach.call(
+      document.querySelectorAll('.pace-fill[data-width]'),
+      function (bar) { clamp(bar, 'data-width', 'width'); });
+    Array.prototype.forEach.call(
+      document.querySelectorAll('.pace-mark[data-at]'),
+      function (mark) { clamp(mark, 'data-at', 'left'); });
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     applyCoverageWidths();
+    applyPaceWidths();
     renderAll();
     wireFilters();
     // Раскладка подписей зависит от ширины, поэтому перерисовываем целиком.

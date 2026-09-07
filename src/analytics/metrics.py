@@ -191,6 +191,16 @@ def _share(part: float, whole: float) -> float:
     return round(100.0 * part / whole, 1) if whole else 0.0
 
 
+# Прогоны, по которым судят о свежести витрины. В etl_run пишут и задачи,
+# которые витрину из Bitrix не обновляют, — например часовая синхронизация
+# планов. Без этого отбора шапка каждой страницы показывала бы свежесть
+# последней такой задачи, и остановившийся ETL выглядел бы живым: ровно та
+# ошибка, от которой страница «Качество данных» и должна защищать.
+MART_RUN_KINDS: tuple[str, ...] = ("incremental", "full", "backfill")
+_MART_KIND_PARAMS = {f"kind{i}": kind for i, kind in enumerate(MART_RUN_KINDS)}
+_MART_KIND_SQL = ", ".join(f":{name}" for name in _MART_KIND_PARAMS)
+
+
 def _delta(current: float, previous: float) -> float | None:
     """Изменение в процентах. None, когда сравнивать не с чем."""
     if not previous:
@@ -651,6 +661,66 @@ def stuck_deals(
     limit: int = 50,
     department_id: int | None = None,
 ) -> list[dict[str, Any]]:
+    """Список зависших сделок для показа — самые долгие сверху, не длиннее limit.
+
+    Считать по этому списку итоги нельзя: он обрезан. Сумма денег на зависших
+    сделках — stuck_money(), она идёт по всем найденным, а не по показанным.
+    """
+    return _stuck_rows(conn, category_id, department_id)[:limit]
+
+
+def stuck_money(
+    conn,
+    category_id: int | None = None,
+    department_id: int | None = None,
+) -> dict[str, Any]:
+    """Сколько денег стоит на зависших сделках — по ВСЕМ, а не по показанным.
+
+    Отдельная функция, а не сумма по stuck_deals(): тот список обрезан по
+    limit ради страницы, и сложение его строк давало бы деньги пятидесяти
+    самых долгих сделок под подписью «деньги на зависших». Число выглядело бы
+    правдоподобно и было бы занижено ровно настолько, насколько зависших
+    больше полусотни.
+
+    Валюта учитывается так же, как в money(): сделки не в базовой валюте в
+    сумму не входят и считаются отдельно. Покрытие рядом с суммой обязательно
+    — зависшая сделка с незаполненной комиссией это не ноль рублей риска.
+
+    category_id=None — по всем воронкам: норма стадии у каждой воронки своя,
+    поэтому считается пововоронночно и складывается, а не одним запросом.
+    """
+    categories = (
+        [category_id] if category_id is not None
+        else [row["category_id"] for row in pipelines(conn)]
+    )
+    base = base_currency()
+    amount, deals, filled, foreign = 0.0, 0, 0, 0
+    for cat in categories:
+        for row in _stuck_rows(conn, cat, department_id):
+            deals += 1
+            currency = (row.get("currency_id") or "").strip().upper()
+            if currency and currency != base:
+                foreign += 1
+                continue
+            value = float(row.get("opportunity") or 0)
+            if value > 0:
+                filled += 1
+            amount += value
+    return {
+        "amount": round(amount, 0),
+        "deals": deals,
+        "filled": filled,
+        "coverage": _share(filled, deals - foreign),
+        "foreign": foreign,
+        "currency": base,
+    }
+
+
+def _stuck_rows(
+    conn,
+    category_id: int,
+    department_id: int | None = None,
+) -> list[dict[str, Any]]:
     """Сделки, стоящие на стадии дольше, чем p75 этой же стадии.
 
     Порог берётся из собственных данных воронки, а не из выдуманного числа
@@ -674,7 +744,8 @@ def stuck_deals(
     rows = _rows(
         conn,
         """
-        SELECT d.deal_id, d.title, d.stage_id, d.opportunity, d.assigned_by_id,
+        SELECT d.deal_id, d.title, d.stage_id, d.opportunity, d.currency_id,
+               d.assigned_by_id,
                COALESCE(s.name, d.stage_id) AS stage_name,
                COALESCE(u.name, '') AS assignee,
                COALESCE(u.department_name, '') AS department,
@@ -705,7 +776,7 @@ def stuck_deals(
         row["threshold_days"] = round(threshold, 1)
         row["threshold_source"] = "стадия" if own else "воронка"
         stuck.append(row)
-    return stuck[:limit]
+    return stuck
 
 
 # --------------------------------------------------------------------------
@@ -1455,9 +1526,19 @@ def etl_status(conn) -> dict[str, Any]:
     runs = _rows(
         conn,
         "SELECT kind, entity, started_at, finished_at, status, rows_upserted, error "
-        "FROM etl_run ORDER BY id DESC LIMIT 20",
+        "FROM etl_run ORDER BY id DESC LIMIT 40",
     )
-    last_ok = next((r for r in runs if r["status"] == "ok"), None)
+    # Последний успешный прогон ищется запросом, а не перебором показанных
+    # строк: список выше обрезан по LIMIT ради страницы, и при частых чужих
+    # прогонах настоящий ETL из него просто выпал бы. Тогда шапка сказала бы
+    # «данные не загружались» при живой витрине.
+    last_ok = _one(
+        conn,
+        "SELECT kind, entity, started_at, finished_at, status, rows_upserted, error "
+        f"FROM etl_run WHERE status = 'ok' AND kind IN ({_MART_KIND_SQL}) "
+        "ORDER BY id DESC LIMIT 1",
+        _MART_KIND_PARAMS,
+    ) or None
     lag_minutes = None
     if last_ok and last_ok["finished_at"]:
         try:

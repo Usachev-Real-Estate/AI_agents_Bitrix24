@@ -312,14 +312,21 @@ def test_metrics_never_touch_raw_tables_directly():
     import re
     from pathlib import Path
 
-    source = (Path(__file__).resolve().parent.parent
-              / "src" / "analytics" / "metrics.py").read_text(encoding="utf-8")
-    forbidden = ("fact_deal", "fact_lead", "fact_stage_event", "dim_user")
-    found = {name for name in forbidden if re.search(rf"\b{name}\b", source)}
-    assert not found, (
-        f"metrics.py обращается к таблицам мимо представлений: {sorted(found)}. "
-        "Используйте v_deal / v_lead / v_stage_event / v_user."
+    analytics = Path(__file__).resolve().parent.parent / "src" / "analytics"
+    # Список файлов и список таблиц растут вместе: новая адресная таблица без
+    # строки здесь защищена только памятью следующего разработчика.
+    forbidden = (
+        "fact_deal", "fact_lead", "fact_stage_event", "dim_user",
+        "plan_norm", "plan_roster",
     )
+    for name in ("metrics.py", "plans.py", "pulse.py"):
+        source = (analytics / name).read_text(encoding="utf-8")
+        found = {table for table in forbidden if re.search(rf"\b{table}\b", source)}
+        assert not found, (
+            f"{name} обращается к таблицам мимо представлений: {sorted(found)}. "
+            "Используйте v_deal / v_lead / v_stage_event / v_user / "
+            "v_plan_norm / v_plan_roster."
+        )
 
 
 def test_scoped_views_exist_only_on_a_scoped_connection(analytics_db):

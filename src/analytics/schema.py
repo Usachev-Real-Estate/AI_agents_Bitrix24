@@ -25,7 +25,7 @@ DEFAULT_DB_PATH = Path("data/analytics.db")
 # запас, что и основная база проекта.
 BUSY_TIMEOUT_MS = 10_000
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Семантика стадии. Без неё нельзя посчитать ни конверсию, ни win rate:
 # «выиграно» и «проиграно» надо отличать от «в работе», а по одному только
@@ -144,6 +144,58 @@ _DDL: tuple[str, ...] = (
         duration_sec INTEGER,
         seq          INTEGER NOT NULL,
         UNIQUE (entity_type, entity_id, seq)
+    );
+    """,
+    # ---------- план ----------
+    # Период объявляется агентством, а не выводится из календаря. Пресет
+    # 'quarter' в metrics.resolve_period даёт «квартал по сегодня», и планом
+    # он быть не может: в первый день квартала выполнение вышло бы 100%.
+    """
+    CREATE TABLE IF NOT EXISTS plan_period (
+        period_code TEXT PRIMARY KEY,
+        starts_at   TEXT NOT NULL,
+        ends_at     TEXT NOT NULL,
+        label       TEXT NOT NULL DEFAULT '',
+        updated_at  TEXT NOT NULL
+    );
+    """,
+    # Норма, а не готовая сумма. План агентства — «4,5 млн на брокера за
+    # квартал», то есть он ВЫЧИСЛЯЕТСЯ из штата и меняется вместе с ним.
+    # Хранить посчитанное число значит завести второй источник правды,
+    # который разойдётся с первым в первый же наём.
+    #
+    # scope_id = 0 для компании, а не NULL: в SQLite несколько NULL в
+    # первичном ключе считаются разными значениями, и строка компании
+    # завелась бы заново при каждой синхронизации.
+    """
+    CREATE TABLE IF NOT EXISTS plan_norm (
+        period_code TEXT    NOT NULL,
+        scope_kind  TEXT    NOT NULL,
+        scope_id    INTEGER NOT NULL DEFAULT 0,
+        metric      TEXT    NOT NULL,
+        basis       TEXT    NOT NULL DEFAULT 'per_broker',
+        amount      REAL    NOT NULL,
+        source      TEXT    NOT NULL DEFAULT 'sheet',
+        updated_at  TEXT    NOT NULL,
+        PRIMARY KEY (period_code, scope_kind, scope_id, metric)
+    );
+    """,
+    # Ручные исключения из планового состава. Без них состав нельзя починить
+    # там, где портал говорит неправду: РОП, числящийся в служебном отделе,
+    # отключённая учётка РОПа при живом отделе, стажёр, которому норму ещё
+    # не ставят. Правка фамилии в Битриксе ради отчёта — цена выше ошибки.
+    #
+    # department_id перекрывает отдел из dim_user: это и есть случай РОПа,
+    # административно приписанного не к своему подразделению.
+    """
+    CREATE TABLE IF NOT EXISTS plan_roster (
+        period_code   TEXT    NOT NULL,
+        user_id       INTEGER NOT NULL,
+        department_id INTEGER,
+        plan_role     TEXT    NOT NULL,
+        note          TEXT    NOT NULL DEFAULT '',
+        updated_at    TEXT    NOT NULL,
+        PRIMARY KEY (period_code, user_id)
     );
     """,
     # ---------- служебные ----------

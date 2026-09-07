@@ -115,8 +115,8 @@ PERIOD = "?start=2026-08-01&end=2026-08-31&category=18"
 
 
 @pytest.mark.parametrize("path", [
-    "/", "/leads", "/deals", "/movement", "/people", "/objects", "/table",
-    "/quality",
+    "/", "/pulse", "/leads", "/deals", "/movement", "/people", "/objects",
+    "/table", "/quality",
 ])
 def test_every_page_renders(client, path):
     response = client.get(f"{BASE}{path}{PERIOD}")
@@ -197,8 +197,8 @@ def test_empty_warehouse_explains_itself_instead_of_crashing(analytics_db, monke
         "username": LOGIN, "password": PASSWORD,
         "csrf_token": session.cookies.get("dash_csrf"), "next": "",
     })
-    for path in ("/", "/deals", "/movement", "/leads", "/quality", "/table",
-                 "/objects"):
+    for path in ("/", "/pulse", "/deals", "/movement", "/leads", "/quality",
+                 "/table", "/objects"):
         response = session.get(f"{BASE}{path}")
         assert response.status_code == 200, f"{path}: {response.text[:400]}"
     assert "ETL ещё ни разу не отработал" in session.get(f"{BASE}/").text

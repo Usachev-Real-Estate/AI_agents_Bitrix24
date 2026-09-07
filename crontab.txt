@@ -50,10 +50,21 @@
 # 14. Первый перенос в Общую базу: 13.08.2026 19:05 МСК (16:05 UTC). После этой даты перенос идёт на штатных 10:00/17:00.
 5 16 13 8 * cd /home/Ai_agents_crm && scripts/cron_job.sh general-base-first-move docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest >> logs/cron.log 2>&1
 
-# 15. QC-агент «состояние клиентов»: ежедневно в 12:00 МСК (09:00 UTC), пн–пт.
-#     Каждому РОПу — лично его отдел; подразделение Волковой и карточки без
+# 15. QC-агент «состояние клиентов» — ПИЛОТ ЗАВЕРШЁН, задача выключена.
+#
+#     Работал с 20.08 по 01.09.2026, оставил 795 строк в client_states.
+#     Решение агентства от 07.09: в расписание пока не возвращать.
+#
+#     Строка сохранена, а не удалена: скрипт и его рассылка живы, и
+#     возобновление — это снятие решётки, а не восстановление задачи по
+#     памяти. Расписание было: ежедневно в 12:00 МСК (09:00 UTC), пн–пт;
+#     каждому РОПу лично его отдел, подразделение Волковой и карточки без
 #     определённого РОПа — в чат 22358 отдельными сообщениями.
-0 9 * * 1-5 cd /home/Ai_agents_crm && scripts/cron_job.sh client-state-qc docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python scripts/run_client_state_qc_pilot.py >> logs/cron.log 2>&1
+#
+#     Раскомментировать — значит включить рассылку людям на следующий же
+#     рабочий день. Перед этим стоит прогнать вручную и посмотреть, что
+#     агент говорит после трёх недель простоя.
+# 0 9 * * 1-5 cd /home/Ai_agents_crm && scripts/cron_job.sh client-state-qc docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python scripts/run_client_state_qc_pilot.py >> logs/cron.log 2>&1
 
 # 16. Аналитическая витрина: догрузка изменённого — каждые 15 минут.
 #     Дашборд читает витрину, а не Bitrix, поэтому от свежести этой задачи
@@ -73,3 +84,12 @@
 #     Тегированные образы (b24-ai-auditor:latest для задач выше) не трогаются,
 #     поэтому флага -a у image prune здесь нет и быть не должно.
 0 0 * * 0 cd /home/Ai_agents_crm && scripts/cron_job.sh docker-prune bash -c "docker builder prune -af && docker image prune -f" >> logs/cron.log 2>&1
+
+# 19. Утренний дайджест «Пульса»: пн–пт в 9:00 МСК (06:00 UTC).
+#     Директору — сводка по компании, каждому РОПу — лично его отдел.
+#     Выключен, пока PULSE_DIGEST_ENABLED=false: рассылка, которая начинает
+#     ходить людям сразу после выкатки, — это рассылка, которую никто не
+#     согласовывал. Проверить текст, ничего не отправляя:
+#       docker run --rm --env-file .env -v $(pwd)/data:/app/data \
+#         b24-ai-auditor:latest python src/pulse_digest.py --dry-run
+0 6 * * 1-5 cd /home/Ai_agents_crm && scripts/cron_job.sh pulse-digest docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/pulse_digest.py >> logs/cron.log 2>&1
