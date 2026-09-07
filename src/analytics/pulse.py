@@ -41,12 +41,18 @@ def pulse(
     period_code: str,
     metric: str = plans.METRIC_COMMISSION,
     today: str | None = None,
+    with_stuck: bool = False,
 ) -> dict[str, Any]:
     """План, факт и темп квартала — по компании и по отделам.
 
     ``today`` задаёт правую границу прошедшего срока; None — сейчас. Параметр
     существует ради тестов и ради дайджеста, который считает вчерашний день
     закрытым: в 9 утра «прошло дней» не должно прыгать вместе с часами.
+
+    ``with_stuck`` добавляет деньги, стоящие на зависших сделках, — по
+    компании и по отделам. Не по умолчанию: расчёт перебирает стадии каждой
+    воронки, а дайджест собирает «Пульс» шесть раз подряд, и платить за
+    перебор там, где число не печатается, незачем.
     """
     period = plans.period(conn, period_code)
     plan = plans.plan(conn, period_code, metric)
@@ -94,8 +100,22 @@ def pulse(
             "rop_known": row["rop_known"],
             "rops": row["rop_list"],
             "brokers": _brokers(row, own, elapsed, total_days),
+            "stuck": (
+                _stuck(conn, categories, row["department_id"]) if with_stuck else None
+            ),
             **plans.pace(fact, row["plan"], elapsed, total_days),
         })
+
+    # Простейший прогноз: сколько выйдет, если темп не изменится. Он и
+    # подписан именно так. Взвешенный прогноз по стадиям честнее, но требует
+    # своей функции и своего покрытия; линейный не притворяется чем-то
+    # большим, а до конца квартала отвечает на вопрос «успеваем ли» ровно
+    # так же. None до пятого рабочего дня: делить на долю срока размером в
+    # три дня значит печатать случайное число крупным шрифтом.
+    projection = (
+        round(total_fact * total_days / elapsed, 2)
+        if elapsed >= PROJECTION_MIN_DAYS else None
+    )
 
     # Отделы сортируются по плану, а не по факту: экран отвечает на вопрос
     # «где сосредоточена цель», и отдел с самой большой целью должен быть
@@ -119,16 +139,7 @@ def pulse(
             "deals": others_deals,
             "people": sum(row["without_norm"] for row in plan["departments"]),
         },
-        # Простейший прогноз: сколько выйдет, если темп не изменится. Он и
-        # подписан именно так. Взвешенный прогноз по стадиям честнее, но
-        # требует своей функции и своего покрытия; линейный не притворяется
-        # чем-то большим, а до конца квартала отвечает на вопрос «успеваем ли»
-        # ровно так же. None до пятого рабочего дня: делить на долю срока
-        # размером в три дня значит печатать случайное число крупным шрифтом.
-        "projection": (
-            round(total_fact * total_days / elapsed, 2)
-            if elapsed >= PROJECTION_MIN_DAYS else None
-        ),
+        "projection": projection,
         "coverage": _coverage(
             conn, period["starts_at"], period["ends_at"], categories,
         ),
@@ -137,6 +148,17 @@ def pulse(
         # всем воронкам сразу, и два разных факта без подписи читаются как
         # ошибка одного из них.
         "funnels": _funnels(conn, categories),
+        # Рубеж безубыточности рядом с планом-планкой. Планка отвечает «к
+        # чему тянемся» и держится красной весь квартал; рубеж отвечает
+        # «доживём ли» и движется от каждой сделки. None — если расходы и
+        # доля не заданы: выдуманный порог хуже отсутствующего.
+        "breakeven": plans.breakeven(
+            total_fact, projection, period["starts_at"], period["ends_at"],
+        ),
+        # Деньги, переставшие двигаться. Это и есть ответ на вопрос «куда
+        # поднажать»: не отдел с худшим процентом, а сделки, стоящие дольше
+        # нормы своей стадии, с суммой на них.
+        "stuck": _stuck(conn, categories, None) if with_stuck else None,
         "currency": base_currency(),
         **plans.pace(total_fact, plan["plan"], elapsed, total_days),
     }
@@ -292,6 +314,32 @@ def _broker_row(
         "in_roster": role is not None,
         "deals": int(fact["deals"]) if fact else 0,
         **plans.pace(amount, plan_amount, elapsed, total_days),
+    }
+
+
+def _stuck(
+    conn, categories: Sequence[int], department_id: int | None,
+) -> dict[str, Any]:
+    """Деньги на зависших сделках воронок плана.
+
+    Зависшая — стоящая на стадии дольше 75-го перцентиля этой же стадии.
+    Порог берётся из данных самой воронки, а не из выдуманного числа дней: у
+    «Подбора» и «Офера» нормальный срок разный.
+
+    Считается по всем найденным, а не по показанным пятидесяти: сумма по
+    обрезанному списку выглядела бы правдоподобно и была бы занижена ровно
+    настолько, насколько зависших больше полусотни.
+    """
+    total = {"amount": 0.0, "deals": 0, "filled": 0, "foreign": 0}
+    for category_id in categories:
+        part = metrics.stuck_money(conn, category_id, department_id)
+        for key in ("amount", "deals", "filled", "foreign"):
+            total[key] += part[key]
+    return {
+        **total,
+        "amount": round(total["amount"], 0),
+        "coverage": _share(total["filled"], total["deals"] - total["foreign"]),
+        "currency": base_currency(),
     }
 
 

@@ -98,6 +98,7 @@ def format_company(data: dict[str, Any], yesterday: dict[str, Any], url: str) ->
             f"Из факта у людей с нормой: {money(data['fact_on_plan'])}, "
             f"остальное у тех, кому норму не ставили"
         )
+    lines += _breakeven_lines(data) + _stuck_lines(data, company=True)
 
     # Отдел без плана и без факта в сводку не попадает: строка «0,0 из —»
     # ничего не сообщает и только удлиняет сообщение. Если план есть, отдел
@@ -146,6 +147,7 @@ def format_department(data: dict[str, Any], yesterday: dict[str, Any], url: str)
     lines.append(
         f"Норму несут {row['on_plan']} чел., без нормы ещё {row['without_norm']}"
     )
+    lines += _stuck_lines(data, company=False)
     if not row["rop_known"]:
         lines += [
             "",
@@ -153,6 +155,58 @@ def format_department(data: dict[str, Any], yesterday: dict[str, Any], url: str)
             "цель отдела завышена на одну норму. Скажите админу — поправим.",
         ]
     return "\n".join(lines + _tail(data, url))
+
+
+def _breakeven_lines(data: dict[str, Any]) -> list[str]:
+    """Рубеж безубыточности словами. Пусто, если расходы не заданы.
+
+    Процент выполнения планки красный весь квартал по замыслу, и по нему
+    нельзя понять, идём мы к нулю или под него. Эта строка отвечает именно
+    на этот вопрос — и меняется от каждой сделки, в отличие от процента.
+    """
+    edge = data.get("breakeven")
+    if not edge:
+        return []
+    if edge["gap"] is None:
+        return [
+            f"Рубеж безубыточности периода {money(edge['gross'])}, "
+            f"пройдено {percent(edge['share'])}"
+        ]
+    if edge["reaches"]:
+        return [
+            f"Безубыточность: при нынешнем темпе пройдём с запасом "
+            f"{money(edge['gap'])}"
+        ]
+    return [
+        f"⚠ Безубыточность: при нынешнем темпе НЕ дотянем "
+        f"{money(-edge['gap'])} до {money(edge['gross'])}"
+    ]
+
+
+def _stuck_lines(data: dict[str, Any], company: bool) -> list[str]:
+    """Где остановились деньги. Ответ на «куда поднажать».
+
+    Не отдел с худшим процентом, а сделки, стоящие на стадии дольше нормы
+    этой стадии, и сумма на них. Процент говорит, что уже случилось;
+    зависшие деньги — что можно сделать сегодня.
+    """
+    stuck = data.get("stuck")
+    if not stuck or not stuck["deals"]:
+        return []
+    head = (
+        f"Стоят без движения {money(stuck['amount'])} "
+        f"в {stuck['deals']} {_deals_word(stuck['deals'])}"
+    )
+    if not company:
+        return [head]
+    worst = max(
+        (row for row in data["departments"] if row.get("stuck")),
+        key=lambda row: row["stuck"]["amount"],
+        default=None,
+    )
+    if worst and worst["stuck"]["amount"]:
+        head += f"; больше всего у отдела «{worst['name']}» ({money(worst['stuck']['amount'])})"
+    return [head]
 
 
 def _funnel_note(data: dict[str, Any]) -> str:
@@ -264,7 +318,7 @@ def build(period_code: str, url: str, now: datetime | None = None) -> list[dict[
     settings = get_settings()
 
     with scoped_session(Scope.everything()) as conn:
-        company = pulse_metrics.pulse(conn, period_code)
+        company = pulse_metrics.pulse(conn, period_code, with_stuck=True)
         yesterday = closed_in(conn, window)
 
     # Владелец отчёта: своя настройка, с откатом на администратора.
@@ -292,7 +346,7 @@ def build(period_code: str, url: str, now: datetime | None = None) -> list[dict[
         # Своё соединение на отдел: чужих данных нет в том, из чего собрано
         # сообщение, а не отфильтровано из общего расчёта.
         with scoped_session(Scope.departments([row["department_id"]])) as conn:
-            data = pulse_metrics.pulse(conn, period_code)
+            data = pulse_metrics.pulse(conn, period_code, with_stuck=True)
             own_yesterday = closed_in(conn, window)
         text = format_department(data, own_yesterday, url)
         if not text:

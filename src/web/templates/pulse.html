@@ -36,6 +36,39 @@
   {% for f in p.funnels %}«{{ f.name }}»{{ ', ' if not loop.last }}{% endfor %}.
   Сделки остальных воронок в выполнение не входят.</p>
 
+{% if p.breakeven %}
+{#
+  Рубеж безубыточности рядом с планкой. Планка отвечает «к чему тянемся» и
+  держится красной весь квартал — по ней нельзя понять, идём мы к нулю или
+  под него. Этот блок отвечает на второй вопрос и меняется от каждой сделки.
+
+  Расходы и доля приходят настройкой из отчёта руководству: витрина знает
+  только доходы. Не заданы — блока нет вовсе, придуманного порога тут не
+  будет.
+#}
+<div class="notice {{ 'notice-bad' if p.breakeven.reaches is false else '' }} mt-14">
+  <span>{{ '⚠' if p.breakeven.reaches is false else '•' }}</span>
+  <span>
+    {% if p.projection %}
+      При нынешнем темпе период закроется на <b>{{ p.projection | money(short=True) }}</b>
+      — это {{ p.breakeven.projected_share | pct }} рубежа безубыточности
+      ({{ p.breakeven.gross | money(short=True) }}).
+      {% if p.breakeven.reaches %}
+        Рубеж будет пройден, запас {{ p.breakeven.gap | money(short=True) }}.
+      {% else %}
+        Не хватит около <b>{{ (0 - p.breakeven.gap) | money(short=True) }}</b>.
+      {% endif %}
+    {% else %}
+      Рубеж безубыточности периода — {{ p.breakeven.gross | money(short=True) }},
+      пройдено {{ p.breakeven.share | pct }}. Прогноз появится после пятого
+      рабочего дня.
+    {% endif %}
+    Считается от расходов {{ p.breakeven.monthly_costs | money(short=True) }} в месяц
+    и доли {{ (p.breakeven.net_share * 100) | pct }}, остающейся компании.
+  </span>
+</div>
+{% endif %}
+
 <div class="grid grid-kpi">
   {{ ui.plan_tile('Комиссия квартала', p.fact | money(short=True), p,
                   foot='планового состава: ' ~ p.brokers_on_plan ~ ' чел.') }}
@@ -156,6 +189,56 @@
     из факта сделали именно плановые люди, показано отдельной строкой. Темп — доля плана,
     делённая на долю срока в РАБОЧИХ днях: больше единицы значит опережение.') }}
 </div>
+
+{% if p.stuck and p.stuck.deals %}
+<h2 class="section-title">Где стоят деньги</h2>
+{#
+  Ответ на вопрос «куда поднажать» — не отдел с худшим процентом, а сделки,
+  переставшие двигаться. Зависшая сделка — стоящая на стадии дольше 75-го
+  перцентиля этой же стадии: порог берётся из данных воронки, а не из
+  выдуманного числа дней, потому что у «Подбора» и «Офера» нормальный срок
+  разный.
+
+  Сумма идёт по ВСЕМ зависшим, а не по полусотне, показанной на «Движении»:
+  иначе число было бы занижено ровно настолько, насколько их больше.
+#}
+<div class="card">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Отдел</th>
+          <th class="num">Денег стоит</th>
+          <th class="num">Сделок</th>
+          <th class="num">Сумма заполнена</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in p.departments if row.stuck and row.stuck.deals %}
+        <tr>
+          <td>{{ row.name }}</td>
+          <td class="num">{{ row.stuck.amount | money(short=True) }}</td>
+          <td class="num">{{ row.stuck.deals | int_ru }}</td>
+          <td class="num">{{ row.stuck.coverage | pct }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot>
+        <tr>
+          <td>Всего</td>
+          <td class="num">{{ p.stuck.amount | money(short=True) }}</td>
+          <td class="num">{{ p.stuck.deals | int_ru }}</td>
+          <td class="num">{{ p.stuck.coverage | pct }}</td>
+        </tr>
+      </tfoot>
+    </table>
+  </div>
+  {{ ui.definition('Зависшая сделка стоит на своей стадии дольше, чем три четверти
+    сделок этой же стадии. Это не просрочка и не вина — это место, где движение
+    остановилось, и деньги, которые за ним стоят. Сумма посчитана по всем таким
+    сделкам, а не по первым пятидесяти: список на «Движении» обрезан для показа.') }}
+</div>
+{% endif %}
 
 <h2 class="section-title">По брокерам</h2>
 {#

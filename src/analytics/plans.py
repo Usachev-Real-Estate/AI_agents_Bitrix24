@@ -196,6 +196,68 @@ def pace(
     }
 
 
+def months_in(since: str, until: str) -> int:
+    """Календарных месяцев в периоде [since, until).
+
+    Расходы живут месяцами, план — кварталами, и переводить одно в другое
+    делением на 30 дней нельзя: в квартале бывает 90 дней, бывает 92, а
+    расходов всегда три месяца.
+    """
+    start, end = _day_of(since), _day_of(until)
+    months = (end.year - start.year) * 12 + end.month - start.month
+    return max(months, 1)
+
+
+def breakeven(
+    fact: float,
+    projection: float | None,
+    since: str,
+    until: str,
+) -> dict[str, Any] | None:
+    """Рубеж безубыточности периода и расстояние до него.
+
+    Зачем рядом с планом. План агентства — намеренная планка (решение от
+    07.09): норма поставлена высоко, чтобы к ней тянулись, и выполнение по
+    ней держится в диапазоне 0–15% весь квартал. Число, которое не меняет
+    цвет от работы, перестают читать, а вместе с ним перестают читать и
+    остальной экран.
+
+    Рубеж отвечает на другой вопрос — не «к чему тянемся», а «доживём ли», —
+    и он движется от каждой сделки. Одно не заменяет другое: планка
+    остаётся целью для людей, рубеж нужен собственнику.
+
+    None, если расходы или доля не заданы. Выдуманный порог хуже
+    отсутствующего: по нему принимают решения о людях.
+    """
+    try:
+        from config import get_settings
+
+        settings = get_settings()
+        monthly, share = float(settings.pulse_monthly_costs), float(settings.pulse_net_share)
+    except Exception:  # pragma: no cover — конфиг недоступен в изолированных тестах
+        return None
+    if monthly <= 0 or not 0 < share <= 1:
+        return None
+
+    months = months_in(since, until)
+    gross = monthly * months / share
+    return {
+        "gross": round(gross, 0),
+        "share": round(100.0 * fact / gross, 1),
+        "left": round(max(gross - fact, 0.0), 0),
+        "projected_share": (
+            round(100.0 * projection / gross, 1) if projection is not None else None
+        ),
+        "reaches": None if projection is None else projection >= gross,
+        "gap": (
+            None if projection is None else round(projection - gross, 0)
+        ),
+        "monthly_costs": monthly,
+        "net_share": share,
+        "months": months,
+    }
+
+
 # --------------------------------------------------------------------------
 # состав
 # --------------------------------------------------------------------------
