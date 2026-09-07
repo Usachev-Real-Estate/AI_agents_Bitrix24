@@ -205,5 +205,8 @@ def test_the_digest_names_the_edge_and_the_frozen_money(frozen, costs):
 
     assert "Безубыточность" in boss
     assert "НЕ дотянем" in boss
-    assert "Стоят без движения" in boss
-    assert "3,0 млн ₽" in boss
+    # Впереди количество, а не сумма: сумма открытой сделки — намерение, а не
+    # деньги, и «стоят без движения 572,6 млн» на боевых данных читалось как
+    # «у нас полмиллиарда на столе».
+    assert "Не двигаются 1 сделка" in boss
+    assert "в карточках проставлено 3,0 млн ₽" in boss
