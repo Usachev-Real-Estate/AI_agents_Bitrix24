@@ -242,3 +242,52 @@ def test_a_disabled_digest_sends_nothing(agency, monkeypatch):
 
     monkeypatch.setattr(pulse_digest, "send_user_chat_message_chunked", _boom)
     assert pulse_digest.main(["--period", Q3]) == 0
+
+
+# --------------------------------------------------------------------------
+# отделы, которые разбирает не их руководитель
+# --------------------------------------------------------------------------
+
+def test_a_redirected_rop_gets_nothing_and_the_owner_gets_it(agency):
+    """Отчёт отдела Волковой уходит владельцу отчёта, а не ей самой.
+
+    Кто именно не получает лично — берётся из рассылки QC. Агентство решило
+    это один раз, и вторая рассылка обязана адресовать так же.
+    """
+    with analytics_session() as conn:
+        _user(conn, 9, "Вера Волкова", "Волкова", 50, "Волкова")
+
+    deliveries = pulse_digest.build(Q3, URL)
+    addressees = [(d["user_id"], d["name"]) for d in deliveries]
+
+    assert 9 not in [user_id for user_id, _ in addressees], (
+        "РОП из списка перенаправления личного сообщения не получает"
+    )
+    redirected = [d for d in deliveries if "→ директору" in d["name"]]
+    assert len(redirected) == 1
+    assert redirected[0]["user_id"] == 7, "ушло владельцу отчёта"
+    assert "Пульс отдела «Волкова»" in redirected[0]["text"]
+
+
+def test_an_ordinary_rop_still_gets_their_own(agency):
+    """Перенаправление точечное: остальные РОПы получают лично, как и раньше."""
+    with analytics_session() as conn:
+        _user(conn, 9, "Вера Волкова", "Волкова", 50, "Волкова")
+
+    deliveries = pulse_digest.build(Q3, URL)
+    assert any(d["user_id"] == 1 and d["name"] == "РОП Кретов" for d in deliveries)
+
+
+def test_a_redirected_department_is_not_dropped_without_an_owner(agency, monkeypatch):
+    """Без ADMIN_USER_ID отчёт не уходит никому — и об этом пишется в лог.
+
+    Тихо потерянный отдел выглядит как отдел без замечаний.
+    """
+    monkeypatch.setenv("ADMIN_USER_ID", "0")
+    get_settings.cache_clear()
+    with analytics_session() as conn:
+        _user(conn, 9, "Вера Волкова", "Волкова", 50, "Волкова")
+
+    deliveries = pulse_digest.build(Q3, URL)
+    assert all("Волкова" not in d["name"] for d in deliveries)
+    assert all(d["user_id"] != 9 for d in deliveries)

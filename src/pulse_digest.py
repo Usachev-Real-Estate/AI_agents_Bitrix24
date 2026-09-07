@@ -19,6 +19,13 @@
 директору отдельной строкой — как в рассылке QC, по тем же соображениям:
 отчёт, не дошедший ни до кого, выглядит точно так же, как отчёт, в котором
 всё хорошо.
+
+**Часть отделов разбирает не их руководитель.** Кто именно — берётся из
+рассылки QC (``ROP_TO_CHAT``), а не заводится здесь заново: вопрос «кто из
+РОПов не получает отчёт лично» агентство уже решило, и второй ответ на него
+означал бы, что две рассылки одного проекта адресуют по-разному. Отчёт такого
+отдела уходит владельцу отчёта отдельным сообщением — не строкой в сводке,
+чтобы его можно было переслать как есть.
 """
 
 from __future__ import annotations
@@ -40,6 +47,7 @@ import plans  # noqa: E402
 import pulse as pulse_metrics  # noqa: E402
 from config import get_settings, setup_logging  # noqa: E402
 from notify import send_user_chat_message_chunked  # noqa: E402
+from qc_delivery import ROP_TO_CHAT  # noqa: E402
 from scope import Scope, scoped_session  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -239,9 +247,10 @@ def build(period_code: str, url: str, now: datetime | None = None) -> list[dict[
         rops = metrics.rop_by_department(conn)
         yesterday = closed_in(conn, window)
 
-    if settings.admin_user_id:
+    director = int(settings.admin_user_id or 0)
+    if director:
         deliveries.append({
-            "user_id": int(settings.admin_user_id),
+            "user_id": director,
             "name": "Директор",
             "text": format_company(company, yesterday, url),
         })
@@ -260,12 +269,26 @@ def build(period_code: str, url: str, now: datetime | None = None) -> list[dict[
             data = pulse_metrics.pulse(conn, period_code)
             own_yesterday = closed_in(conn, window)
         text = format_department(data, own_yesterday, url)
-        if text:
-            deliveries.append({
-                "user_id": int(rop["user_id"]),
-                "name": f"РОП {row['name']}",
-                "text": text,
-            })
+        if not text:
+            continue
+
+        # Часть отделов разбирает не их руководитель, а владелец отчёта. Список
+        # взят из рассылки QC, а не заведён заново: вопрос «кто из РОПов не
+        # получает отчёт лично» уже решён агентством, и второй ответ на него
+        # означал бы, что две рассылки одного проекта адресуют по-разному.
+        redirected = (rop.get("surname") or "").strip().lower() in ROP_TO_CHAT
+        if redirected and not director:
+            logger.warning(
+                "Отдел %s адресован директору, но ADMIN_USER_ID не задан — "
+                "сообщение никуда не уйдёт", row["name"],
+            )
+            continue
+        deliveries.append({
+            "user_id": director if redirected else int(rop["user_id"]),
+            "name": (f"Отдел «{row['name']}» → директору" if redirected
+                     else f"РОП {row['name']}"),
+            "text": text,
+        })
     return deliveries
 
 
