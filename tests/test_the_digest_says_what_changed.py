@@ -207,3 +207,38 @@ def test_the_first_line_is_the_news_not_the_total(agency):
     assert lines[0].startswith("📊 Пульс")
     assert lines[1].startswith("За ") or lines[1].startswith("Вчера")
     assert lines[2].startswith("Квартал:")
+
+
+# --------------------------------------------------------------------------
+# выключатель
+# --------------------------------------------------------------------------
+
+def test_a_preview_works_while_the_digest_is_off(agency, monkeypatch, capsys):
+    """--dry-run показывает текст, даже когда рассылка выключена.
+
+    Иначе выключатель загоняет в тупик: чтобы посмотреть сообщение, надо
+    включить рассылку — то есть сделать ровно то, от чего флаг и уберегает.
+    """
+    monkeypatch.setenv("PULSE_DIGEST_ENABLED", "false")
+    monkeypatch.setenv("DRY_RUN", "false")
+    get_settings.cache_clear()
+    with analytics_session() as conn:
+        _won(conn, 1, 2, 1_000_000, "2026-08-10T09:00:00+00:00")
+
+    assert pulse_digest.main(["--period", Q3, "--dry-run"]) == 0
+    printed = capsys.readouterr().out
+    assert "📊 Пульс" in printed
+    assert "НЕ отправлено" in printed
+
+
+def test_a_disabled_digest_sends_nothing(agency, monkeypatch):
+    """Без флага выключенная рассылка не доходит до отправки."""
+    monkeypatch.setenv("PULSE_DIGEST_ENABLED", "false")
+    monkeypatch.setenv("DRY_RUN", "false")
+    get_settings.cache_clear()
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("выключенный дайджест не должен отправлять")
+
+    monkeypatch.setattr(pulse_digest, "send_user_chat_message_chunked", _boom)
+    assert pulse_digest.main(["--period", Q3]) == 0

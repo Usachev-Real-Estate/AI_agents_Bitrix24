@@ -269,17 +269,26 @@ def build(period_code: str, url: str, now: datetime | None = None) -> list[dict[
     return deliveries
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Утренний дайджест «Пульса»")
     parser.add_argument("--period", default="", help="код квартала, по умолчанию текущий")
     parser.add_argument("--dry-run", action="store_true",
                         help="показать сообщения, но не отправлять")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     settings = get_settings()
     setup_logging(settings.log_level)
-    if not settings.pulse_digest_enabled:
-        logger.info("PULSE_DIGEST_ENABLED=false — дайджест выключен")
+
+    # Выключатель гасит ОТПРАВКУ, а не показ. Раньше он стоял выше и обрывал
+    # прогон целиком — посмотреть текст было нельзя, пока не включишь
+    # рассылку, то есть ровно тем действием, от которого --dry-run и должен
+    # был уберечь. Флаг ничего никому не шлёт, запрещать его нечего.
+    preview = settings.dry_run or args.dry_run
+    if not preview and not settings.pulse_digest_enabled:
+        logger.info(
+            "PULSE_DIGEST_ENABLED=false — дайджест выключен. "
+            "Посмотреть текст, ничего не отправляя: --dry-run"
+        )
         return 0
 
     period_code = args.period or plans.quarter_code(
@@ -290,7 +299,7 @@ def main() -> int:
         logger.warning("Ни одного адресата: проверьте ADMIN_USER_ID и список РОПов")
         return 0
 
-    if settings.dry_run or args.dry_run:
+    if preview:
         for item in deliveries:
             print(f"\n{'=' * 60}\n{item['name']} (user_id={item['user_id']})\n{'=' * 60}")
             print(item["text"])
