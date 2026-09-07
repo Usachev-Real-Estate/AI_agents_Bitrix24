@@ -304,6 +304,71 @@ main { padding: 20px 24px 48px; max-width: 1560px; }
 .coverage-fill.warn { background: var(--status-warning); }
 .coverage-fill.bad { background: var(--status-critical); }
 
+/* Полоса выполнения с засечкой срока.
+   Одна картинка отвечает сразу на два вопроса: сколько плана сделано и
+   сколько срока прошло. Заливка левее засечки — отстаём, правее — идём с
+   опережением. Сравнивать «11%» и «74%» глазами не нужно, и это важно:
+   на экране, который открывают на минуту, два процента рядом читаются как
+   одно число. Ширина и положение ставятся из JS — строгий CSP запрещает
+   инлайновые стили в разметке. */
+.pace { margin-top: 10px; }
+
+.pace-track {
+  position: relative;
+  display: block;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--surface-2);
+}
+
+/* display:block обязателен: инлайновый span игнорирует width. */
+.pace-fill {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: var(--series-1);
+  transition: width .2s;
+}
+.pace-fill.behind { background: var(--status-critical); }
+.pace-fill.ahead { background: var(--status-good); }
+
+/* Засечка выступает за полосу, поэтому у дорожки нет overflow:hidden. */
+.pace-mark {
+  position: absolute;
+  top: -3px;
+  width: 2px;
+  height: 14px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--text-secondary);
+}
+
+.pace-foot {
+  margin-top: 6px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+
+/* Строка «прочие»: деньги тех, кто плана не несёт. Не выделяется цветом
+   статуса — это не проблема и не успех, а часть картины, без которой сумма
+   по строкам не сходится с итогом компании. */
+.aside-row {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border-strong);
+  font-size: 13px;
+  color: var(--text-secondary);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: baseline;
+}
+.aside-row b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+
 /* ------------------------------------------------------------- таблицы */
 
 .table-wrap { overflow-x: auto; }
@@ -511,6 +576,22 @@ tbody tr:last-child td { border-bottom: none; }
   main { padding: 16px 12px 40px; }
   .topbar, .filters { padding-left: 12px; padding-right: 12px; }
   .grid-2 { grid-template-columns: 1fr; }
+
+  /* Шапка перестаёт быть одной строкой. У .topbar-right стоит nowrap, и на
+     390 пикселях он вместе с названием не помещался: вбок уезжала вся
+     страница целиком, а не одно меню — таблицы и плитки съезжали под правый
+     край. Меню переносится на вторую строку и прокручивается само. */
+  .topbar {
+    height: auto;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    padding-top: 10px;
+    padding-bottom: 10px;
+    /* Липкая шапка в две строки съедает четверть экрана телефона. */
+    position: static;
+  }
+  .nav { order: 3; width: 100%; flex: 1 0 100%; }
+  .topbar-right { margin-left: auto; }
 }
 
 /* --------------------------------------------------------- утилиты

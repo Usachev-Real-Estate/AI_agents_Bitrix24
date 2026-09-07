@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}Пульс{% endblock %}
+
+{#
+  Фильтры периода здесь заменены выбором квартала целиком.
+
+  План живёт на квартале, и общий фильтр «7 дней / 30 дней / текущий месяц»
+  на этой странице означал бы план квартала против факта недели. Число
+  выглядело бы совершенно нормальным — это худший вид ошибки. Фильтра
+  воронки нет по той же причине: план по воронкам не разложен, и «выполнение
+  18%» под фильтром «Покупатели» было бы неправдой.
+#}
+{% block filters %}
+<form class="filters" method="get" action="" data-autosubmit>
+  <div class="chips">
+    {% for code, label in quarters %}
+      <a class="chip {{ 'active' if code == period_code else '' }}"
+         href="?period_code={{ code }}">{{ label }}</a>
+    {% endfor %}
+  </div>
+</form>
+{% endblock %}
+
+{% block content %}
+{% set p = pulse %}
+
+<h1 class="section-title">Пульс · {{ p.period.label }}</h1>
+
+<div class="grid grid-kpi">
+  {{ ui.plan_tile('Комиссия квартала', p.fact | money(short=True), p,
+                  foot='планового состава: ' ~ p.brokers_on_plan ~ ' чел.') }}
+
+  {{ ui.plan_tile('Если темп не изменится',
+                  p.projection | money(short=True) if p.projection else '—',
+                  none,
+                  foot=('к концу квартала при нынешней скорости'
+                        if p.projection else
+                        'слишком мало рабочих дней для оценки')) }}
+
+  {{ ui.tile('Закрыто сделок',
+             (p.departments | sum(attribute='deals')) | int_ru,
+             hint='у людей, несущих план') }}
+
+  {{ ui.tile('Прошло квартала',
+             p.time_share | pct,
+             hint=(p.elapsed_days | int_ru) ~ ' из ' ~ (p.total_days | int_ru)
+                  ~ ' рабочих дней') }}
+</div>
+
+<h2 class="section-title">Отделы</h2>
+<div class="card">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Отдел</th>
+          <th class="num">План</th>
+          <th class="num">Факт</th>
+          <th class="num">% плана</th>
+          <th class="num">Темп</th>
+          <th class="num">Сделок</th>
+          <th class="num">На плане</th>
+          <th class="num">Без нормы</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in p.departments %}
+        <tr>
+          <td>
+            {{ row.name }}
+            {% if not row.rop_known %}<span class="badge">без РОПа</span>{% endif %}
+          </td>
+          <td class="num">{{ row.plan | money(short=True) if row.plan else '—' }}</td>
+          <td class="num">{{ row.fact | money(short=True) }}</td>
+          <td class="num">
+            {% if row.plan_share is not none %}
+              <span class="{{ 'delta-down' if row.behind else 'delta-up' }}">
+                {{ row.plan_share | pct }}</span>
+            {% else %}—{% endif %}
+          </td>
+          <td class="num">{{ ('%.2f' | format(row.ratio)) | replace('.', ',') if row.ratio is not none else '—' }}</td>
+          <td class="num">{{ row.deals | int_ru }}</td>
+          <td class="num">{{ row.on_plan | int_ru }}</td>
+          <td class="num">{{ row.without_norm | int_ru }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot>
+        <tr>
+          <td>Итого</td>
+          <td class="num">{{ p.plan | money(short=True) if p.plan else '—' }}</td>
+          <td class="num">{{ p.fact | money(short=True) }}</td>
+          <td class="num">{{ p.plan_share | pct if p.plan_share is not none else '—' }}</td>
+          <td class="num">{{ ('%.2f' | format(p.ratio)) | replace('.', ',') if p.ratio is not none else '—' }}</td>
+          <td class="num">{{ (p.departments | sum(attribute='deals')) | int_ru }}</td>
+          <td class="num">{{ p.brokers_on_plan | int_ru }}</td>
+          <td class="num">{{ p.without_norm | int_ru }}</td>
+        </tr>
+      </tfoot>
+    </table>
+  </div>
+
+  {% if p.others.deals %}
+  <div class="aside-row">
+    <span>Вне планового состава:</span>
+    <b>{{ p.others.fact | money(short=True) }}</b>
+    <span>по {{ p.others.deals | int_ru }} сделкам — новички без нормы и руководители.</span>
+    <span>Итого по компании: <b>{{ p.company_fact | money(short=True) }}</b></span>
+  </div>
+  {% endif %}
+
+  {{ ui.coverage(p.coverage.share, p.coverage.filled,
+                 p.coverage.deals - p.coverage.foreign, 'выигранных сделок') }}
+
+  {% if p.coverage.foreign %}
+  <div class="notice notice-warn mt-14"><span>⚠</span>
+    <span>{{ p.coverage.foreign | int_ru }} сделок заведены не в {{ p.currency }} — в суммы
+      выше они не входят. Курса у витрины нет, и сложить их с рублями значит напечатать
+      неверное число.</span></div>
+  {% endif %}
+
+  {% if p.departments_without_rop %}
+  <div class="notice notice-warn mt-14"><span>⚠</span>
+    <span>Без опознанного РОПа: {{ p.departments_without_rop | join(', ') }}. Руководитель
+      такого отдела не вычтен из состава — если он план не несёт, добавьте строку в ростер,
+      иначе цель отдела завышена на одну норму.</span></div>
+  {% endif %}
+
+  {{ ui.definition('План квартала — сумма именных норм: у каждого брокера своя ступень,
+    а новички нормы не несут вовсе. «Факт» считается по тем же людям, из которых сложен
+    план, поэтому сделки новичков и руководителей вынесены отдельной строкой: это деньги
+    компании, но не выполнение чьей-то цели. Темп — доля плана, делённая на долю срока
+    в РАБОЧИХ днях: больше единицы значит опережение.') }}
+</div>
+{% endblock %}

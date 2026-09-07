@@ -18,6 +18,7 @@ from scope import ROLE_ADMIN, Scope, scoped_session
 DEPARTMENT_AWARE_PAGES = frozenset({"movement", "table"})
 
 NAV = [
+    ("pulse", "Пульс"),
     ("", "Обзор"),
     ("leads", "Лиды"),
     ("deals", "Сделки"),

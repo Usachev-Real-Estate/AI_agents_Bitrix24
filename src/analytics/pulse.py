@@ -27,6 +27,11 @@ import metrics
 import plans
 from metrics import _money_of, _one, _rows, _share, base_currency
 
+# Сколько рабочих дней должно пройти, чтобы линейный прогноз что-то
+# значил. На третьем дне квартала доля срока — четыре процента, и любое
+# деление на неё даёт число, которое скачет втрое от одной сделки.
+PROJECTION_MIN_DAYS = 5
+
 
 def pulse(
     conn,
@@ -96,6 +101,16 @@ def pulse(
             "people": sum(row["without_norm"] for row in plan["departments"]),
         },
         "company_fact": round(total_fact + others_fact, 2),
+        # Простейший прогноз: сколько выйдет, если темп не изменится. Он и
+        # подписан именно так. Взвешенный прогноз по стадиям честнее, но
+        # требует своей функции и своего покрытия; линейный не притворяется
+        # чем-то большим, а до конца квартала отвечает на вопрос «успеваем ли»
+        # ровно так же. None до пятого рабочего дня: делить на долю срока
+        # размером в три дня значит печатать случайное число крупным шрифтом.
+        "projection": (
+            round(total_fact * total_days / elapsed, 2)
+            if elapsed >= PROJECTION_MIN_DAYS else None
+        ),
         "coverage": _coverage(conn, period["starts_at"], period["ends_at"]),
         "currency": base_currency(),
         **plans.pace(total_fact, plan["plan"], elapsed, total_days),

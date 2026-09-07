@@ -13,6 +13,8 @@ from fastapi.responses import HTMLResponse
 import chartdata
 import metrics
 import objects
+import plans
+import pulse as pulse_metrics
 from context import base_context, read_analytics
 
 router = APIRouter()
@@ -46,6 +48,26 @@ async def overview(request: Request) -> HTMLResponse:
             "charts": {"timeseries": chartdata.timeseries_chart(series, grain)},
         })
     return _render(request, "overview.html", context)
+
+
+@router.get("/pulse", response_class=HTMLResponse)
+async def pulse(request: Request) -> HTMLResponse:
+    """План, факт и темп квартала — первый экран руководителя.
+
+    Период здесь свой и общему фильтру не подчиняется: план живёт на
+    квартале, и «текущий месяц» из шапки означал бы план квартала против
+    факта месяца. Такое число выглядит совершенно нормальным, и это худший
+    вид ошибки — заметить её можно только сверкой вручную.
+    """
+    context = base_context(request, active="pulse")
+    period_code = _quarter_code(request.query_params.get("period_code"))
+    with read_analytics(request) as conn:
+        context.update({
+            "pulse": pulse_metrics.pulse(conn, period_code),
+            "period_code": period_code,
+            "quarters": _quarter_choices(),
+        })
+    return _render(request, "pulse.html", context)
 
 
 @router.get("/leads", response_class=HTMLResponse)
@@ -244,6 +266,39 @@ async def quality(request: Request) -> HTMLResponse:
             "pipeline_counts": metrics.counts_by_pipeline(conn),
         })
     return _render(request, "quality.html", context)
+
+
+def _quarter_code(requested: str | None) -> str:
+    """Код квартала из адреса. Мусор и будущее молча падают в текущий.
+
+    Подрезка нужна не ради безопасности — данных за будущий квартал просто
+    нет, — а чтобы опечатка в адресе давала понятный экран, а не пустой.
+    """
+    from datetime import datetime
+
+    current = plans.quarter_code(datetime.now(metrics.BUSINESS_TZ).date())
+    if not requested:
+        return current
+    try:
+        plans.quarter_bounds(requested)
+    except ValueError:
+        return current
+    return min(requested.strip().upper(), current)
+
+
+def _quarter_choices(depth: int = 4) -> list[tuple[str, str]]:
+    """Текущий квартал и предыдущие — для переключателя над экраном."""
+    from datetime import datetime
+
+    today = datetime.now(metrics.BUSINESS_TZ).date()
+    year, quarter = today.year, (today.month - 1) // 3 + 1
+    out = []
+    for _ in range(depth):
+        out.append((f"{year}-Q{quarter}", f"{quarter} кв. {year}"))
+        quarter -= 1
+        if quarter == 0:
+            year, quarter = year - 1, 4
+    return out
 
 
 def _forbidden(request: Request, context: dict) -> HTMLResponse:

@@ -35,3 +35,40 @@
 {% macro definition(text) %}
 <p class="definition">{{ text }}</p>
 {% endmacro %}
+
+{#
+  Плитка плана: значение, полоса выполнения с засечкой срока и подпись.
+
+  Полоса нужна именно рядом с числом. «14,5 млн» само по себе не говорит
+  ничего, «11% плана» требует сравнить с «74% срока» в уме, а засечка на
+  полосе показывает отставание без арифметики — на экране, который открывают
+  на минуту, это разница между «понял» и «пролистал».
+
+  Без плана полоса не рисуется вовсе: пустая дорожка неотличима от
+  выполненного на ноль, и молчать честнее, чем показывать ноль.
+#}
+{% macro plan_tile(label, value, pace, foot='') %}
+<div class="card">
+  <div class="tile-label">{{ label }}</div>
+  <div class="tile-value">{{ value }}</div>
+  {% if pace and pace.plan %}
+    <div class="pace">
+      <span class="pace-track">
+        <span class="pace-fill {{ 'behind' if pace.behind else 'ahead' }}"
+              data-width="{{ pace.plan_share }}"></span>
+        <span class="pace-mark" data-at="{{ pace.time_share }}"
+              title="прошло {{ pace.time_share | pct }} срока"></span>
+      </span>
+      <div class="pace-foot">
+        <span class="{{ 'delta-down' if pace.behind else 'delta-up' }}">
+          {{ pace.plan_share | pct }} плана</span>
+        <span>из {{ pace.plan | money(short=True) }}</span>
+        <span>· прошло {{ pace.time_share | pct }} срока</span>
+      </div>
+    </div>
+  {% elif pace and pace.reason %}
+    <div class="tile-delta">{{ pace.reason }}</div>
+  {% endif %}
+  {% if foot %}<div class="tile-delta">{{ foot }}</div>{% endif %}
+</div>
+{% endmacro %}
