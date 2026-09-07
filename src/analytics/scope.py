@@ -162,6 +162,13 @@ _VIEW_DDL = (
     WHERE (SELECT unrestricted FROM scope_flag) = 1
        OR (n.scope_kind = 'department'
            AND n.scope_id IN (SELECT department_id FROM scope_department))
+       OR (n.scope_kind = 'user'
+           AND COALESCE(
+                 (SELECT r.department_id FROM plan_roster r
+                  WHERE r.user_id = n.scope_id AND r.department_id IS NOT NULL
+                  LIMIT 1),
+                 (SELECT u.department_id FROM dim_user u WHERE u.user_id = n.scope_id)
+               ) IN (SELECT department_id FROM scope_department))
     """,
     # Ручной ростер планового состава. Строка адресная — в ней конкретный
     # человек, — поэтому сужается по отделу. Отдел берётся из самой строки,

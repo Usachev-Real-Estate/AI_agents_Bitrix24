@@ -51,6 +51,7 @@ BASIS_ABSOLUTE = "absolute"
 
 SCOPE_COMPANY = "company"
 SCOPE_DEPARTMENT = "department"
+SCOPE_USER = "user"
 COMPANY_SCOPE_ID = 0
 
 METRIC_COMMISSION = "commission"
@@ -248,13 +249,17 @@ def headcount(
             "department_id": dept_id,
             "name": user["department_name"] or f"Отдел {dept_id}",
             "people": 0, "brokers": 0, "rops": 0, "excluded": 0,
-            "rop_names": [], "overridden": 0,
+            "rop_names": [], "overridden": 0, "members": [],
         })
         # Название отдела берётся у того, кто в нём действительно числится:
         # у перенесённого ростером РОПа в карточке стоит чужое подразделение.
         if not override.get("department_id") and user["department_name"]:
             bucket["name"] = user["department_name"]
         bucket["people"] += 1
+        bucket["members"].append({
+            "user_id": user["user_id"], "name": user["name"],
+            "role": role, "overridden": bool(override),
+        })
         if override:
             bucket["overridden"] += 1
         if role == ROLE_ROP:
@@ -317,22 +322,35 @@ def plan(conn, period_code: str, metric: str = METRIC_COMMISSION) -> dict[str, A
         )
     }
     default = norms.get((SCOPE_COMPANY, COMPANY_SCOPE_ID))
+    # Именной режим. Как только у периода появилась хоть одна норма на
+    # человека, план перестаёт вычисляться из штата: он и есть этот список.
+    # Общая норма при этом не подставляется тем, кого в списке нет, — иначе
+    # новичок, которому норму сознательно не ставили, молча получил бы её и
+    # завысил план отдела. «Без нормы» тут решение агентства, а не пробел.
+    named = any(kind == SCOPE_USER for kind, _ in norms)
 
     departments = []
     for row in staff["departments"]:
-        norm = norms.get((SCOPE_DEPARTMENT, row["department_id"])) or default
-        amount, basis, reason = None, None, "норма не задана"
-        if norm:
-            basis = norm["basis"]
-            if basis == BASIS_PER_BROKER:
-                amount = norm["amount"] * row["brokers"]
-                reason = None
-            elif basis == BASIS_ABSOLUTE:
-                amount = norm["amount"]
-                reason = None
+        members, amount, without = [], 0.0, 0
+        for member in row["members"]:
+            member_plan = _norm_for(
+                member, row["department_id"], norms, default, named,
+            )
+            if member_plan is None:
+                without += 1
             else:
-                reason = f"неизвестная база нормы: {basis}"
-        departments.append({**row, "plan": amount, "basis": basis, "reason": reason})
+                amount += member_plan
+            members.append({**member, "plan": member_plan})
+        on_plan = len(members) - without
+        departments.append({
+            **row,
+            "members": members,
+            "on_plan": on_plan,
+            "without_norm": without,
+            "plan": round(amount, 2) if on_plan else None,
+            "basis": SCOPE_USER if named else (default or {}).get("basis"),
+            "reason": None if on_plan else "норма не задана",
+        })
 
     from_departments = sum(row["plan"] or 0 for row in departments)
     declared = None
@@ -360,6 +378,38 @@ def plan(conn, period_code: str, metric: str = METRIC_COMMISSION) -> dict[str, A
 # --------------------------------------------------------------------------
 # служебное
 # --------------------------------------------------------------------------
+
+def _norm_for(
+    member: dict[str, Any],
+    department_id: int,
+    norms: dict[tuple[str, int], dict[str, Any]],
+    default: dict[str, Any] | None,
+    named: bool,
+) -> float | None:
+    """Норма конкретного человека. None — «нормы нет», а не «ноль».
+
+    Порядок: именная норма, затем норма отдела, затем общая. РОП исключается
+    из плана только тогда, когда его нет в именном списке: агентство вправе
+    поставить план и руководителю, и в списке на третий квартал такой человек
+    есть. Роль решает, кто вычитается по умолчанию, а не кто не может нести
+    план вовсе.
+    """
+    personal = norms.get((SCOPE_USER, member["user_id"]))
+    if personal is not None:
+        return personal["amount"]
+    if named:
+        return None
+    if member["role"] != ROLE_BROKER:
+        return None
+    norm = norms.get((SCOPE_DEPARTMENT, department_id)) or default
+    if not norm:
+        return None
+    if norm["basis"] == BASIS_PER_BROKER:
+        return norm["amount"]
+    # Норма суммой на отдел на одного человека не раскладывается: делить её
+    # поровну значило бы придумать распределение, которого никто не задавал.
+    return None
+
 
 def _rows(conn, sql: str, params: dict[str, Any] | Sequence[Any] = ()) -> list[dict[str, Any]]:
     return [dict(row) for row in conn.execute(sql, params).fetchall()]

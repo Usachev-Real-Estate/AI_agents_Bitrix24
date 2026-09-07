@@ -330,3 +330,95 @@ def test_no_plan_gives_no_verdict(portal):
     assert result["ratio"] is None
     assert result["behind"] is None
     assert result["reason"] == "план не задан"
+
+
+# --------------------------------------------------------------------------
+# именной план
+# --------------------------------------------------------------------------
+
+def test_a_named_norm_beats_the_general_one(portal):
+    """Норма конкретного человека важнее общей: ступени у брокеров разные."""
+    with analytics_session() as conn:
+        _norm(conn, 4_500_000)
+        _norm(conn, 5_500_000, scope_kind=plans.SCOPE_USER, scope_id=3,
+              basis=plans.BASIS_ABSOLUTE)
+
+    with scoped_session(Scope.everything()) as conn:
+        result = plans.plan(conn, Q3)
+
+    kretov = next(r for r in result["departments"] if r["department_id"] == 60)
+    named = next(m for m in kretov["members"] if m["user_id"] == 3)
+    assert named["plan"] == 5_500_000
+
+
+def test_a_newcomer_outside_the_list_carries_no_plan(portal):
+    """«Остальные без плана» — значит без плана, а не по общей норме.
+
+    Как только у периода появилась хоть одна именная норма, общая перестаёт
+    подставляться. Иначе новичок, которому норму сознательно не ставили,
+    молча получил бы её и завысил план отдела.
+    """
+    with analytics_session() as conn:
+        _norm(conn, 4_500_000)
+        _norm(conn, 3_500_000, scope_kind=plans.SCOPE_USER, scope_id=3,
+              basis=plans.BASIS_ABSOLUTE)
+
+    with scoped_session(Scope.everything()) as conn:
+        result = plans.plan(conn, Q3)
+
+    kretov = next(r for r in result["departments"] if r["department_id"] == 60)
+    assert kretov["on_plan"] == 1
+    assert kretov["without_norm"] == 2, "РОП и второй брокер нормы не получили"
+    assert kretov["plan"] == 3_500_000, "общая норма новичку не подставилась"
+
+
+def test_a_rop_named_in_the_list_does_carry_a_plan(portal):
+    """Юлия Шпырная — РОП и при этом в плане. Роль не запрещает нести норму.
+
+    Правило «РОП не идёт в план» описывает умолчание, а не запрет: когда
+    агентство назвало руководителя в списке поимённо, оно так и решило.
+    """
+    with analytics_session() as conn:
+        _norm(conn, 3_500_000, scope_kind=plans.SCOPE_USER, scope_id=1,
+              basis=plans.BASIS_ABSOLUTE)
+
+    with scoped_session(Scope.everything()) as conn:
+        result = plans.plan(conn, Q3)
+
+    kretov = next(r for r in result["departments"] if r["department_id"] == 60)
+    rop = next(m for m in kretov["members"] if m["user_id"] == 1)
+    assert rop["role"] == plans.ROLE_ROP
+    assert rop["plan"] == 3_500_000
+    assert kretov["plan"] == 3_500_000
+
+
+def test_the_department_plan_is_the_sum_of_its_named_people(portal):
+    """План отдела складывается снизу, из людей, а не задаётся сверху."""
+    with analytics_session() as conn:
+        for user_id, amount in ((3, 3_500_000), (4, 5_500_000)):
+            _norm(conn, amount, scope_kind=plans.SCOPE_USER, scope_id=user_id,
+                  basis=plans.BASIS_ABSOLUTE)
+        _norm(conn, 4_500_000, scope_kind=plans.SCOPE_USER, scope_id=5,
+              basis=plans.BASIS_ABSOLUTE)
+
+    with scoped_session(Scope.everything()) as conn:
+        result = plans.plan(conn, Q3)
+
+    kretov = next(r for r in result["departments"] if r["department_id"] == 60)
+    assert kretov["plan"] == 9_000_000
+    assert result["plan_from_departments"] == 13_500_000
+
+
+def test_a_rop_sees_only_the_norms_of_their_own_people(portal):
+    """Именная норма чужого отдела ограниченному соединению не видна."""
+    with analytics_session() as conn:
+        _norm(conn, 3_500_000, scope_kind=plans.SCOPE_USER, scope_id=3,
+              basis=plans.BASIS_ABSOLUTE)
+        _norm(conn, 5_500_000, scope_kind=plans.SCOPE_USER, scope_id=5,
+              basis=plans.BASIS_ABSOLUTE)
+
+    with scoped_session(Scope.departments([60])) as conn:
+        result = plans.plan(conn, Q3)
+
+    assert result["plan_from_departments"] == 3_500_000, "чужая норма в сумму не попала"
+    assert [r["department_id"] for r in result["departments"]] == [60]
