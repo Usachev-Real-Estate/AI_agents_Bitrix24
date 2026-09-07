@@ -157,6 +157,69 @@
 </div>
 {% endif %}
 
+<h2 class="section-title">Отделы: где теряют и где тормозят</h2>
+{#
+  Отделы стоят рядом, а не по одному под фильтром. Вопрос, ради которого
+  раздел заведён, фильтром не задаётся: отдел с 13% плана — это пятеро,
+  доводящих понемногу, или один, доводящий всех, при четверых, теряющих
+  клиентов на первом показе. Лечение разное, а на экране плана они
+  неразличимы.
+
+  Правила счёта те же, что и в воронке выше: когорта — сделки, СОЗДАННЫЕ в
+  периоде. Две таблицы одной страницы, называющие разную конверсию, спорили
+  бы друг с другом, и правым оказался бы тот, кто громче.
+#}
+<div class="card">
+  {% if by_department.departments %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Стадия</th>
+          {% for dept in by_department.departments %}
+            <th class="num">{{ dept.name }}</th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for stage in by_department.stages %}
+        <tr>
+          <td>{{ stage.name }}</td>
+          {% for dept in by_department.departments %}
+            {% set cell = dept.stages[stage.stage_id] %}
+            <td class="num">
+              {{ cell.reached | int_ru }}
+              {% if cell.conversion_step is not none %}
+                <span class="muted">· {{ cell.conversion_step | pct }}</span>
+              {% endif %}
+              {% if cell.median_days %}
+                <div class="tile-delta num-note">{{ cell.median_days | days }}</div>
+              {% endif %}
+            </td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot>
+        <tr>
+          <td>Сделок в когорте</td>
+          {% for dept in by_department.departments %}
+            <td class="num">{{ dept.cohort_size | int_ru }}</td>
+          {% endfor %}
+        </tr>
+      </tfoot>
+    </table>
+  </div>
+  {{ ui.definition('Когорта — сделки, СОЗДАННЫЕ в периоде; в клетке сколько из них
+    когда-либо дошло до стадии, рядом доля от предыдущей рабочей стадии, ниже —
+    медиана дней на стадии по завершённым интервалам. Стадия, с которой ещё никто
+    не ушёл, времени не имеет: там прочерк, а не ноль. Читать нужно по столбцу —
+    где число обрывается, там отдел и теряет клиентов.') }}
+  {% else %}
+  <p class="empty">За период не создано ни одной сделки — сравнивать нечего.</p>
+  {% endif %}
+</div>
+
 <h2 class="section-title">Зависшие сделки</h2>
 {% if stuck | length >= 50 %}
   <div class="notice notice-warn"><span>⚠</span>

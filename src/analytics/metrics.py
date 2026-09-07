@@ -375,6 +375,120 @@ def deal_funnel(conn, category_id: int, since: str, until: str) -> dict[str, Any
     return {"cohort_size": cohort_size, "stages": rows}
 
 
+def funnel_by_department(
+    conn, category_id: int, since: str, until: str,
+) -> dict[str, Any]:
+    """Та же воронка, что и deal_funnel, но отделы стоят рядом.
+
+    Отвечает на вопрос, который одним числом выполнения не задать: отдел с
+    13% — это пятеро, доводящих сделки до конца понемногу, или один, доводящий
+    все, при четверых, теряющих клиентов на первом показе. Лечение у этих
+    случаев разное, а на экране плана они неразличимы.
+
+    Правила счёта взяты у deal_funnel целиком, а не выведены заново: когорта —
+    сделки, СОЗДАННЫЕ в периоде; ``reached`` — сколько из них когда-либо
+    доходило до стадии; шаговая конверсия осмысленна только внутри цепочки
+    «в работе» и для выигрыша. Две страницы, называющие разную конверсию
+    одной воронки, разошлись бы молча.
+
+    Отдел берётся из user_home, то есть с учётом ростера: тот же ответ на
+    вопрос «чей человек», что и в «Пульсе». Медиана дней на стадии считается
+    по завершённым интервалам той же когорты — стадия, с которой ещё никто не
+    ушёл, времени не имеет, и ноль там соврал бы.
+    """
+    names = {
+        row["department_id"]: row["name"]
+        for row in _rows(
+            conn,
+            "SELECT DISTINCT department_id, department_name AS name FROM v_user "
+            "WHERE department_id IS NOT NULL AND department_name IS NOT NULL",
+        )
+    }
+    stages = _rows(
+        conn,
+        "SELECT stage_id, name, sort, semantic FROM dim_stage "
+        "WHERE category_id = :cat ORDER BY sort, name",
+        {"cat": category_id},
+    )
+    cohort = _rows(
+        conn,
+        """
+        SELECT h.department_id AS department_id, COUNT(*) AS n
+        FROM v_deal d
+        JOIN user_home h ON h.user_id = d.assigned_by_id
+        WHERE d.category_id = :cat
+          AND d.date_create >= :since AND d.date_create < :until
+        GROUP BY h.department_id
+        """,
+        {"cat": category_id, "since": since, "until": until},
+    )
+    reached = _rows(
+        conn,
+        """
+        SELECT h.department_id AS department_id, e.stage_id AS stage_id,
+               COUNT(DISTINCT e.entity_id) AS reached
+        FROM v_stage_event e
+        JOIN v_deal d ON d.deal_id = e.entity_id
+        JOIN user_home h ON h.user_id = d.assigned_by_id
+        WHERE e.entity_type = 'deal' AND d.category_id = :cat
+          AND d.date_create >= :since AND d.date_create < :until
+        GROUP BY h.department_id, e.stage_id
+        """,
+        {"cat": category_id, "since": since, "until": until},
+    )
+    spent = _rows(
+        conn,
+        """
+        SELECT h.department_id AS department_id, e.stage_id AS stage_id,
+               e.duration_sec / 86400.0 AS days
+        FROM v_stage_event e
+        JOIN v_deal d ON d.deal_id = e.entity_id
+        JOIN user_home h ON h.user_id = d.assigned_by_id
+        WHERE e.entity_type = 'deal' AND d.category_id = :cat
+          AND e.duration_sec IS NOT NULL AND e.duration_sec >= 0
+          AND d.date_create >= :since AND d.date_create < :until
+        """,
+        {"cat": category_id, "since": since, "until": until},
+    )
+
+    hit = {(row["department_id"], row["stage_id"]): row["reached"] for row in reached}
+    days: dict[tuple[int, str], list[float]] = {}
+    for row in spent:
+        days.setdefault((row["department_id"], row["stage_id"]), []).append(row["days"])
+
+    departments = []
+    for row in sorted(cohort, key=lambda item: -item["n"]):
+        dept_id = row["department_id"]
+        cells, previous = [], None
+        for stage in stages:
+            count = hit.get((dept_id, stage["stage_id"]), 0)
+            values = days.get((dept_id, stage["stage_id"]), [])
+            step = None
+            if stage["semantic"] in ("in_progress", "won"):
+                step = _share(count, previous) if previous else None
+            if stage["semantic"] == "in_progress":
+                previous = count
+            cells.append({
+                "stage_id": stage["stage_id"],
+                "reached": count,
+                "conversion_from_start": _share(count, row["n"]),
+                "conversion_step": step,
+                "median_days": round(percentile(values, 0.5) or 0, 1) if values else None,
+            })
+        departments.append({
+            "department_id": dept_id,
+            "name": names.get(dept_id) or f"Отдел {dept_id}",
+            "cohort_size": row["n"],
+            # Словарём, а не списком: шаблон обходит стадии внешним циклом, а
+            # отделы внутренним, и достать клетку по порядковому номеру там
+            # нельзя — во вложенном цикле счётчик принадлежит внутреннему.
+            # На экране это выглядело как одинаковые числа во всех строках:
+            # таблица отрисовалась, ошиблась и ничем себя не выдала.
+            "stages": {cell["stage_id"]: cell for cell in cells},
+        })
+    return {"stages": stages, "departments": departments}
+
+
 def win_rate(conn, category_id: int, since: str, until: str) -> dict[str, Any]:
     """Доля выигранных среди закрытых за период (по дате закрытия).
 
