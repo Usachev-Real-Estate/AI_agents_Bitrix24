@@ -318,3 +318,25 @@ def test_a_rop_moved_by_the_roster_is_addressed(agency):
     assert "Пульс отдела «Волкова»" in own["text"]
     boss = next(d for d in deliveries if d["user_id"] == 7)
     assert "Без опознанного РОПа" not in boss["text"]
+
+
+def test_the_digest_recipient_is_set_apart_from_the_alert_admin(agency, monkeypatch):
+    """PULSE_DIGEST_TO перекрывает ADMIN_USER_ID и ничего больше не задевает.
+
+    На ADMIN_USER_ID висят уведомления о падении задач, и он же исключается
+    из рейтинга брокеров и из-под замка «Источника». Живой человек,
+    назначенный туда ради одной рассылки, тихо выпал бы из двух проверок.
+    """
+    monkeypatch.setenv("PULSE_DIGEST_TO", "154")
+    get_settings.cache_clear()
+    assert get_settings().admin_user_id == 7, "ADMIN_USER_ID остаётся прежним"
+
+    deliveries = pulse_digest.build(Q3, URL)
+
+    assert deliveries[0]["user_id"] == 154
+    assert all(d["user_id"] != 7 for d in deliveries), "прежний адресат не задет"
+
+
+def test_without_its_own_setting_the_digest_falls_back_to_the_admin(agency):
+    """Пустой PULSE_DIGEST_TO — прежнее поведение, а не отсутствие адресата."""
+    assert pulse_digest.build(Q3, URL)[0]["user_id"] == 7

@@ -246,7 +246,8 @@ def build(period_code: str, url: str, now: datetime | None = None) -> list[dict[
         company = pulse_metrics.pulse(conn, period_code)
         yesterday = closed_in(conn, window)
 
-    director = int(settings.admin_user_id or 0)
+    # Владелец отчёта: своя настройка, с откатом на администратора.
+    director = int(settings.pulse_digest_to or settings.admin_user_id or 0)
     if director:
         deliveries.append({
             "user_id": director,
@@ -323,7 +324,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     deliveries = build(period_code, settings.pulse_digest_url)
     if not deliveries:
-        logger.warning("Ни одного адресата: проверьте ADMIN_USER_ID и список РОПов")
+        logger.warning(
+            "Ни одного адресата: проверьте PULSE_DIGEST_TO (или ADMIN_USER_ID) "
+            "и список РОПов"
+        )
         return 0
 
     if preview:
