@@ -471,6 +471,24 @@ class Settings(BaseSettings):
         default='[18]',
         validation_alias="PULSE_CATEGORY_IDS_JSON",
     )
+    # --- Рубеж безубыточности ---
+    # Витрина знает только доходы: расходы и доля, остающаяся компании после
+    # выплат брокерам и налога, живут в отчёте руководству. Обе берутся
+    # оттуда и обновляются вместе с ним — примерно раз в квартал.
+    #
+    # Ноль в любой из двух настроек выключает рубеж целиком. Это осознанно:
+    # выдуманный порог безубыточности хуже отсутствующего, потому что по
+    # нему принимают решения о людях.
+    pulse_monthly_costs: float = Field(
+        default=0.0,
+        validation_alias="PULSE_MONTHLY_COSTS",
+    )
+    # Доля валовой комиссии, остающаяся компании после выплат брокерам,
+    # налога и выплат РОП. В августе 2026 вышло 0.586.
+    pulse_net_share: float = Field(
+        default=0.0,
+        validation_alias="PULSE_NET_SHARE",
+    )
     dashboard_session_ttl_hours: int = Field(
         default=12,
         validation_alias="DASHBOARD_SESSION_TTL_HOURS",

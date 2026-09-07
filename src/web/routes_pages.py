@@ -63,7 +63,7 @@ async def pulse(request: Request) -> HTMLResponse:
     period_code = _quarter_code(request.query_params.get("period_code"))
     with read_analytics(request) as conn:
         context.update({
-            "pulse": pulse_metrics.pulse(conn, period_code),
+            "pulse": pulse_metrics.pulse(conn, period_code, with_stuck=True),
             "period_code": period_code,
             "quarters": _quarter_choices(),
         })
@@ -144,6 +144,11 @@ async def movement(request: Request) -> HTMLResponse:
             "movement": movement_rows,
             "transitions": transitions,
             "stuck": metrics.stuck_deals(conn, category_id, department_id=department_id),
+            # Сравнение отделов рядом — вопрос, который фильтром «один отдел»
+            # не задать: где именно каждый теряет клиентов и где тормозит.
+            "by_department": metrics.funnel_by_department(
+                conn, category_id, period["since"], period["until"],
+            ),
             "charts": {"netflow": chartdata.net_flow_chart(movement_rows)},
             "matrix": chartdata.transitions_matrix(
                 transitions, metrics.stages(conn, category_id),
