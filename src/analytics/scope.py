@@ -107,11 +107,23 @@ _VIEW_DDL = (
        OR (e.entity_type = 'deal' AND e.entity_id IN (SELECT deal_id FROM scope_deal))
        OR (e.entity_type = 'lead' AND e.entity_id IN (SELECT lead_id FROM scope_lead))
     """,
+    # Последнее условие — про людей, которых ростер плана приписал к этому
+    # отделу. В портале РОП сплошь и рядом числится не там, где работает:
+    # руководитель отдела «Волкова» сидит в служебном подразделении
+    # «Битрикс». Без этой строки её РОП не увидел бы в своём составе
+    # собственного руководителя, и отдел так и остался бы «без РОПа» —
+    # ровно та поломка, которую ростер и заводился чинить.
+    #
+    # Утечкой это не является: строки ростера пишет администратор, и
+    # приписать человека к отделу — сознательное решение о том, чей он.
     """
     CREATE TEMP VIEW v_user AS
     SELECT u.* FROM dim_user u
     WHERE (SELECT unrestricted FROM scope_flag) = 1
        OR u.department_id IN (SELECT department_id FROM scope_department)
+       OR u.user_id IN (SELECT r.user_id FROM plan_roster r
+                        WHERE r.department_id IN
+                              (SELECT department_id FROM scope_department))
     """,
     # Единственное представление, СОЗНАТЕЛЬНО не суженное по отделу, — норма
     # времени на стадии по всей воронке.
@@ -139,6 +151,35 @@ _VIEW_DDL = (
     SELECT category_id, stage_id, duration_sec
     FROM fact_stage_event
     WHERE duration_sec IS NOT NULL AND entity_type = 'deal'
+    """,
+    # Нормы плана. Строка компании видна ТОЛЬКО администратору: РОП не должен
+    # узнавать цель всей компании из своего экрана. Поэтому здесь не
+    # «показать всё, кроме чужого», а «показать только своё», и ограниченное
+    # соединение не видит company-строку ни при каких условиях.
+    """
+    CREATE TEMP VIEW v_plan_norm AS
+    SELECT n.* FROM plan_norm n
+    WHERE (SELECT unrestricted FROM scope_flag) = 1
+       OR (n.scope_kind = 'department'
+           AND n.scope_id IN (SELECT department_id FROM scope_department))
+    """,
+    # Ручной ростер планового состава. Строка адресная — в ней конкретный
+    # человек, — поэтому сужается по отделу. Отдел берётся из самой строки,
+    # если он там задан: именно так чинится РОП, административно
+    # приписанный к чужому подразделению, и его строка обязана быть видна
+    # РОПу того отдела, за который он отвечает, а не того, где он числится.
+    """
+    CREATE TEMP VIEW v_plan_roster AS
+    SELECT r.* FROM plan_roster r
+    WHERE (SELECT unrestricted FROM scope_flag) = 1
+       OR COALESCE(
+              r.department_id,
+              (SELECT u.department_id FROM dim_user u WHERE u.user_id = r.user_id)
+          ) IN (SELECT department_id FROM scope_department)
+    """,
+    # Периоды плана не сужаются: это календарь, в нём нет ни людей, ни денег.
+    """
+    CREATE TEMP VIEW v_plan_period AS SELECT * FROM plan_period
     """,
 )
 
