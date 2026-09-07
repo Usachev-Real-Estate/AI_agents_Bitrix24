@@ -1,0 +1,29 @@
+# Ротация общего лога задач по расписанию.
+#
+# logs/audit.log ротирует сам Python (RotatingFileHandler, 10 МБ × 5), а
+# logs/cron.log — это перенаправление `>>` из crontab, и за ним не следит
+# никто. Пишут в него ВСЕ задачи, а чат-поллер тикает каждую минуту, поэтому
+# файл растёт непрерывно: на боевом сервере он дорос до 14 ГБ при диске в 41,
+# то есть до трети места, и остановился бы только вместе с диском.
+#
+# copytruncate обязателен. cron держит файл открытым на дозапись, и обычная
+# ротация переименованием оставила бы задачи писать в удалённый файл: место
+# не освободилось бы, а новый лог остался бы пустым — поломка, которую видно
+# только по df.
+#
+# Установка (от root, один раз):
+#     cp deploy/logrotate-b24 /etc/logrotate.d/b24-auditor
+#     logrotate -d /etc/logrotate.d/b24-auditor   # проверка без изменений
+#     logrotate -f /etc/logrotate.d/b24-auditor   # первый прогон принудительно
+
+/home/Ai_agents_crm/logs/cron.log {
+    daily
+    rotate 7
+    size 100M
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su pars pars
+}
