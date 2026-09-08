@@ -308,7 +308,11 @@ def _pickup_lines(work_data: dict[str, Any]) -> list[str]:
               if row["person"] and row["missed_share"] >= _MISSED_SHARE][:3]
     if not people:
         return []
-    return ["  · не берут трубку: " + ", ".join(
+    # Свой заголовок с пустой строкой перед ним. Подпунктом эта строка
+    # прилипала к блоку выше и читалась как его продолжение: непринятые
+    # звонки оказывались частью рассказа про встречи, к которым отношения
+    # не имеют вовсе.
+    return ["\n📞 Не берут трубку: " + ", ".join(
         f"{row['name'] or 'id ' + str(row['user_id'])} "
         f"{row['missed']}/{row['incoming']}" for row in people
     )]
@@ -355,7 +359,8 @@ def _sellers_lines(sellers: dict[str, Any] | None) -> list[str]:
             f"{left['deals']} {_deals_word(left['deals'])} — {where}:"
         )
         lines += [
-            f"  · {row['title'][:40]} — «{row['from_name']}» → «{row['to_name']}»"
+            f"  · {wording.clip(row['title'], 40)} — "
+            f"«{row['from_name']}» → «{row['to_name']}»"
             + (f" ({row['assignee']})" if row.get("assignee") else "")
             for row in left["top"]
         ]
@@ -366,7 +371,7 @@ def _sellers_lines(sellers: dict[str, Any] | None) -> list[str]:
             f"{stalled['deals']} {_deals_word(stalled['deals'])}:"
         )
         lines += [
-            f"  · {row['title'][:40]} — «{row['stage_name']}», "
+            f"  · {wording.clip(row['title'], 40)} — «{row['stage_name']}», "
             f"{round(row['days_in_stage'])} дн"
             + (f" ({row['assignee']})" if row.get("assignee") else "")
             for row in stalled["top"]
@@ -536,7 +541,8 @@ def _event_lines(events: dict[str, Any] | None) -> list[str]:
             f"на {money(stalled['amount'])}:"
         )
         lines += [
-            f"  · {row['title'][:44]} — {money(row.get('opportunity') or 0)}, "
+            f"  · {wording.clip(row['title'], 44)} — "
+            f"{money(row.get('opportunity') or 0)}, "
             f"«{row['stage_name']}», {round(row['days_in_stage'])} дн"
             + (f" ({row['assignee']})" if row.get("assignee") else "")
             for row in stalled["top"]
@@ -550,7 +556,8 @@ def _event_lines(events: dict[str, Any] | None) -> list[str]:
             f"на {money(advanced['amount'])}:"
         )
         lines += [
-            f"  · {row['title'][:44]} — {money(row.get('opportunity') or 0)}, "
+            f"  · {wording.clip(row['title'], 44)} — "
+            f"{money(row.get('opportunity') or 0)}, "
             f"«{row['from_name']}» → «{row['to_name']}»"
             + (f" ({row['assignee']})" if row.get("assignee") else "")
             for row in advanced["top"]
@@ -564,7 +571,8 @@ def _event_lines(events: dict[str, Any] | None) -> list[str]:
             f"неверная квалификация на входе:"
         )
         lines += [
-            f"  · {row['title'][:44]}, «{row['from_name']}» → «{row['to_name']}»"
+            f"  · {wording.clip(row['title'], 44)}, "
+            f"«{row['from_name']}» → «{row['to_name']}»"
             + (f" ({row['assignee']})" if row.get("assignee") else "")
             for row in returned["top"]
         ]
@@ -581,7 +589,8 @@ def _event_lines(events: dict[str, Any] | None) -> list[str]:
 
     quality = events["quality"]
     if quality["won_without_amount"]:
-        names = ", ".join(row["title"][:30] for row in quality["won_without_amount"][:2])
+        names = ", ".join(wording.clip(row["title"], 30)
+                          for row in quality["won_without_amount"][:2])
         lines.append(
             f"\n⚠ {_verb(len(quality['won_without_amount']), 'Закрыта', 'Закрыто')} "
             f"без суммы: "

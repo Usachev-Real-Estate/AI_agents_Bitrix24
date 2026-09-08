@@ -194,7 +194,7 @@ def test_the_missed_calls_get_their_own_line(agency):
                 (500 + i, 0 if i < 45 else 1),
             )
 
-    assert "не берут трубку: Марат Абзалилов 45/60" in _lines()
+    assert "📞 Не берут трубку: Марат Абзалилов 45/60" in _lines()
 
 
 def test_a_broker_who_mostly_answers_is_not_named(agency):
@@ -212,7 +212,7 @@ def test_a_broker_who_mostly_answers_is_not_named(agency):
                 (600 + i, 0 if i < 15 else 1),
             )
 
-    assert "не берут трубку" not in _lines()
+    assert "Не берут трубку" not in _lines()
 
 
 def test_the_chat_gets_the_overdue_meetings(agency):
@@ -261,3 +261,42 @@ def test_meetings_without_a_date_name_the_blind_spot(agency):
 def test_a_funnel_without_meetings_says_nothing_about_them(agency):
     """Пустой блок не печатается — сводка не сообщает об отсутствии новостей."""
     assert "Просрочено встреч" not in _lines()
+
+
+def test_each_block_of_the_report_stands_on_its_own(agency):
+    """Непринятые звонки — не продолжение рассказа про встречи.
+
+    Подпунктом без заголовка строка прилипает к блоку выше и читается как
+    его часть: в живом прогоне «не берут трубку» оказалось внутри «просрочено
+    встреч», к которым отношения не имеет вовсе.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    past = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
+    with analytics_session() as conn:
+        conn.execute(
+            """
+            INSERT INTO fact_activity(activity_id, owner_type_id, owner_id,
+                provider_type_id, direction, subject, responsible_id,
+                created_at, start_time, completed, synced_at)
+            VALUES (900, 2, 1, 'TODO', NULL, 'Встреча с клиентом', 11,
+                    '2026-09-01T10:00:00+00:00', ?, 0, 'x')
+            """,
+            (past,),
+        )
+        for i in range(60):
+            conn.execute(
+                """
+                INSERT INTO fact_activity(activity_id, owner_type_id, owner_id,
+                    provider_type_id, direction, subject, responsible_id,
+                    created_at, start_time, completed, synced_at)
+                VALUES (?, 3, 9999, 'CALL', 1, '', 11,
+                        '2026-09-07T10:00:00+00:00', NULL, ?, 'x')
+                """,
+                (1000 + i, 0 if i < 45 else 1),
+            )
+
+    lines = _lines().splitlines()
+    phone = next(i for i, line in enumerate(lines) if "Не берут трубку" in line)
+    assert lines[phone - 1] == "", "у блока нет пустой строки перед заголовком"
+    assert not lines[phone].startswith("  ·"), "заголовок, а не подпункт"
