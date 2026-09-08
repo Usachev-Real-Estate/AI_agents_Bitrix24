@@ -197,8 +197,43 @@ def main() -> None:
         print(f"  {(row['name'] + ' · ' + row['dept'])[:40]:<42} "
               f"{row['missed']:>5} из {row['incoming']:>5}  ({share:.0f}%)")
 
+    head("8. Встреча: назначена, просрочена или проведена")
+    meetings = conn.execute(
+        """
+        SELECT a.subject, a.completed, a.start_time, a.created_at
+        FROM fact_activity a
+        WHERE a.provider_type_id IN ('TODO', 'MEETING')
+        """
+    ).fetchall()
+    kept = [row for row in meetings
+            if any(word in lower_ru(row["subject"]) for word in MEETING_WORDS)]
+    with_start = [row for row in kept if row["start_time"]]
+    print(f"  дел и активностей о встрече: {len(kept)}")
+    print(f"  из них с датой начала:       {len(with_start)}"
+          "   ← без неё «просрочена» не отличить")
+    now = _now_iso(conn)
+    done = sum(1 for row in kept if row["completed"])
+    overdue = sum(1 for row in kept
+                  if not row["completed"] and row["start_time"]
+                  and row["start_time"] < now)
+    ahead = sum(1 for row in kept
+                if not row["completed"] and row["start_time"]
+                and row["start_time"] >= now)
+    unknown = sum(1 for row in kept if not row["completed"] and not row["start_time"])
+    print(f"\n  проведена (выполнено):       {done}")
+    print(f"  назначена, срок не наступил:  {ahead}")
+    print(f"  ПРОСРОЧЕНА (срок прошёл):     {overdue}"
+          "   ← встреча не состоялась либо о ней не отчитались")
+    print(f"  не выполнено и без даты:      {unknown}")
+
     conn.close()
     _fields()
+
+
+def _now_iso(conn) -> str:
+    return conn.execute(
+        "SELECT strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now') AS now"
+    ).fetchone()["now"]
 
 
 def _fields() -> None:
