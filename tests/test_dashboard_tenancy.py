@@ -316,16 +316,16 @@ def test_metrics_never_touch_raw_tables_directly():
     # Список файлов и список таблиц растут вместе: новая адресная таблица без
     # строки здесь защищена только памятью следующего разработчика.
     forbidden = (
-        "fact_deal", "fact_lead", "fact_stage_event", "dim_user",
-        "plan_norm", "plan_roster",
+        "fact_deal", "fact_lead", "fact_stage_event", "fact_activity",
+        "dim_user", "plan_norm", "plan_roster",
     )
-    for name in ("metrics.py", "plans.py", "pulse.py"):
+    for name in ("metrics.py", "plans.py", "pulse.py", "events.py", "work.py"):
         source = (analytics / name).read_text(encoding="utf-8")
         found = {table for table in forbidden if re.search(rf"\b{table}\b", source)}
         assert not found, (
             f"{name} обращается к таблицам мимо представлений: {sorted(found)}. "
-            "Используйте v_deal / v_lead / v_stage_event / v_user / "
-            "v_plan_norm / v_plan_roster."
+            "Используйте v_deal / v_lead / v_stage_event / v_activity / "
+            "v_user / v_plan_norm / v_plan_roster."
         )
 
 

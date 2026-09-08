@@ -251,6 +251,15 @@ main { padding: 20px 24px 48px; max-width: 1560px; }
 }
 .section-title:first-child { margin-top: 0; }
 
+/* Заголовок таблицы внутри карточки: тише секции, громче строки. Две
+   таблицы в одной карточке без подписи читаются как одна разъехавшаяся. */
+.section-title.sub {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
 /* --------------------------------------------------------- плитки KPI */
 
 .tile-label {

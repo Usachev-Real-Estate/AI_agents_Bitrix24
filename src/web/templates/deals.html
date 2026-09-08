@@ -152,6 +152,126 @@
 <div class="card mt-16">
   <div class="card-head">
     <div>
+      <h2>Работа по карточкам</h2>
+      <p class="card-sub">По каким открытым карточкам разговаривали, а по каким нет</p>
+    </div>
+  </div>
+
+  {% if not work.cards %}
+    <div class="empty">В этой воронке нет открытых карточек.</div>
+  {% else %}
+  <div class="grid grid-kpi">
+    {{ ui.tile('Без разговора', work.untouched | int_ru,
+               hint=(work.untouched_share | pct) ~ ' из ' ~ (work.cards | int_ru)
+                    ~ ' открытых') }}
+    {{ ui.tile('Звонили и бросили', work.silent | int_ru,
+               hint='последний разговор дольше ' ~ work.silent_days ~ ' дней назад') }}
+    {{ ui.tile('Разговоров всего', work.talks | int_ru,
+               hint='из них исходящих ' ~ (work.outgoing | int_ru)) }}
+    {{ ui.tile('Встреч', work.meetings | int_ru,
+               hint='отмечено в портале за всё окно витрины') }}
+  </div>
+
+  <div class="grid grid-2 mt-16">
+    <div>
+      <h3 class="section-title sub">По стадиям</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Стадия</th><th class="num">Карточек</th>
+              <th class="num">Без разговора</th><th class="num">Лежит</th>
+              <th class="num">Разговоров</th></tr>
+          </thead>
+          <tbody>
+            {% for row in work.by_stage %}
+            <tr>
+              <td>
+                <a href="{{ base_path }}/table?{{ qs(request, stage=row.key, open='1', all_time='1') }}"
+                   title="Показать карточки этой стадии">{{ row.name }}</a>
+              </td>
+              <td class="num">{{ row.cards | int_ru }}</td>
+              <td class="num">{{ row.untouched | int_ru }}</td>
+              <td class="num {{ 'delta-down' if row.cold_share >= 50 else '' }}">
+                {{ row.cold_share | pct }}</td>
+              <td class="num muted">{{ row.talks | int_ru }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div>
+      <h3 class="section-title sub">По брокерам</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Брокер</th><th class="num">Карточек</th>
+              <th class="num">Без разговора</th><th class="num">Лежит</th>
+              <th class="num">Разговоров</th></tr>
+          </thead>
+          <tbody>
+            {% for row in work.by_user %}
+            <tr>
+              <td>
+                <a href="{{ base_path }}/table?{{ qs(request, assignee=row.key, open='1', all_time='1') }}"
+                   title="Показать карточки этого брокера">{{ row.name }}</a>
+                <span class="muted">· {{ row.department }}</span>
+              </td>
+              <td class="num">{{ row.cards | int_ru }}</td>
+              <td class="num">{{ row.untouched | int_ru }}</td>
+              <td class="num {{ 'delta-down' if row.cold_share >= 50 else '' }}">
+                {{ row.cold_share | pct }}</td>
+              <td class="num muted">{{ row.talks | int_ru }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  {% if work.worst %}
+  <h3 class="section-title sub mt-16">Дольше всех лежат без единого разговора</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Карточка</th><th>Стадия</th><th>Брокер</th>
+        <th class="num">Дней с заведения</th></tr></thead>
+      <tbody>
+        {% for row in work.worst %}
+        <tr>
+          <td><a href="{{ crm_link('deal', row.deal_id) }}"
+                 target="_blank" rel="noopener">{{ row.title }}</a></td>
+          <td>{{ row.stage_name }}</td>
+          <td>{{ row.broker }}</td>
+          <td class="num">{{ row.age_days | days }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% if work.shared_contacts %}
+  <div class="notice mt-14"><span>ℹ</span>
+    <span>У {{ work.shared_contacts | int_ru }} карточек контакт заведён ещё и
+      в другой воронке: их звонки по той сделке попадут в счёт этой. Перекос
+      в безопасную сторону — карточка выглядит отработаннее, чем есть, — но
+      молчание он спрятать может.</span></div>
+  {% endif %}
+
+  {{ ui.definition('Разговор — это CALL и MEETING, и только они. TODO и задача
+    сотруднику — планирование: засчитав их, отчёт назвал бы лучшим работником того,
+    кто аккуратно ведёт список дел и не звонит. Действие ищется и на сделке, и на
+    контакте сделки — звонок чаще висит на контакте, и счёт только по сделке назвал
+    бы молчащими тех, кто звонил. Входящий звонок считается разговором, но в
+    «исходящие» не идёт: клиент позвонил сам — это не заслуга брокера.') }}
+  {% endif %}
+</div>
+
+<div class="card mt-16">
+  <div class="card-head">
+    <div>
       <h2>Источники</h2>
       <p class="card-sub">Что привёл каждый канал из сделок, созданных за период</p>
     </div>

@@ -15,6 +15,7 @@ import metrics
 import objects
 import plans
 import pulse as pulse_metrics
+import work
 from context import base_context, read_analytics
 
 router = APIRouter()
@@ -122,6 +123,12 @@ async def deals(request: Request) -> HTMLResponse:
             # проверяют работу. Денежные блоки страницы показывали бы нули,
             # а ноль рублей и «поле не заполняют» — разные утверждения.
             "with_money": metrics.money_funnel(category_id),
+            # «По карточке работали» — вопрос, на который движение по
+            # стадиям не отвечает: объект в рекламе месяцами стоит на одной
+            # стадии и у того, кто по нему звонит, и у того, кто забыл.
+            "work": work.card_work(
+                conn, [category_id], department_id=context["department_id"],
+            ),
             "charts": {
                 "funnel": chartdata.funnel_chart(funnel),
                 "durations": chartdata.durations_chart(durations),

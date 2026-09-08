@@ -46,6 +46,7 @@ import events as funnel  # noqa: E402
 import metrics  # noqa: E402
 import plans  # noqa: E402
 import pulse as pulse_metrics  # noqa: E402
+import work  # noqa: E402
 from config import get_settings, setup_logging  # noqa: E402
 from notify import (  # noqa: E402
     send_chat_message_chunked,
@@ -168,6 +169,7 @@ def format_events(
     events: dict[str, Any],
     window: dict[str, Any],
     sellers: dict[str, Any] | None = None,
+    sellers_work: dict[str, Any] | None = None,
 ) -> str:
     """Разбор воронок отдельным сообщением в общий чат.
 
@@ -178,12 +180,72 @@ def format_events(
     lines = _event_lines(events)
     if lines:
         lines = [f"🔎 Воронка за {window['label']}{_funnel_note(data)}"] + lines
-    sellers_lines = _sellers_lines(sellers)
+    sellers_lines = _sellers_lines(sellers) + _work_lines(sellers_work)
     if sellers_lines:
         lines += ([""] if lines else []) + [
             f"🏠 Продавцы за {window['label']}"
         ] + sellers_lines
     return "\n".join(lines)
+
+
+def _work_lines(work_data: dict[str, Any] | None) -> list[str]:
+    """По каким карточкам собственников вообще не разговаривали.
+
+    Единственный блок сводки, который смотрит не на сутки, а на состояние.
+    Карточка, до которой не дошли руки полгода, вчера ничем себя не
+    проявила: суточное окно её не покажет никогда, а вопрос «как отработали
+    выданные контакты» — ровно про неё.
+
+    Ведущее число — сколько карточек лежит без разговора, а не сколько
+    звонков сделано. Звонки складываются в большое число даже когда их все
+    сделал один человек по трём карточкам.
+
+    Строка про брокеров называет долю, а не количество: у одного в работе
+    52 карточки, у другого 11, и «двадцать молчащих» значит у них разное.
+    """
+    if not work_data or not work_data["cards"]:
+        return []
+    lines = [
+        f"\n🔕 Без разговора {work_data['untouched']} "
+        f"{_cards_word(work_data['untouched'])} из {work_data['cards']} "
+        f"({work_data['untouched_share']:.0f}%)"
+    ]
+    if work_data["silent"]:
+        lines.append(
+            f"  · ещё {work_data['silent']} — звонили, но дольше "
+            f"{work_data['silent_days']} дней назад"
+        )
+    worst = [
+        row for row in work_data["by_user"]
+        if row["cards"] >= _MIN_CARDS and row["cold_share"] >= _COLD_SHARE
+    ][:3]
+    if worst:
+        lines.append("  · больше всего лежит у: " + ", ".join(
+            f"{row['name']} {row['cold']}/{row['cards']}" for row in worst
+        ))
+    stage = max(work_data["by_stage"], key=lambda row: row["untouched"],
+                default=None)
+    if stage and stage["untouched"]:
+        lines.append(
+            f"  · чаще всего на стадии «{stage['name']}»: "
+            f"{stage['untouched']} из {stage['cards']}"
+        )
+    return lines
+
+
+def _cards_word(count: int) -> str:
+    tail = count % 100
+    if 11 <= tail <= 14:
+        return "карточек"
+    return {1: "карточка", 2: "карточки", 3: "карточки", 4: "карточки"}.get(
+        count % 10, "карточек")
+
+
+# Кого называть поимённо. Брокер с тремя карточками, из которых молчат две,
+# даёт 67% и возглавил бы список, ничего при этом не значив; порог по числу
+# карточек оставляет в списке тех, у кого лежит настоящий объём.
+_MIN_CARDS = 10
+_COLD_SHARE = 50.0
 
 
 def _sellers_lines(sellers: dict[str, Any] | None) -> list[str]:
@@ -525,6 +587,12 @@ def build(period_code: str, url: str, now: datetime | None = None) -> list[dict[
             conn, window["since"], window["until"],
             categories=[int(settings.sellers_category_id)],
         )
+        # События отвечают «что случилось вчера», работа — «по чему вообще
+        # не работают». Второй вопрос не суточный: карточка, до которой не
+        # дошли руки полгода, вчера ничем себя не проявила.
+        sellers_work = work.card_work(
+            conn, [int(settings.sellers_category_id)],
+        )
 
     chat_id = int(settings.pulse_events_chat_id or 0)
     if not chat_id:
@@ -540,7 +608,8 @@ def build(period_code: str, url: str, now: datetime | None = None) -> list[dict[
         })
 
     if chat_id:
-        text = format_events(company, company_events, window, sellers)
+        text = format_events(company, company_events, window, sellers,
+                             sellers_work)
         if text:
             deliveries.append({
                 "chat_id": chat_id, "name": f"Разбор воронки → чат {chat_id}",
