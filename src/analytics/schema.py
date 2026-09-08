@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -244,7 +245,18 @@ _DDL: tuple[str, ...] = (
 
 
 def resolve_db_path(db_path: str | Path | None = None) -> Path:
-    """Путь к файлу витрины. None → значение из настроек."""
+    """Путь к файлу витрины. None → значение из настроек.
+
+    Если настройки не загрузились — не хватает обязательного поля, скрипт
+    запущен без полного окружения, — путь всё равно берётся из
+    ``ANALYTICS_DB_PATH``, если он задан, и только потом из умолчания.
+
+    Иначе выходит ловушка: человек указывает путь переменной окружения,
+    настройки молча падают на нехватке ключа Битрикса, и скрипт читает или
+    ПИШЕТ в боевую витрину вместо названной. Поймано на своём же
+    диагностическом запросе — он собирался ходить во временную базу, а сходил
+    в data/analytics.db и ничем этого не показал.
+    """
     if db_path is not None:
         return Path(db_path)
     try:
@@ -252,7 +264,7 @@ def resolve_db_path(db_path: str | Path | None = None) -> Path:
 
         return Path(get_settings().analytics_db_path)
     except Exception:  # pragma: no cover - конфиг недоступен в изолированных тестах
-        return DEFAULT_DB_PATH
+        return Path(os.environ.get("ANALYTICS_DB_PATH") or DEFAULT_DB_PATH)
 
 
 def get_connection(db_path: str | Path | None = None, *, readonly: bool = False):

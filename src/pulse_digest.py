@@ -187,25 +187,35 @@ def _stuck_lines(data: dict[str, Any], company: bool) -> list[str]:
     """Где остановились деньги. Ответ на «куда поднажать».
 
     Не отдел с худшим процентом, а сделки, стоящие на стадии дольше нормы
-    этой стадии, и сумма на них. Процент говорит, что уже случилось;
-    зависшие деньги — что можно сделать сегодня.
+    этой стадии. Процент говорит, что уже случилось; остановившиеся карточки —
+    что можно сделать сегодня.
+
+    Впереди стоит КОЛИЧЕСТВО, а сумма названа «проставлено в карточках».
+    Первая формулировка — «стоят без движения 572,6 млн» — на боевых данных
+    читалась как «у нас полмиллиарда на столе», хотя означала другое: в
+    двухстах двадцати четырёх карточках, которые никто не двигает, кем-то
+    когда-то проставлены суммы. Это разные новости, и вторая проверяема, а
+    первая нет: сумма открытой сделки — намерение, а не деньги.
     """
     stuck = data.get("stuck")
     if not stuck or not stuck["deals"]:
         return []
     head = (
-        f"Стоят без движения {money(stuck['amount'])} "
-        f"в {stuck['deals']} {_deals_word(stuck['deals'])}"
+        f"Не двигаются {stuck['deals']} {_deals_word(stuck['deals'])}; "
+        f"в карточках проставлено {money(stuck['amount'])}"
     )
     if not company:
         return [head]
     worst = max(
         (row for row in data["departments"] if row.get("stuck")),
-        key=lambda row: row["stuck"]["amount"],
+        key=lambda row: row["stuck"]["deals"],
         default=None,
     )
-    if worst and worst["stuck"]["amount"]:
-        head += f"; больше всего у отдела «{worst['name']}» ({money(worst['stuck']['amount'])})"
+    if worst and worst["stuck"]["deals"]:
+        head += (
+            f"; больше всего у отдела «{worst['name']}» "
+            f"({worst['stuck']['deals']} {_deals_word(worst['stuck']['deals'])})"
+        )
     return [head]
 
 

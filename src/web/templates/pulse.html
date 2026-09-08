@@ -191,7 +191,7 @@
 </div>
 
 {% if p.stuck and p.stuck.deals %}
-<h2 class="section-title">Где стоят деньги</h2>
+<h2 class="section-title">Что не двигается</h2>
 {#
   Ответ на вопрос «куда поднажать» — не отдел с худшим процентом, а сделки,
   переставшие двигаться. Зависшая сделка — стоящая на стадии дольше 75-го
@@ -208,8 +208,8 @@
       <thead>
         <tr>
           <th>Отдел</th>
-          <th class="num">Денег стоит</th>
-          <th class="num">Сделок</th>
+          <th class="num">Сделок стоит</th>
+          <th class="num">Проставлено в карточках</th>
           <th class="num">Сумма заполнена</th>
         </tr>
       </thead>
@@ -217,8 +217,8 @@
         {% for row in p.departments if row.stuck and row.stuck.deals %}
         <tr>
           <td>{{ row.name }}</td>
-          <td class="num">{{ row.stuck.amount | money(short=True) }}</td>
           <td class="num">{{ row.stuck.deals | int_ru }}</td>
+          <td class="num">{{ row.stuck.amount | money(short=True) }}</td>
           <td class="num">{{ row.stuck.coverage | pct }}</td>
         </tr>
         {% endfor %}
@@ -226,8 +226,8 @@
       <tfoot>
         <tr>
           <td>Всего</td>
-          <td class="num">{{ p.stuck.amount | money(short=True) }}</td>
           <td class="num">{{ p.stuck.deals | int_ru }}</td>
+          <td class="num">{{ p.stuck.amount | money(short=True) }}</td>
           <td class="num">{{ p.stuck.coverage | pct }}</td>
         </tr>
       </tfoot>
@@ -235,8 +235,10 @@
   </div>
   {{ ui.definition('Зависшая сделка стоит на своей стадии дольше, чем три четверти
     сделок этой же стадии. Это не просрочка и не вина — это место, где движение
-    остановилось, и деньги, которые за ним стоят. Сумма посчитана по всем таким
-    сделкам, а не по первым пятидесяти: список на «Движении» обрезан для показа.') }}
+    остановилось. Впереди стоит количество, а не сумма: сумма открытой сделки —
+    намерение, а не деньги, и складывать намерения в «столько-то миллионов на
+    столе» значит обещать себе то, чего нет. Считается по всем таким сделкам, а
+    не по первым пятидесяти: список на «Движении» обрезан для показа.') }}
 </div>
 {% endif %}
 
