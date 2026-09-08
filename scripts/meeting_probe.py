@@ -36,10 +36,20 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-_SRC = Path(__file__).resolve().parent.parent / "src"
-for _path in (_SRC, _SRC / "analytics"):
-    if str(_path) not in sys.path:
-        sys.path.insert(0, str(_path))
+# Скрипт запускают двумя способами: из репозитория (лежит в scripts/) и
+# смонтированным в корень образа (-v ...:/app/meeting_probe.py). Во втором
+# случае __file__/../.. уезжает в «/», и путь, посчитанный только от файла,
+# даёт ModuleNotFoundError уже после того, как команда принята. Поэтому
+# проверяются оба корня, и берётся тот, где витрина действительно лежит.
+for _root in (Path(__file__).resolve().parent.parent, Path.cwd(), Path("/app")):
+    _src = _root / "src"
+    if (_src / "analytics" / "schema.py").exists():
+        for _path in (_src, _src / "analytics"):
+            if str(_path) not in sys.path:
+                sys.path.insert(0, str(_path))
+        break
+else:  # pragma: no cover — на сервере каталог есть всегда
+    raise SystemExit("не найден каталог src: запускайте из корня проекта")
 
 from schema import get_connection  # noqa: E402
 

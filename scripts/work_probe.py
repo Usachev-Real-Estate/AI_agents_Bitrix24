@@ -26,11 +26,22 @@ git show, а не выкладывается в рабочее дерево: п�
 import sys
 from collections import Counter
 from datetime import datetime, timezone
+from pathlib import Path
 
-sys.path.insert(0, "src")
-sys.path.insert(0, "src/analytics")
+# Скрипт запускают двумя способами: из репозитория (лежит в scripts/) и
+# смонтированным в корень образа. Путь, посчитанный одним способом, во
+# втором случае даёт ModuleNotFoundError уже после того, как команда
+# принята, — поэтому проверяются оба корня, и берётся тот, где витрина есть.
+for _root in (Path(__file__).resolve().parent.parent, Path.cwd(), Path("/app")):
+    _src = _root / "src"
+    if (_src / "analytics" / "schema.py").exists():
+        for _path in (_src, _src / "analytics"):
+            if str(_path) not in sys.path:
+                sys.path.insert(0, str(_path))
+        break
+else:  # pragma: no cover — на сервере каталог есть всегда
+    raise SystemExit("не найден каталог src: запускайте из корня проекта")
 
-import analytics  # noqa: F401,E402  — кладёт src/analytics на sys.path
 from schema import get_connection  # noqa: E402
 
 SELLERS = 0
