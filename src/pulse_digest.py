@@ -239,7 +239,50 @@ def _work_lines(work_data: dict[str, Any] | None) -> list[str]:
             f"  · чаще всего на стадии «{stage['name']}»: "
             f"{stage['nothing']} из {stage['cards']}"
         )
+    lines += _meeting_lines(work_data)
     lines += _pickup_lines(work_data)
+    return lines
+
+
+def _meeting_lines(work_data: dict[str, Any]) -> list[str]:
+    """Встречи, у которых срок прошёл, а дело не закрыто.
+
+    Печатается только просроченное. Проведённые копятся за всё окно витрины
+    и новостью не бывают; назначенные на будущее вопросов не вызывают.
+    Просроченная встреча — вопрос: либо не состоялась, либо о ней не
+    отчитались, и оба ответа стоят разговора.
+
+    Встречи без даты названы рядом, а не спрятаны. По ним просрочку не
+    отличить вовсе, и молчать о размере слепого пятна значит выдать часть
+    картины за всю.
+    """
+    overdue = work_data.get("meetings_overdue") or 0
+    undated = work_data.get("meetings_undated") or 0
+    if not overdue and not undated:
+        return []
+    lines = []
+    if overdue:
+        lines.append(
+            f"\n📅 Просрочено встреч: {overdue} — срок прошёл, дело не закрыто"
+        )
+        # Сортировка своя: by_user разложен по холодным карточкам, и первые
+        # три из него могут не иметь просрочек вовсе, пока у четвёртого их
+        # десяток. Список, названный «у кого», обязан называть тех, у кого.
+        worst = sorted(
+            (row for row in work_data["by_user"] if row.get("meetings_overdue")),
+            key=lambda row: -row["meetings_overdue"],
+        )[:3]
+        if worst:
+            lines.append("  · у кого: " + ", ".join(
+                f"{row['name']} {row['meetings_overdue']}" for row in worst
+            ))
+        held, planned = work_data.get("meetings") or 0, work_data.get("meetings_planned") or 0
+        lines.append(f"  · назначено ещё {planned}, проведено за всё окно {held}")
+    if undated:
+        lines.append(
+            f"  · у {undated} встреч срок не проставлен — просрочку по ним "
+            "не отличить"
+        )
     return lines
 
 

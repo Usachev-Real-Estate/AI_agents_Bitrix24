@@ -213,3 +213,51 @@ def test_a_broker_who_mostly_answers_is_not_named(agency):
             )
 
     assert "не берут трубку" not in _lines()
+
+
+def test_the_chat_gets_the_overdue_meetings(agency):
+    """Просроченные встречи идут в чат вместе с остальным разбором.
+
+    Печатается только просроченное. Проведённые копятся за всё окно витрины
+    и новостью не бывают, назначенные на будущее вопросов не вызывают.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    past = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
+    with analytics_session() as conn:
+        for i in (1, 2, 3):
+            conn.execute(
+                """
+                INSERT INTO fact_activity(activity_id, owner_type_id, owner_id,
+                    provider_type_id, direction, subject, responsible_id,
+                    created_at, start_time, completed, synced_at)
+                VALUES (?, 2, ?, 'TODO', NULL, 'Встреча с клиентом', 11,
+                        '2026-09-01T10:00:00+00:00', ?, 0, 'x')
+                """,
+                (700 + i, i, past),
+            )
+
+    text = _lines()
+    assert "Просрочено встреч: 3" in text
+    assert "у кого: Марат Абзалилов 3" in text
+
+
+def test_meetings_without_a_date_name_the_blind_spot(agency):
+    """Молчать о размере слепого пятна значит выдать часть картины за всю."""
+    with analytics_session() as conn:
+        conn.execute(
+            """
+            INSERT INTO fact_activity(activity_id, owner_type_id, owner_id,
+                provider_type_id, direction, subject, responsible_id,
+                created_at, start_time, completed, synced_at)
+            VALUES (800, 2, 1, 'TODO', NULL, 'Показ', 11,
+                    '2026-09-01T10:00:00+00:00', NULL, 0, 'x')
+            """
+        )
+
+    assert "срок не проставлен" in _lines()
+
+
+def test_a_funnel_without_meetings_says_nothing_about_them(agency):
+    """Пустой блок не печатается — сводка не сообщает об отсутствии новостей."""
+    assert "Просрочено встреч" not in _lines()

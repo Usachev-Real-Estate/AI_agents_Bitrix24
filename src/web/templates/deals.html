@@ -168,14 +168,24 @@
                hint='дело выполнено, записи разговора нет') }}
     {{ ui.tile('Звонили и бросили', work.silent | int_ru,
                hint='последний разговор дольше ' ~ work.silent_days ~ ' дней назад') }}
-    {{ ui.tile('Встреч', work.meetings | int_ru,
+    {{ ui.tile('Встреч проведено', work.meetings | int_ru,
                hint='активности «встреча» плюс выполненные дела о встрече') }}
+    {{ ui.tile('Встреч просрочено', work.meetings_overdue | int_ru,
+               hint='срок прошёл, дело не закрыто; назначено ещё '
+                    ~ (work.meetings_planned | int_ru)) }}
     {{ ui.tile('Разговоров', work.talks | int_ru,
                hint='из них исходящих звонков ' ~ (work.outgoing | int_ru)) }}
     {{ ui.tile('Не приняли звонков', work.missed | int_ru,
                hint='по ' ~ (work.never_returned | int_ru)
                     ~ ' карточкам так и не перезвонили') }}
   </div>
+
+  {% if work.meetings_undated %}
+  <div class="notice notice-warn mt-14"><span>⚠</span>
+    <span>У {{ work.meetings_undated | int_ru }} незакрытых встреч не проставлен
+      срок — просрочку по ним не отличить. Если таких много, признак не годится
+      и дату придётся брать из поля карточки, а не из дела.</span></div>
+  {% endif %}
 
   <div class="notice mt-14"><span>ℹ</span>
     <span>«Только отметка» — это не обвинение и не работа. Брокер закрыл дело,
