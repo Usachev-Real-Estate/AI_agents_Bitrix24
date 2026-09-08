@@ -56,6 +56,7 @@ def funnel_events(
         "stalled": _stalled(conn, cats, window_days),
         "advanced": _pack([m for m in moves if m["to_sort"] > m["from_sort"]]),
         "returned": _pack([m for m in moves if m["to_sort"] < m["from_sort"]]),
+        "left_work": _left_work(conn, since, until, cats),
         "silent": _silent(conn, cats, on_plan_ids, silence_days),
         "quality": _quality(conn, since, until, cats),
         "currency": base_currency(),
@@ -95,6 +96,11 @@ def _moves(
     Закрытые сделки исключены. Выигранная сделка уже названа в строке про
     деньги, и повторять её в «сдвинулись вперёд» значит показать одни и те
     же деньги дважды.
+
+    Проигрышные стадии исключены отдельно, а не через is_closed. У продавцов
+    «Отложенная продажа» стоит по порядку выше «Переговоров», и по одному
+    только sort уход в неё читался бы как движение вперёд — то есть потеря
+    собственника попадала бы в блок хороших новостей.
     """
     where, params = plans.category_filter("d", categories)
     return _rows(
@@ -117,11 +123,66 @@ def _moves(
           ON st.stage_id = e2.stage_id AND st.category_id = d.category_id
         LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
         WHERE e1.entity_type = 'deal' AND d.is_closed = 0 AND {where}
+          AND COALESCE(st.semantic, '') <> 'lost'
           AND e2.entered_at >= :since AND e2.entered_at < :until
         ORDER BY d.opportunity DESC
         """,
         {"since": since, "until": until, **params},
     )
+
+
+def _left_work(
+    conn, since: str, until: str, categories: Sequence[int],
+) -> dict[str, Any]:
+    """Карточки, ушедшие из работы в окне: проиграны или отложены.
+
+    Главный вопрос собственника про воронку продавцов — где брокеры не
+    дорабатывают. Отвечает на него не число потерь, а стадия, С КОТОРОЙ
+    ушли: собственник, потерянный на переговорах, и собственник, до которого
+    не доехали на встречу, — это две разные недоработки.
+
+    Отложенная продажа считается потерей наравне с проигрышем: в портале у
+    неё семантика lost, и витрина не выдумывает третьего состояния там, где
+    агентство завело два.
+
+    Семантика берётся из справочника стадий, а не из порядка: у продавцов
+    «Отложенная продажа» стоит выше «Переговоров», и по sort уход в неё
+    выглядел бы продвижением вперёд.
+    """
+    where, params = plans.category_filter("d", categories)
+    rows = _rows(
+        conn,
+        f"""
+        SELECT d.deal_id, d.title, d.opportunity, d.currency_id,
+               COALESCE(sf.name, e1.stage_id) AS from_name,
+               st.name AS to_name,
+               COALESCE(u.name, '') AS assignee
+        FROM v_stage_event e1
+        JOIN v_stage_event e2
+          ON e2.entity_type = e1.entity_type AND e2.entity_id = e1.entity_id
+         AND e2.seq = e1.seq + 1
+        JOIN v_deal d ON d.deal_id = e1.entity_id
+        JOIN dim_stage st
+          ON st.stage_id = e2.stage_id AND st.category_id = d.category_id
+         AND st.semantic = 'lost'
+        LEFT JOIN dim_stage sf
+          ON sf.stage_id = e1.stage_id AND sf.category_id = d.category_id
+        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
+        WHERE e1.entity_type = 'deal' AND {where}
+          AND e2.entered_at >= :since AND e2.entered_at < :until
+        ORDER BY d.opportunity DESC
+        """,
+        {"since": since, "until": until, **params},
+    )
+    by_stage: dict[str, int] = {}
+    for row in rows:
+        by_stage[row["from_name"]] = by_stage.get(row["from_name"], 0) + 1
+    return {
+        **_pack(rows),
+        # Откуда ушли — важнее, чем сколько. Это и есть ответ на вопрос
+        # «на каком этапе не дорабатывают».
+        "by_stage": sorted(by_stage.items(), key=lambda item: -item[1]),
+    }
 
 
 def _silent(

@@ -164,19 +164,70 @@ def format_department(data: dict[str, Any], yesterday: dict[str, Any], url: str)
 
 
 def format_events(
-    data: dict[str, Any], events: dict[str, Any], window: dict[str, Any],
+    data: dict[str, Any],
+    events: dict[str, Any],
+    window: dict[str, Any],
+    sellers: dict[str, Any] | None = None,
 ) -> str:
-    """Разбор воронки отдельным сообщением в общий чат.
+    """Разбор воронок отдельным сообщением в общий чат.
 
     Пустой возврат означает «в этот день ничего не произошло» — и тогда
     сообщения не будет вовсе. Ежедневная рассылка, сообщающая «событий нет»,
     приучает не открывать себя раньше, чем в ней появится важное.
     """
     lines = _event_lines(events)
-    if not lines:
-        return ""
-    head = f"🔎 Воронка за {window['label']}{_funnel_note(data)}"
-    return "\n".join([head] + lines)
+    if lines:
+        lines = [f"🔎 Воронка за {window['label']}{_funnel_note(data)}"] + lines
+    sellers_lines = _sellers_lines(sellers)
+    if sellers_lines:
+        lines += ([""] if lines else []) + [
+            f"🏠 Продавцы за {window['label']}"
+        ] + sellers_lines
+    return "\n".join(lines)
+
+
+def _sellers_lines(sellers: dict[str, Any] | None) -> list[str]:
+    """Где не дорабатывают с собственниками.
+
+    Отвечает не число потерь, а стадия, С КОТОРОЙ ушли: собственник,
+    потерянный на переговорах, и собственник, до которого не доехали на
+    встречу, — это две разные недоработки, и разговор с брокером о них
+    разный.
+
+    Отложенная продажа считается потерей наравне с проигрышем: в портале у
+    неё семантика lost, и выдумывать третье состояние там, где агентство
+    завело два, значит спорить с самим агентством.
+    """
+    if not sellers:
+        return []
+    lines: list[str] = []
+    left = sellers["left_work"]
+    if left["deals"]:
+        where = ", ".join(
+            f"«{stage}» {count}" for stage, count in left["by_stage"]
+        )
+        lines.append(
+            f"\n🔻 {_verb(left['deals'], 'Ушла', 'Ушли')} из работы "
+            f"{left['deals']} {_deals_word(left['deals'])} — {where}:"
+        )
+        lines += [
+            f"  · {row['title'][:40]} — «{row['from_name']}» → «{row['to_name']}»"
+            + (f" ({row['assignee']})" if row.get("assignee") else "")
+            for row in left["top"]
+        ]
+    stalled = sellers["stalled"]
+    if stalled["deals"]:
+        lines.append(
+            f"\n🟠 {_verb(stalled['deals'], 'Встала', 'Встали')} "
+            f"{stalled['deals']} {_deals_word(stalled['deals'])}:"
+        )
+        lines += [
+            f"  · {row['title'][:40]} — «{row['stage_name']}», "
+            f"{round(row['days_in_stage'])} дн"
+            + (f" ({row['assignee']})" if row.get("assignee") else "")
+            for row in stalled["top"]
+        ]
+    return lines
 
 
 def _breakeven_lines(data: dict[str, Any]) -> list[str]:
@@ -466,6 +517,15 @@ def build(period_code: str, url: str, now: datetime | None = None) -> list[dict[
     # Разбор воронки уходит в общий чат, а не в личную сводку директора: там
     # его видят все, кого он касается. Чат не задан — разбор остаётся в
     # сводке, чтобы выкатка без настройки не потеряла его молча.
+        # Воронка продавцов разбирается отдельно и в план не входит: там
+        # другой чек и другая работа. Вопрос к ней один — где брокеры не
+        # дорабатывают с собственниками, — и отвечают на него уходы в
+        # проигрыш и отложенную продажу, а не деньги.
+        sellers = funnel.funnel_events(
+            conn, window["since"], window["until"],
+            categories=[int(settings.sellers_category_id)],
+        )
+
     chat_id = int(settings.pulse_events_chat_id or 0)
     if not chat_id:
         company["events"] = company_events
@@ -480,7 +540,7 @@ def build(period_code: str, url: str, now: datetime | None = None) -> list[dict[
         })
 
     if chat_id:
-        text = format_events(company, company_events, window)
+        text = format_events(company, company_events, window, sellers)
         if text:
             deliveries.append({
                 "chat_id": chat_id, "name": f"Разбор воронки → чат {chat_id}",
