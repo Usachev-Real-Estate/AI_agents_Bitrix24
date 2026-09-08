@@ -39,6 +39,7 @@ from schema import (  # noqa: E402
     init_analytics_db,
 )
 from stages import (  # noqa: E402
+    ENTITY_ACTIVITY,
     ENTITY_DEAL,
     ENTITY_LEAD,
     build_stage_events,
@@ -436,6 +437,102 @@ def sync_deals(
     return touched
 
 
+ACTIVITY_SELECT = [
+    "ID", "OWNER_TYPE_ID", "OWNER_ID", "PROVIDER_TYPE_ID", "DIRECTION",
+    "SUBJECT", "RESPONSIBLE_ID", "CREATED", "START_TIME", "END_TIME", "COMPLETED",
+]
+
+_ACTIVITY_UPSERT = """
+INSERT INTO fact_activity(
+    activity_id, owner_type_id, owner_id, provider_type_id, direction,
+    subject, responsible_id, created_at, start_time, end_time, completed, synced_at
+) VALUES (
+    :activity_id, :owner_type_id, :owner_id, :provider_type_id, :direction,
+    :subject, :responsible_id, :created_at, :start_time, :end_time, :completed,
+    :synced_at
+)
+ON CONFLICT(activity_id) DO UPDATE SET
+    owner_type_id = excluded.owner_type_id,
+    owner_id = excluded.owner_id,
+    provider_type_id = excluded.provider_type_id,
+    direction = excluded.direction,
+    subject = excluded.subject,
+    responsible_id = excluded.responsible_id,
+    created_at = excluded.created_at,
+    start_time = excluded.start_time,
+    end_time = excluded.end_time,
+    completed = excluded.completed,
+    synced_at = excluded.synced_at
+"""
+
+
+def _activity_row(raw: dict[str, Any], now: str) -> dict[str, Any]:
+    return {
+        "activity_id": _int(raw.get("ID")),
+        # 1 — лид, 2 — сделка, 3 — контакт, 4 — компания. Числа заданы
+        # Битриксом, не нами, поэтому хранятся как есть, а не переводятся в
+        # слова: перевод — это ещё одно место, где можно ошибиться.
+        "owner_type_id": _int(raw.get("OWNER_TYPE_ID")),
+        "owner_id": _int(raw.get("OWNER_ID")),
+        "provider_type_id": _str(raw.get("PROVIDER_TYPE_ID")),
+        "direction": _int(raw.get("DIRECTION")) or None,
+        "subject": _str(raw.get("SUBJECT")),
+        "responsible_id": _int(raw.get("RESPONSIBLE_ID")) or None,
+        "created_at": to_utc_iso(raw.get("CREATED")),
+        "start_time": to_utc_iso(raw.get("START_TIME")),
+        "end_time": to_utc_iso(raw.get("END_TIME")),
+        "completed": 1 if _str(raw.get("COMPLETED")).upper() == "Y" else 0,
+        "synced_at": now,
+    }
+
+
+def sync_activities(
+    client: BitrixClient,
+    conn,
+    *,
+    since: str,
+    modified_since: str | None = None,
+) -> int:
+    """Звонки, встречи и прочие действия по карточкам.
+
+    Зачем это витрине. Движение по стадиям отвечает на вопрос «карточка
+    двигалась», но не на вопрос «по карточке работали». Объект в рекламе
+    месяцами стоит на одной стадии, пока брокер по нему звонит, и без
+    действий эти два состояния неразличимы — а именно их и просили
+    различать.
+
+    Тянутся ВСЕ владельцы, а не только сделки. На боевом портале действий на
+    контактах больше, чем на сделках (11 690 против 7 102 за год): звонок
+    привязан к контакту, а сделка ссылается на тот же контакт своим полем.
+    Взяв только сделки, отчёт назвал бы молчащими тех, кто звонил.
+
+    Догрузка идёт по CREATED, а не по дате изменения: у активности нет
+    аналога DATE_MODIFY, а дозаписывают их редко — карточка звонка после
+    завершения не меняется.
+    """
+    now = utc_now_iso()
+    activity_filter: dict[str, Any] = {">=CREATED": modified_since or since}
+
+    saved = 0
+    batch: list[dict[str, Any]] = []
+    for raw in client.list_by_id(
+        "crm.activity.list", {"filter": activity_filter, "select": ACTIVITY_SELECT},
+    ):
+        row = _activity_row(raw, now)
+        if not row["activity_id"] or not row["created_at"]:
+            continue
+        batch.append(row)
+        saved += 1
+        if len(batch) >= HISTORY_BATCH:
+            conn.executemany(_ACTIVITY_UPSERT, batch)
+            batch.clear()
+    if batch:
+        conn.executemany(_ACTIVITY_UPSERT, batch)
+
+    logger.info("Действий загружено/обновлено: %d", saved)
+    return saved
+
+
 def sync_leads(
     client: BitrixClient,
     conn,
@@ -712,6 +809,16 @@ def run_sync(kind: str, *, since_override: str | None = None) -> dict[str, Any]:
             if lead_ids and _lead_history_supported(conn, client):
                 sync_stage_history(client, conn, ENTITY_LEAD, lead_ids)
 
+            # Действия — свой водяной знак: у них нет DATE_MODIFY, догрузка
+            # идёт по дате создания, и делить его со сделками нельзя.
+            act_since = (
+                get_watermark(conn, ENTITY_ACTIVITY, overlap) if incremental else None
+            )
+            summary["activities"] = sync_activities(
+                client, conn, since=since, modified_since=act_since,
+            )
+            set_watermark(conn, ENTITY_ACTIVITY, full_sync=not incremental)
+
             if kind == "full":
                 summary["deleted_deals"] = reconcile_deleted(client, conn, ENTITY_DEAL, since)
                 summary["deleted_leads"] = reconcile_deleted(client, conn, ENTITY_LEAD, since)
@@ -719,7 +826,9 @@ def run_sync(kind: str, *, since_override: str | None = None) -> dict[str, Any]:
             set_watermark(conn, ENTITY_DEAL, full_sync=not incremental)
             set_watermark(conn, ENTITY_LEAD, full_sync=not incremental)
 
-            counters["rows"] = len(deal_ids) + len(lead_ids)
+            counters["rows"] = (
+                len(deal_ids) + len(lead_ids) + summary["activities"]
+            )
             summary["deals"] = len(deal_ids)
             summary["leads"] = len(lead_ids)
             summary["requests"] = client.request_count

@@ -26,7 +26,7 @@ DEFAULT_DB_PATH = Path("data/analytics.db")
 # запас, что и основная база проекта.
 BUSY_TIMEOUT_MS = 10_000
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Семантика стадии. Без неё нельзя посчитать ни конверсию, ни win rate:
 # «выиграно» и «проиграно» надо отличать от «в работе», а по одному только
@@ -152,6 +152,22 @@ _DDL: tuple[str, ...] = (
     # 'quarter' в metrics.resolve_period даёт «квартал по сегодня», и планом
     # он быть не может: в первый день квартала выполнение вышло бы 100%.
     """
+    CREATE TABLE IF NOT EXISTS fact_activity (
+        activity_id        INTEGER PRIMARY KEY,
+        owner_type_id      INTEGER NOT NULL,
+        owner_id           INTEGER NOT NULL,
+        provider_type_id   TEXT NOT NULL DEFAULT '',
+        direction          INTEGER,
+        subject            TEXT NOT NULL DEFAULT '',
+        responsible_id     INTEGER,
+        created_at         TEXT NOT NULL,
+        start_time         TEXT,
+        end_time           TEXT,
+        completed          INTEGER NOT NULL DEFAULT 0,
+        synced_at          TEXT NOT NULL
+    );
+    """,
+    """
     CREATE TABLE IF NOT EXISTS plan_period (
         period_code TEXT PRIMARY KEY,
         starts_at   TEXT NOT NULL,
@@ -241,6 +257,13 @@ _DDL: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_stage_event_stage "
     "ON fact_stage_event(category_id, stage_id, entered_at);",
     "CREATE INDEX IF NOT EXISTS idx_stage_event_entered ON fact_stage_event(entered_at);",
+    # Действия ищут тремя способами: «что было по этой карточке»,
+    # «что делал этот человек» и «что случилось за вчера».
+    "CREATE INDEX IF NOT EXISTS idx_activity_owner "
+    "ON fact_activity(owner_type_id, owner_id, created_at);",
+    "CREATE INDEX IF NOT EXISTS idx_activity_person "
+    "ON fact_activity(responsible_id, created_at);",
+    "CREATE INDEX IF NOT EXISTS idx_activity_created ON fact_activity(created_at);",
 )
 
 
