@@ -71,9 +71,12 @@ def main(argv: list[str] | None = None) -> int:
         settings.b24_webhook_url, rps=settings.analytics_rate_limit_rps,
     ) as client:
         print("\nВсего за период (все типы, все сущности):")
+        total_all = 0
         for months in MONTHS:
             since = (date.today() - timedelta(days=30 * months)).isoformat()
             total = _total(client, {">=CREATED": since})
+            if months == args.months:
+                total_all = total
             print(f"  за {months:>2} мес.: {total:>9,}".replace(",", " "))
 
         since = (date.today() - timedelta(days=30 * args.months)).isoformat()
@@ -82,17 +85,26 @@ def main(argv: list[str] | None = None) -> int:
             total = _total(client, {">=CREATED": since, "OWNER_TYPE_ID": owner_id})
             print(f"  {label:<12} {total:>9,}".replace(",", " "))
 
-        print(f"\nЗа {args.months} мес. по типам (сделки и лиды):")
+        # Подпись раньше врала «сделки и лиды»: фильтра по сущности здесь нет,
+        # и числа идут по всем владельцам сразу. На боевом портале это важно —
+        # большая часть звонков висит на контактах, а не на сделках.
+        print(f"\nЗа {args.months} мес. по типам (все сущности):")
         for provider, label in PROVIDERS:
             total = _total(client, {
                 ">=CREATED": since, "PROVIDER_TYPE_ID": provider,
             })
             print(f"  {label:<12} {total:>9,}".replace(",", " "))
 
+        named = sum(
+            _total(client, {">=CREATED": since, "PROVIDER_TYPE_ID": provider})
+            for provider, _ in PROVIDERS
+        )
         done = _total(client, {">=CREATED": since, "COMPLETED": "Y"})
         planned = _total(client, {">=CREATED": since, "COMPLETED": "N"})
 
     print(f"\nЗа {args.months} мес.: завершено {done:,}, запланировано {planned:,}"
+          .replace(",", " "))
+    print(f"Типов, не попавших в разбивку выше: {max(total_all - named, 0):,}"
           .replace(",", " "))
     print()
     print("Что с этим делать дальше:")
