@@ -9,10 +9,11 @@ from schema import analytics_session
 class FakeClient:
     """Заглушка Bitrix REST с управляемыми ответами."""
 
-    def __init__(self, deals=None, leads=None, history=None):
+    def __init__(self, deals=None, leads=None, history=None, activities=None):
         self.deals = deals or []
         self.leads = leads or []
         self.history = history or {}
+        self.activities = activities or []
         self.request_count = 0
         self.calls: list[tuple[str, dict]] = []
 
@@ -68,8 +69,14 @@ class FakeClient:
 
     def list_by_id(self, method, params):
         self.calls.append((method, params))
-        rows = self.deals if method == "crm.deal.list" else self.leads
         flt = params.get("filter", {})
+        if method == "crm.activity.list":
+            for row in self.activities:
+                if ">=CREATED" in flt and row.get("CREATED", "") < flt[">=CREATED"]:
+                    continue
+                yield row
+            return
+        rows = self.deals if method == "crm.deal.list" else self.leads
         for row in rows:
             if ">=DATE_MODIFY" in flt and row.get("DATE_MODIFY", "") < flt[">=DATE_MODIFY"]:
                 continue
@@ -348,3 +355,123 @@ def test_people_directory_keeps_the_surname(analytics_db, fake_client):
         assert conn.execute(
             "SELECT last_name FROM dim_user WHERE user_id = 32"
         ).fetchone()[0] == "Петров"
+
+
+# --------------------------------------------------------------------------
+# действия
+# --------------------------------------------------------------------------
+
+def _activity(activity_id, owner_type, owner_id, provider, created, **extra):
+    row = {
+        "ID": activity_id, "OWNER_TYPE_ID": owner_type, "OWNER_ID": owner_id,
+        "PROVIDER_TYPE_ID": provider, "CREATED": created,
+        "RESPONSIBLE_ID": 32, "COMPLETED": "Y", "DIRECTION": 2,
+        "SUBJECT": f"Звонок {activity_id}",
+    }
+    row.update(extra)
+    return row
+
+
+def test_activities_are_taken_for_every_owner(analytics_db):
+    """Звонок висит на контакте, а сделка ссылается на тот же контакт.
+
+    На боевом портале действий на контактах больше, чем на сделках: 11 690
+    против 7 102 за год. Взяв только сделки, отчёт назвал бы молчащими тех,
+    кто звонил.
+    """
+    from analytics import etl
+    from analytics.schema import analytics_session
+
+    client = FakeClient(activities=[
+        _activity(1, 2, 500, "CALL", "2026-09-01T10:00:00+03:00"),
+        _activity(2, 3, 900, "CALL", "2026-09-01T11:00:00+03:00"),
+        _activity(3, 1, 700, "MEETING", "2026-09-01T12:00:00+03:00"),
+    ])
+    with analytics_session() as conn:
+        saved = etl.sync_activities(client, conn, since="2026-01-01T00:00:00+00:00")
+        owners = {
+            row[0] for row in conn.execute(
+                "SELECT owner_type_id FROM fact_activity")
+        }
+
+    assert saved == 3
+    assert owners == {1, 2, 3}, "сделки, контакты и лиды — все"
+
+
+def test_an_activity_is_normalised_not_stored_raw(analytics_db):
+    """«Y» — это единица, а московское время — UTC."""
+    from analytics import etl
+    from analytics.schema import analytics_session
+
+    client = FakeClient(activities=[
+        _activity(10, 2, 500, "MEETING", "2026-09-01T10:00:00+03:00",
+                  COMPLETED="N", DIRECTION=1),
+    ])
+    with analytics_session() as conn:
+        etl.sync_activities(client, conn, since="2026-01-01T00:00:00+00:00")
+        row = conn.execute(
+            "SELECT provider_type_id, completed, direction, created_at,"
+            " responsible_id FROM fact_activity WHERE activity_id = 10"
+        ).fetchone()
+
+    assert row["provider_type_id"] == "MEETING"
+    assert row["completed"] == 0
+    assert row["direction"] == 1
+    assert row["created_at"].startswith("2026-09-01T07:00")
+    assert row["responsible_id"] == 32
+
+
+def test_a_second_run_updates_instead_of_duplicating(analytics_db):
+    """Догрузка идёт с перекрытием — одна и та же активность придёт дважды."""
+    from analytics import etl
+    from analytics.schema import analytics_session
+
+    first = FakeClient(activities=[
+        _activity(20, 2, 500, "CALL", "2026-09-01T10:00:00+03:00", COMPLETED="N"),
+    ])
+    again = FakeClient(activities=[
+        _activity(20, 2, 500, "CALL", "2026-09-01T10:00:00+03:00", COMPLETED="Y"),
+    ])
+    with analytics_session() as conn:
+        etl.sync_activities(first, conn, since="2026-01-01T00:00:00+00:00")
+        etl.sync_activities(again, conn, since="2026-01-01T00:00:00+00:00")
+        rows = conn.execute(
+            "SELECT activity_id, completed FROM fact_activity").fetchall()
+
+    assert len(rows) == 1, "перекрытие не должно двоить строки"
+    assert rows[0]["completed"] == 1, "повтор обновляет, а не игнорируется"
+
+
+def test_an_activity_without_a_date_is_skipped(analytics_db):
+    """Без даты создания активность не попадёт ни в одно окно — лучше не брать."""
+    from analytics import etl
+    from analytics.schema import analytics_session
+
+    client = FakeClient(activities=[
+        _activity(30, 2, 500, "CALL", ""),
+        _activity(31, 2, 500, "CALL", "2026-09-01T10:00:00+03:00"),
+    ])
+    with analytics_session() as conn:
+        saved = etl.sync_activities(client, conn, since="2026-01-01T00:00:00+00:00")
+
+    assert saved == 1
+
+
+def test_the_incremental_window_asks_by_created(analytics_db):
+    """У активности нет DATE_MODIFY — догрузка идёт по дате создания."""
+    from analytics import etl
+    from analytics.schema import analytics_session
+
+    client = FakeClient(activities=[
+        _activity(40, 2, 500, "CALL", "2026-08-01T10:00:00+03:00"),
+        _activity(41, 2, 500, "CALL", "2026-09-05T10:00:00+03:00"),
+    ])
+    with analytics_session() as conn:
+        saved = etl.sync_activities(
+            client, conn,
+            since="2026-01-01T00:00:00+00:00",
+            modified_since="2026-09-01T00:00:00+00:00",
+        )
+
+    assert saved == 1
+    assert client.calls[-1][1]["filter"] == {">=CREATED": "2026-09-01T00:00:00+00:00"}

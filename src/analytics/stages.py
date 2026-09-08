@@ -17,6 +17,10 @@ logger = logging.getLogger(__name__)
 
 ENTITY_LEAD = "lead"
 ENTITY_DEAL = "deal"
+# Действия водяной знак ведут свой: у них нет DATE_MODIFY, догрузка идёт по
+# дате создания, и делить знак со сделками значило бы пропускать звонки при
+# каждом полном прогоне сделок.
+ENTITY_ACTIVITY = "activity"
 
 # entityTypeId в crm.stagehistory.list
 ENTITY_TYPE_IDS = {ENTITY_LEAD: 1, ENTITY_DEAL: 2}

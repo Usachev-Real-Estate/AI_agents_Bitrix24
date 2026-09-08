@@ -181,6 +181,21 @@ _VIEW_DDL = (
        OR (SELECT h.department_id FROM user_home h WHERE h.user_id = r.user_id)
            IN (SELECT department_id FROM scope_department)
     """,
+    # Действия сужаются по ОТВЕТСТВЕННОМУ, а не по владельцу карточки.
+    #
+    # Владельцем звонка сплошь и рядом оказывается контакт, а не сделка, и
+    # отдела у контакта нет вовсе: привязать действие к отделу через владельца
+    # значит потерять большую часть звонков — на боевом портале их на
+    # контактах больше, чем на сделках. Ответственный же есть у каждого
+    # действия, и это ровно тот человек, чью работу считают.
+    """
+    CREATE TEMP VIEW v_activity AS
+    SELECT a.* FROM fact_activity a
+    WHERE (SELECT unrestricted FROM scope_flag) = 1
+       OR (SELECT h.department_id FROM user_home h
+            WHERE h.user_id = a.responsible_id)
+           IN (SELECT department_id FROM scope_department)
+    """,
     # Периоды плана не сужаются: это календарь, в нём нет ни людей, ни денег.
     """
     CREATE TEMP VIEW v_plan_period AS SELECT * FROM plan_period

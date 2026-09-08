@@ -270,3 +270,37 @@ def test_the_named_database_wins_over_the_default(tmp_path, monkeypatch):
     monkeypatch.delenv("ANALYTICS_DB_PATH", raising=False)
     get_settings.cache_clear()
     assert schema.resolve_db_path() == schema.DEFAULT_DB_PATH
+
+
+# --------------------------------------------------------------------------
+# действия
+# --------------------------------------------------------------------------
+
+def test_an_activity_belongs_to_whoever_did_it(analytics_db):
+    """Действие сужается по ответственному, а не по владельцу карточки.
+
+    Владельцем звонка сплошь и рядом оказывается контакт, а отдела у контакта
+    нет вовсе: на боевом портале действий на контактах больше, чем на
+    сделках. Привязав действие к отделу через владельца, РОП потерял бы
+    большую часть звонков своих же людей.
+    """
+    with analytics_session() as conn:
+        _user(conn, 1, "Мария Соколова", "Соколова", KRETOV, "Кретов")
+        _user(conn, 2, "Дмитрий Гусев", "Гусев", SHPYRNAYA, "Шпырная")
+        for activity_id, user_id, owner_type in ((1, 1, 3), (2, 2, 3), (3, 1, 2)):
+            conn.execute(
+                "INSERT INTO fact_activity(activity_id, owner_type_id, owner_id,"
+                " provider_type_id, responsible_id, created_at, completed, synced_at)"
+                " VALUES (?, ?, 900, 'CALL', ?, '2026-09-01T10:00:00+00:00', 1, 'x')",
+                (activity_id, owner_type, user_id),
+            )
+
+    with scoped_session(Scope.departments([KRETOV])) as conn:
+        mine = [row["activity_id"] for row in conn.execute(
+            "SELECT activity_id FROM v_activity ORDER BY activity_id")]
+    with scoped_session(Scope.everything()) as conn:
+        every = [row["activity_id"] for row in conn.execute(
+            "SELECT activity_id FROM v_activity ORDER BY activity_id")]
+
+    assert mine == [1, 3], "звонок на контакте виден по ответственному"
+    assert every == [1, 2, 3]
