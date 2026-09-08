@@ -363,3 +363,84 @@ def test_the_digest_recipient_is_set_apart_from_the_alert_admin(agency, monkeypa
 def test_without_its_own_setting_the_digest_falls_back_to_the_admin(agency):
     """Пустой PULSE_DIGEST_TO — прежнее поведение, а не отсутствие адресата."""
     assert pulse_digest.build(Q3, URL)[0]["user_id"] == 7
+
+
+# --------------------------------------------------------------------------
+# разбор воронки в общий чат
+# --------------------------------------------------------------------------
+
+def _stalled_deal(conn):
+    """Норма стадии два дня и одна карточка, перешагнувшая её вчера."""
+    from datetime import timedelta as _delta, timezone as _tz
+
+    now = datetime.now(_tz.utc)
+    ago = lambda days: (now - _delta(days=days)).isoformat()  # noqa: E731
+    conn.execute("INSERT INTO dim_pipeline(category_id, name, is_active, sort,"
+                 " synced_at) VALUES (18, 'Покупатели', 1, 10, 'x')")
+    conn.execute("INSERT INTO dim_stage(stage_id, category_id, name, sort,"
+                 " semantic, synced_at)"
+                 " VALUES ('C18:NEW', 18, 'Подбор', 10, 'in_progress', 'x')")
+    for deal_id in (9101, 9102, 9103):
+        conn.execute(
+            "INSERT INTO fact_deal(deal_id, title, category_id, stage_id,"
+            " assigned_by_id, source_id, opportunity, currency_id, date_create,"
+            " date_modify, closedate, is_closed, is_won, is_lost, is_deleted,"
+            " synced_at) VALUES (?, 'Норма', 18, 'C18:NEW', 2, 'CALL', 0, 'RUB',"
+            " ?, ?, NULL, 1, 0, 0, 0, 'x')", (deal_id, ago(40), ago(38)))
+        conn.execute(
+            "INSERT INTO fact_stage_event(entity_type, entity_id, category_id,"
+            " stage_id, entered_at, left_at, duration_sec, seq)"
+            " VALUES ('deal', ?, 18, 'C18:NEW', ?, ?, 172800, 0)",
+            (deal_id, ago(40), ago(38)))
+    conn.execute(
+        "INSERT INTO fact_deal(deal_id, title, category_id, stage_id,"
+        " assigned_by_id, source_id, opportunity, currency_id, date_create,"
+        " date_modify, closedate, is_closed, is_won, is_lost, is_deleted,"
+        " synced_at) VALUES (9200, 'Пентхаус на Поклонной', 18, 'C18:NEW', 2,"
+        " 'CALL', 5000000, 'RUB', ?, ?, NULL, 0, 0, 0, 0, 'x')",
+        (ago(40), ago(0)))
+    conn.execute(
+        "INSERT INTO fact_stage_event(entity_type, entity_id, category_id,"
+        " stage_id, entered_at, left_at, duration_sec, seq)"
+        " VALUES ('deal', 9200, 18, 'C18:NEW', ?, NULL, NULL, 0)", (ago(2.5),))
+
+
+def test_the_funnel_report_goes_to_the_shared_chat(agency, monkeypatch):
+    """План-факт — разговор с РОПом лично, движение сделок — общее.
+
+    Обсуждать «встала сделка на 5 млн» удобнее там, где это видят все, кого
+    оно касается, а не пересылая из личной переписки.
+    """
+    monkeypatch.setenv("PULSE_EVENTS_CHAT_ID", "22358")
+    get_settings.cache_clear()
+    with analytics_session() as conn:
+        _stalled_deal(conn)
+
+    deliveries = pulse_digest.build(Q3, URL)
+    chat = [d for d in deliveries if d.get("chat_id")]
+    boss = next(d for d in deliveries if d.get("user_id") == 7)
+
+    assert len(chat) == 1 and chat[0]["chat_id"] == 22358
+    assert "Пентхаус на Поклонной" in chat[0]["text"]
+    assert "Воронка за" in chat[0]["text"]
+    assert "Встала" not in boss["text"], "в личной сводке разбор не дублируется"
+
+
+def test_without_a_chat_the_report_stays_in_the_personal_digest(agency):
+    """Выкатка без настройки не должна молча потерять разбор."""
+    with analytics_session() as conn:
+        _stalled_deal(conn)
+
+    deliveries = pulse_digest.build(Q3, URL)
+    boss = next(d for d in deliveries if d.get("user_id") == 7)
+
+    assert not [d for d in deliveries if d.get("chat_id")]
+    assert "Пентхаус на Поклонной" in boss["text"]
+
+
+def test_a_quiet_day_sends_nothing_to_the_chat(agency, monkeypatch):
+    """Ежедневное «событий нет» приучает не открывать рассылку."""
+    monkeypatch.setenv("PULSE_EVENTS_CHAT_ID", "22358")
+    get_settings.cache_clear()
+
+    assert not [d for d in pulse_digest.build(Q3, URL) if d.get("chat_id")]

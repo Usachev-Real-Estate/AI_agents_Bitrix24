@@ -467,6 +467,30 @@ class Settings(BaseSettings):
     # следующая выкатка. Пустой список означал бы «все воронки» — это
     # молчаливое расширение плана, поэтому пустым он не бывает: разбор ниже
     # падает обратно на [18], а не на «всё подряд».
+    # Стадии, на которых простой не считается простоем: {"воронка": [стадии]}.
+    #
+    # Норма стадии — 75-й перцентиль ЗАВЕРШЁННЫХ интервалов, то есть время
+    # тех карточек, которые со стадии ушли. Для «Поиска клиента» у продавцов
+    # это ловушка: объект в рекламе живёт там месяцами, уходят первыми самые
+    # быстрые, и норма считается по ним. Она выходит короткой, а всё
+    # честно рекламируемое оказывается «зависшим».
+    #
+    # Пока в витрине нет действий — звонков и встреч, — отличить работу от
+    # забвения на этой стадии нечем, и лучше молчать, чем назвать виноватыми
+    # не тех.
+    analytics_stuck_exclude_stages_json: str = Field(
+        default='{"0": ["UC_FADPBF"]}',
+        validation_alias="ANALYTICS_STUCK_EXCLUDE_STAGES_JSON",
+    )
+    # Чат, куда уходит ежедневный разбор воронки. Отдельно от личных сводок:
+    # план-факт — разговор с конкретным РОПом, а движение сделок общее, и
+    # обсуждать его удобнее там, где его видят все сразу.
+    #
+    # Ноль — разбор остаётся в личной сводке владельца отчёта, как было.
+    pulse_events_chat_id: int = Field(
+        default=0,
+        validation_alias="PULSE_EVENTS_CHAT_ID",
+    )
     pulse_category_ids_json: str = Field(
         default='[18]',
         validation_alias="PULSE_CATEGORY_IDS_JSON",
@@ -623,6 +647,21 @@ class Settings(BaseSettings):
             else:
                 merged[key] = value
         return merged
+
+    @property
+    def analytics_stuck_exclude_stages(self) -> dict[int, set[str]]:
+        """Стадии вне подсчёта простоя, по воронкам. Мусор — как будто пусто."""
+        raw = (self.analytics_stuck_exclude_stages_json or "").strip()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+            return {
+                int(category): {str(stage) for stage in stages}
+                for category, stages in parsed.items()
+            }
+        except Exception:
+            return {}
 
     @property
     def pulse_category_ids(self) -> list[int]:

@@ -42,11 +42,15 @@ for extra in (_SRC, _SRC / "analytics", _SRC / "web"):
     if str(extra) not in sys.path:
         sys.path.insert(0, str(extra))
 
+import events as funnel  # noqa: E402
 import metrics  # noqa: E402
 import plans  # noqa: E402
 import pulse as pulse_metrics  # noqa: E402
 from config import get_settings, setup_logging  # noqa: E402
-from notify import send_user_chat_message_chunked  # noqa: E402
+from notify import (  # noqa: E402
+    send_chat_message_chunked,
+    send_user_chat_message_chunked,
+)
 from qc_delivery import ROP_TO_CHAT  # noqa: E402
 from scope import Scope, scoped_session  # noqa: E402
 
@@ -99,6 +103,7 @@ def format_company(data: dict[str, Any], yesterday: dict[str, Any], url: str) ->
             f"остальное у тех, кому норму не ставили"
         )
     lines += _breakeven_lines(data) + _stuck_lines(data, company=True)
+    lines += _event_lines(data.get("events"))
 
     # Отдел без плана и без факта в сводку не попадает: строка «0,0 из —»
     # ничего не сообщает и только удлиняет сообщение. Если план есть, отдел
@@ -148,6 +153,7 @@ def format_department(data: dict[str, Any], yesterday: dict[str, Any], url: str)
         f"Норму несут {row['on_plan']} чел., без нормы ещё {row['without_norm']}"
     )
     lines += _stuck_lines(data, company=False)
+    lines += _event_lines(data.get("events"))
     if not row["rop_known"]:
         lines += [
             "",
@@ -155,6 +161,73 @@ def format_department(data: dict[str, Any], yesterday: dict[str, Any], url: str)
             "цель отдела завышена на одну норму. Скажите админу — поправим.",
         ]
     return "\n".join(lines + _tail(data, url))
+
+
+def format_events(
+    data: dict[str, Any],
+    events: dict[str, Any],
+    window: dict[str, Any],
+    sellers: dict[str, Any] | None = None,
+) -> str:
+    """Разбор воронок отдельным сообщением в общий чат.
+
+    Пустой возврат означает «в этот день ничего не произошло» — и тогда
+    сообщения не будет вовсе. Ежедневная рассылка, сообщающая «событий нет»,
+    приучает не открывать себя раньше, чем в ней появится важное.
+    """
+    lines = _event_lines(events)
+    if lines:
+        lines = [f"🔎 Воронка за {window['label']}{_funnel_note(data)}"] + lines
+    sellers_lines = _sellers_lines(sellers)
+    if sellers_lines:
+        lines += ([""] if lines else []) + [
+            f"🏠 Продавцы за {window['label']}"
+        ] + sellers_lines
+    return "\n".join(lines)
+
+
+def _sellers_lines(sellers: dict[str, Any] | None) -> list[str]:
+    """Где не дорабатывают с собственниками.
+
+    Отвечает не число потерь, а стадия, С КОТОРОЙ ушли: собственник,
+    потерянный на переговорах, и собственник, до которого не доехали на
+    встречу, — это две разные недоработки, и разговор с брокером о них
+    разный.
+
+    Отложенная продажа считается потерей наравне с проигрышем: в портале у
+    неё семантика lost, и выдумывать третье состояние там, где агентство
+    завело два, значит спорить с самим агентством.
+    """
+    if not sellers:
+        return []
+    lines: list[str] = []
+    left = sellers["left_work"]
+    if left["deals"]:
+        where = ", ".join(
+            f"«{stage}» {count}" for stage, count in left["by_stage"]
+        )
+        lines.append(
+            f"\n🔻 {_verb(left['deals'], 'Ушла', 'Ушли')} из работы "
+            f"{left['deals']} {_deals_word(left['deals'])} — {where}:"
+        )
+        lines += [
+            f"  · {row['title'][:40]} — «{row['from_name']}» → «{row['to_name']}»"
+            + (f" ({row['assignee']})" if row.get("assignee") else "")
+            for row in left["top"]
+        ]
+    stalled = sellers["stalled"]
+    if stalled["deals"]:
+        lines.append(
+            f"\n🟠 {_verb(stalled['deals'], 'Встала', 'Встали')} "
+            f"{stalled['deals']} {_deals_word(stalled['deals'])}:"
+        )
+        lines += [
+            f"  · {row['title'][:40]} — «{row['stage_name']}», "
+            f"{round(row['days_in_stage'])} дн"
+            + (f" ({row['assignee']})" if row.get("assignee") else "")
+            for row in stalled["top"]
+        ]
+    return lines
 
 
 def _breakeven_lines(data: dict[str, Any]) -> list[str]:
@@ -219,6 +292,103 @@ def _stuck_lines(data: dict[str, Any], company: bool) -> list[str]:
     return [head]
 
 
+def _on_plan_ids(data: dict[str, Any]) -> set[int]:
+    """Кто несёт норму. Молчание спрашивается только с них.
+
+    С новичка без нормы спрашивать нечего — он и заведён затем, чтобы
+    учиться. Строка «не двигал карточки неделю» про такого человека
+    обесценила бы весь блок: в нём стало бы поровну тех, с кого спрос, и тех,
+    с кого нет.
+    """
+    return {
+        man["user_id"]
+        for row in data["departments"]
+        for man in row.get("brokers") or []
+        if man.get("plan") is not None
+    }
+
+
+def _event_lines(events: dict[str, Any] | None) -> list[str]:
+    """Что случилось с воронкой за окно. Пустые блоки не печатаются.
+
+    Отчёт, ежедневно сообщающий «ничего не произошло», перестают открывать
+    раньше, чем в нём появится что-то важное. Поэтому здесь нет ни одной
+    строки-заглушки: нечего сказать — блока нет.
+    """
+    if not events:
+        return []
+    lines: list[str] = []
+
+    stalled = events["stalled"]
+    if stalled["deals"]:
+        lines.append(
+            f"\n🟠 {_verb(stalled['deals'], 'Встала', 'Встали')} "
+            f"{stalled['deals']} {_deals_word(stalled['deals'])} "
+            f"на {money(stalled['amount'])}:"
+        )
+        lines += [
+            f"  · {row['title'][:44]} — {money(row.get('opportunity') or 0)}, "
+            f"«{row['stage_name']}», {round(row['days_in_stage'])} дн"
+            + (f" ({row['assignee']})" if row.get("assignee") else "")
+            for row in stalled["top"]
+        ]
+
+    advanced = events["advanced"]
+    if advanced["deals"]:
+        lines.append(
+            f"\n🟢 {_verb(advanced['deals'], 'Сдвинулась', 'Сдвинулись')} вперёд "
+            f"{advanced['deals']} {_deals_word(advanced['deals'])} "
+            f"на {money(advanced['amount'])}:"
+        )
+        lines += [
+            f"  · {row['title'][:44]} — {money(row.get('opportunity') or 0)}, "
+            f"«{row['from_name']}» → «{row['to_name']}»"
+            + (f" ({row['assignee']})" if row.get("assignee") else "")
+            for row in advanced["top"]
+        ]
+
+    returned = events["returned"]
+    if returned["deals"]:
+        lines.append(
+            f"\n🔴 {_verb(returned['deals'], 'Вернулась', 'Вернулись')} назад "
+            f"{returned['deals']} {_deals_word(returned['deals'])} — обычно это "
+            f"неверная квалификация на входе:"
+        )
+        lines += [
+            f"  · {row['title'][:44]}, «{row['from_name']}» → «{row['to_name']}»"
+            + (f" ({row['assignee']})" if row.get("assignee") else "")
+            for row in returned["top"]
+        ]
+
+    silent = events["silent"]["people"]
+    if silent:
+        worst = silent[0]
+        lines.append(
+            f"\nНе двигали ни одной карточки дольше "
+            f"{events['silent']['idle_days']} дней: {len(silent)} чел. "
+            f"Дольше всех — {worst['name']} ({worst['quiet_days']} дн, "
+            f"{worst['deals']} {_deals_word(worst['deals'])})"
+        )
+
+    quality = events["quality"]
+    if quality["won_without_amount"]:
+        names = ", ".join(row["title"][:30] for row in quality["won_without_amount"][:2])
+        lines.append(
+            f"\n⚠ {_verb(len(quality['won_without_amount']), 'Закрыта', 'Закрыто')} "
+            f"без суммы: "
+            f"{len(quality['won_without_amount'])} "
+            f"{_deals_word(len(quality['won_without_amount']))} — {names}"
+        )
+    if quality["without_assignee"]:
+        lines.append(
+            f"\n⚠ {_verb(len(quality['without_assignee']), 'Заведена', 'Заведено')} "
+            f"без ответственного: "
+            f"{len(quality['without_assignee'])} "
+            f"{_deals_word(len(quality['without_assignee']))}"
+        )
+    return lines
+
+
 def _funnel_note(data: dict[str, Any]) -> str:
     """Воронка плана — в заголовке, а не в сноске.
 
@@ -237,6 +407,15 @@ def _yesterday_line(yesterday: dict[str, Any]) -> str:
         f"За {yesterday['label']} закрыто {yesterday['deals']} "
         f"{_deals_word(yesterday['deals'])} на {money(yesterday['amount'])}."
     )
+
+
+def _verb(count: int, one: str, many: str) -> str:
+    """Глагол под число сделок: «встала 1» против «встали 3».
+
+    Мелочь, но она читается: сообщение, которое не согласует слова, выглядит
+    машинным, а машинному отчёту верят меньше, чем он заслуживает.
+    """
+    return one if count % 10 == 1 and count % 100 != 11 else many
 
 
 def _deals_word(count: int) -> str:
@@ -330,6 +509,26 @@ def build(period_code: str, url: str, now: datetime | None = None) -> list[dict[
     with scoped_session(Scope.everything()) as conn:
         company = pulse_metrics.pulse(conn, period_code, with_stuck=True)
         yesterday = closed_in(conn, window)
+        company_events = funnel.funnel_events(
+            conn, window["since"], window["until"],
+            on_plan_ids=_on_plan_ids(company),
+        )
+
+    # Разбор воронки уходит в общий чат, а не в личную сводку директора: там
+    # его видят все, кого он касается. Чат не задан — разбор остаётся в
+    # сводке, чтобы выкатка без настройки не потеряла его молча.
+        # Воронка продавцов разбирается отдельно и в план не входит: там
+        # другой чек и другая работа. Вопрос к ней один — где брокеры не
+        # дорабатывают с собственниками, — и отвечают на него уходы в
+        # проигрыш и отложенную продажу, а не деньги.
+        sellers = funnel.funnel_events(
+            conn, window["since"], window["until"],
+            categories=[int(settings.sellers_category_id)],
+        )
+
+    chat_id = int(settings.pulse_events_chat_id or 0)
+    if not chat_id:
+        company["events"] = company_events
 
     # Владелец отчёта: своя настройка, с откатом на администратора.
     director = int(settings.pulse_digest_to or settings.admin_user_id or 0)
@@ -339,6 +538,14 @@ def build(period_code: str, url: str, now: datetime | None = None) -> list[dict[
             "name": "Директор",
             "text": format_company(company, yesterday, url),
         })
+
+    if chat_id:
+        text = format_events(company, company_events, window, sellers)
+        if text:
+            deliveries.append({
+                "chat_id": chat_id, "name": f"Разбор воронки → чат {chat_id}",
+                "text": text,
+            })
 
     for row in company["departments"]:
         # РОП берётся из состава плана, а не из портала напрямую. Портал
@@ -357,6 +564,12 @@ def build(period_code: str, url: str, now: datetime | None = None) -> list[dict[
         # сообщение, а не отфильтровано из общего расчёта.
         with scoped_session(Scope.departments([row["department_id"]])) as conn:
             data = pulse_metrics.pulse(conn, period_code, with_stuck=True)
+            # Область видимости приходит соединением: тот же вызов в сессии
+            # РОПа возвращает события его отдела и ничьи больше.
+            data["events"] = funnel.funnel_events(
+                conn, window["since"], window["until"],
+                on_plan_ids=_on_plan_ids(data),
+            )
             own_yesterday = closed_in(conn, window)
         text = format_department(data, own_yesterday, url)
         if not text:
@@ -417,13 +630,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if preview:
         for item in deliveries:
-            print(f"\n{'=' * 60}\n{item['name']} (user_id={item['user_id']})\n{'=' * 60}")
+            target = (f"chat_id={item['chat_id']}" if item.get("chat_id")
+                      else f"user_id={item['user_id']}")
+            print(f"\n{'=' * 60}\n{item['name']} ({target})\n{'=' * 60}")
             print(item["text"])
         print(f"\nDRY_RUN: {len(deliveries)} сообщений НЕ отправлено")
         return 0
 
     for item in deliveries:
-        chunks = send_user_chat_message_chunked(item["user_id"], item["text"])
+        if item.get("chat_id"):
+            chunks = send_chat_message_chunked(item["chat_id"], item["text"])
+        else:
+            chunks = send_user_chat_message_chunked(item["user_id"], item["text"])
         logger.info("Отправлено: %s (%s сообщ.)", item["name"], chunks)
     return 0
 
