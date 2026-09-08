@@ -201,7 +201,10 @@ def test_the_digest_names_the_edge_and_the_frozen_money(frozen, costs):
     import pulse_digest
 
     deliveries = pulse_digest.build(Q3, "")
-    boss = deliveries[0]["text"]
+    # Первым директору уходит отдельное сообщение «что делать сегодня»; обе
+    # проверяемые здесь новости живут в сводке, а у неё свои обязательства.
+    boss = next(item["text"] for item in deliveries
+                if item.get("kind") == pulse_digest.KIND_PULSE)
 
     assert "Безубыточность" in boss
     assert "НЕ дотянем" in boss

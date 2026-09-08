@@ -36,6 +36,18 @@
 кириллицу нет: «Встреча» и «встреча» для него разные строки, и отбор по
 теме, сделанный в SQL, тихо терял бы половину дел.
 
+ВСТРЕЧА БЫВАЕТ НЕ ТОЛЬКО ПРОВЕДЁННОЙ. Из 68 активностей «встреча» в портале
+завершены 26; остальные 42 — назначенные, и по ним неизвестно даже,
+состоялись ли они. Засчитать такую разговором значит записать в актив то,
+чего ещё не было.
+
+Состояний четыре, и ценное среди них одно: срок прошёл, а «выполнено» не
+поставлено. Либо встреча не состоялась, либо о ней не отчитались, и оба
+случая — работа руководителя. Проведённые и ещё не наступившие вопросов не
+вызывают, а встречи без даты считаются отдельно: по ним просрочку не
+отличить вовсе, и если их много, признак не годится и дату придётся брать
+из поля карточки, а не из дела.
+
 Пропущенные звонки. Незавершённый входящий — это непринятый вызов
 (подтверждено собственником 08.09), и у всех 5 169 таких записей время
 окончания равно времени начала. Но по открытым карточкам их всего 63:
@@ -47,6 +59,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from typing import Any
 
 import plans
@@ -166,7 +179,7 @@ def _acts(conn, categories, department_id) -> list[dict[str, Any]]:
         conn,
         f"""
         SELECT d.deal_id, a.provider_type_id, a.direction, a.completed,
-               a.subject, a.created_at
+               a.subject, a.created_at, a.start_time
         FROM v_deal d
         LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
         JOIN v_activity a
@@ -182,13 +195,21 @@ def _acts(conn, categories, department_id) -> list[dict[str, Any]]:
 
 
 def _blank(row: dict[str, Any]) -> dict[str, Any]:
-    row.update({"calls": 0, "outgoing": 0, "missed": 0, "meetings": 0,
-                "marks": 0, "last_talk": None})
+    row.update({"calls": 0, "outgoing": 0, "missed": 0, "marks": 0,
+                "meetings": 0, "meetings_overdue": 0, "meetings_planned": 0,
+                "meetings_undated": 0, "last_talk": None})
     row["age_days"] = round(row["age_days"] or 0)
     return row
 
 
 def _apply(card: dict[str, Any], act: dict[str, Any]) -> None:
+    """Разложить одно действие по счётчикам карточки.
+
+    Состоявшимся считается только завершённое. Назначенная встреча —
+    это намерение, и засчитать её разговором значит записать в актив то,
+    чего ещё не было: из 68 активностей «встреча» в портале 42 не
+    завершены, и по ним неизвестно даже, состоялись ли они.
+    """
     kind, done = act["provider_type_id"], bool(act["completed"])
     if kind == CALL:
         if not done and act["direction"] == 1:
@@ -199,16 +220,41 @@ def _apply(card: dict[str, Any], act: dict[str, Any]) -> None:
         card["calls"] += 1
         if act["direction"] == 2:
             card["outgoing"] += 1
-    elif kind == MEETING:
-        card["meetings"] += 1
-    elif kind == MARK and done:
-        card["marks"] += 1
-        if _looks_like_meeting(act["subject"]):
-            card["meetings"] += 1
-        else:
-            return
-    else:
+        _touch(card, act)
         return
+
+    if kind == MEETING or (kind == MARK and _looks_like_meeting(act["subject"])):
+        _meeting(card, act, done)
+        return
+    if kind == MARK and done:
+        # Выполненное дело, не признанное встречей: «Связаться с клиентом»,
+        # «Отчет». Отметка о работе, но не запись разговора.
+        card["marks"] += 1
+
+
+def _meeting(card: dict[str, Any], act: dict[str, Any], done: bool) -> None:
+    """Встреча в одном из четырёх состояний.
+
+    Ценное среди них одно: срок прошёл, а «выполнено» не поставлено. Либо
+    встреча не состоялась, либо о ней не отчитались, и оба случая — работа
+    руководителя. Проведённые и ещё не наступившие вопросов не вызывают.
+
+    Без даты начала просрочку не отличить вовсе. Такие считаются отдельно и
+    печатаются рядом: если их много, признак не годится и дату придётся
+    брать из поля карточки, а не из дела.
+    """
+    if done:
+        card["meetings"] += 1
+        _touch(card, act)
+    elif not act["start_time"]:
+        card["meetings_undated"] += 1
+    elif _is_past(act["start_time"]):
+        card["meetings_overdue"] += 1
+    else:
+        card["meetings_planned"] += 1
+
+
+def _touch(card: dict[str, Any], act: dict[str, Any]) -> None:
     if act["created_at"] and (card["last_talk"] is None
                               or act["created_at"] > card["last_talk"]):
         card["last_talk"] = act["created_at"]
@@ -227,18 +273,28 @@ def _settle(row: dict[str, Any], silent_days: int) -> None:
                          and row["quiet_days"] >= silent_days)
 
 
-def _days_since(stamp: str | None) -> float | None:
+def _moment(stamp: str | None) -> datetime | None:
+    """Разбор отметки времени. Сравнение строк тут не годится: смещение у
+    записей бывает разным, и «+03:00» сравнивается с «+00:00» посимвольно."""
     if not stamp:
         return None
-    from datetime import datetime, timezone
-
     try:
-        moment = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(stamp.strip().replace("Z", "+00:00"))
     except ValueError:
         return None
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _days_since(stamp: str | None) -> float | None:
+    moment = _moment(stamp)
+    if moment is None:
+        return None
     return round((datetime.now(timezone.utc) - moment).total_seconds() / 86400.0, 1)
+
+
+def _is_past(stamp: str | None) -> bool:
+    moment = _moment(stamp)
+    return moment is not None and moment < datetime.now(timezone.utc)
 
 
 def _totals(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -261,6 +317,11 @@ def _totals(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "talks": sum(row["talks"] for row in rows),
         "outgoing": sum(row["outgoing"] for row in rows),
         "meetings": sum(row["meetings"] for row in rows),
+        # Просроченная встреча — единственное состояние, требующее
+        # разбора: срок прошёл, дело не закрыто.
+        "meetings_overdue": sum(row["meetings_overdue"] for row in rows),
+        "meetings_planned": sum(row["meetings_planned"] for row in rows),
+        "meetings_undated": sum(row["meetings_undated"] for row in rows),
         "marks": sum(row["marks"] for row in rows),
         "missed": sum(row["missed"] for row in rows),
         "missed_cards": missed,
@@ -299,6 +360,26 @@ def _group(
     return sorted(result, key=lambda item: (-item["cold"], -item["cards"]))
 
 
+def _sales_departments() -> tuple[int, ...]:
+    """Отделы, которые продают. Берутся у plans, а не заводятся здесь.
+
+    Тот же список читают план и отчёт по собственникам. Второй ответ на
+    вопрос «кто брокер» означал бы, что два отчёта одного агентства в один
+    день называют разных людей.
+
+    Пустой кортеж означает «не знаем», а не «никто»: настройка могла не
+    прочитаться, и тогда отбор не сужается вовсе. Иначе сбой конфига молча
+    убрал бы из сводки всех до единого, и выглядело бы это как «сегодня
+    трубку берут все».
+    """
+    try:
+        import plans
+
+        return plans.sales_department_ids()
+    except Exception:  # pragma: no cover — конфиг недоступен в изолированных тестах
+        return ()
+
+
 def _service_names() -> set[str]:
     """Учётные записи, которые не человек. Список ведёт агентство.
 
@@ -323,21 +404,30 @@ def _pickup(conn, department_id: int | None) -> list[dict[str, Any]]:
     сделке. Считать их через карточки значит увидеть один процент проблемы —
     потери сидят на входе, до того как заводится сделка.
 
-    Две верхние строки этой таблицы на живых данных — не люди: общая линия
-    агентства (929 непринятых из 1286) и уволенный сотрудник, на которого всё
-    ещё звонят. Обе строки — настоящие потери и обе остаются на экране, но
-    помечены: общая линия это вопрос маршрутизации, а не дисциплины, и
-    называть её в утреннем сообщении наравне с брокером неверно. Поэтому
-    ``person`` отделяет тех, с кем сегодня можно поговорить, от остальных, а
-    решает, кого печатать, уже сводка.
+    Верх этой таблицы на живых данных занимают не брокеры: общая линия
+    агентства (929 непринятых из 1286), уволенный сотрудник, на которого всё
+    ещё звонят, и бэк-офис (119 из 149). Все три строки — настоящие потери и
+    все три остаются на экране, но помечены.
+
+    Спрос с них разный, и в этом всё дело. Общая линия — вопрос
+    маршрутизации, а не дисциплины. На уволенного звонить не должны вовсе.
+    Бэк-офису входящие сваливает маршрутизация, а не клиент, выбравший
+    своего брокера, и мера брокера к нему не применима. Поставить их в
+    утреннее сообщение рядом с брокером значит начать разговор не с тем
+    человеком — а сводка нужна ровно для того, чтобы начать его с тем.
+
+    Поэтому ``person`` отделяет тех, с кем об этом сегодня говорят, от
+    остальных, а решает, кого печатать, уже сводка.
     """
     service = _service_names()
+    sales = _sales_departments()
     rows = _rows(
         conn,
         """
         SELECT a.responsible_id AS user_id,
                COALESCE(u.name, '') AS name,
                COALESCE(u.department_name, '') AS department,
+               u.department_id AS department_id,
                COALESCE(u.is_active, 0) AS is_active,
                SUM(CASE WHEN a.direction = 1 THEN 1 ELSE 0 END) AS incoming,
                SUM(CASE WHEN a.direction = 1 AND a.completed = 0
@@ -356,9 +446,15 @@ def _pickup(conn, department_id: int | None) -> list[dict[str, Any]]:
             continue
         row["missed_share"] = _share(row["missed"], row["incoming"])
         row["service"] = (row["name"] or "").strip().lower() in service
-        # Человек, с которым можно поговорить сегодня. Уволенный и робот в
-        # ежедневное сообщение не идут: там нужно действие, а не история.
-        row["person"] = bool(row["is_active"]) and not row["service"]
+        # Бэк-офис трубку берёт по другим правилам: входящие туда сваливает
+        # маршрутизация, а не клиент, выбравший своего брокера. Судить его
+        # мерой брокера значит спорить не с тем человеком.
+        row["sells"] = not sales or row["department_id"] in sales
+        # Тот, с кем можно поговорить об этом сегодня. Уволенный, робот и
+        # непродающий в ежедневное сообщение не идут: там нужно действие, а
+        # не история и не чужая зона ответственности.
+        row["person"] = (bool(row["is_active"]) and not row["service"]
+                         and row["sells"])
         people.append(row)
     return sorted(people, key=lambda row: -row["missed_share"])
 

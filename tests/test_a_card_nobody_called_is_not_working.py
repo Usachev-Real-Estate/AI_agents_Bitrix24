@@ -389,3 +389,59 @@ def test_a_departed_employee_is_not_called_out_daily(agency):
     row = next(r for r in _work()["pickup"] if r["user_id"] == 91)
     assert row["missed"] == 35
     assert row["person"] is False, "поговорить с ним сегодня нельзя"
+
+
+def test_the_back_office_is_not_judged_by_a_brokers_measure(agency):
+    """Бэк-офису входящие сваливает маршрутизация, а не клиент.
+
+    На живых данных бэк-офис занимает верх таблицы: 119 непринятых из 149,
+    80% — хуже любого брокера. Число настоящее и с экрана не убирается, но
+    спрос с него другой: брокеру звонит клиент, выбравший его, а в бэк-офис
+    звонок попадает потому, что его туда направили. Поставить эти строки
+    рядом в утреннем сообщении значит начать разговор не с тем человеком.
+    """
+    import plans
+
+    with analytics_session() as conn:
+        for user_id, name, dept_id, dept in (
+            (20, "Ирина Брокова", plans.sales_department_ids()[0], "Кретов"),
+            (21, "Анастасия Бэкова", 900, "Бэк-офис"),
+        ):
+            conn.execute(
+                "INSERT INTO dim_user(user_id, name, department_id,"
+                " department_name, is_active, synced_at) VALUES (?, ?, ?, ?, 1, 'x')",
+                (user_id, name, dept_id, dept),
+            )
+        _deal(conn, 1, contact=CONTACT, user=20)
+        for offset, user_id in ((900, 20), (1000, 21)):
+            for i in range(40):
+                _act(conn, offset + i, 3, 9990 + i, direction=1,
+                     completed=0 if i < 32 else 1, user=user_id)
+
+    pickup = {row["name"]: row for row in _work()["pickup"]}
+    assert pickup["Анастасия Бэкова"]["missed"] == 32, "число остаётся на экране"
+    assert pickup["Анастасия Бэкова"]["sells"] is False
+    assert pickup["Анастасия Бэкова"]["person"] is False
+    assert pickup["Ирина Брокова"]["person"] is True
+
+
+def test_an_unreadable_department_list_does_not_silence_everyone(agency, monkeypatch):
+    """Настройка не прочиталась — отбор не сужается, а не выкашивает всех.
+
+    Пустой список означает «не знаем», а не «никто». Иначе сбой конфига
+    молча убрал бы из сводки всех до единого, и выглядело бы это как
+    «сегодня трубку берут все».
+    """
+    monkeypatch.setattr(work, "_sales_departments", lambda: ())
+
+    with analytics_session() as conn:
+        conn.execute(
+            "INSERT INTO dim_user(user_id, name, department_id, department_name,"
+            " is_active, synced_at) VALUES (21, 'Анастасия Бэкова', 900, 'Бэк', 1, 'x')"
+        )
+        _deal(conn, 1, contact=CONTACT, user=21)
+        for i in range(40):
+            _act(conn, 1100 + i, 3, 9990 + i, direction=1, completed=0, user=21)
+
+    row = next(r for r in _work()["pickup"] if r["user_id"] == 21)
+    assert row["person"] is True
