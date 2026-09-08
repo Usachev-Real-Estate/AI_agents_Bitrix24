@@ -28,9 +28,13 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
+# Клиент Битрикса живёт в src/analytics, а настройки — в src. Кладём оба:
+# один только src давал «No module named client» уже после того, как скрипт
+# прочитал конфиг, — то есть ломался на середине и выглядел как отказ портала.
 _SRC = Path(__file__).resolve().parent.parent / "src"
-if str(_SRC) not in sys.path:
-    sys.path.insert(0, str(_SRC))
+for _path in (_SRC, _SRC / "analytics"):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
 
 from config import get_settings  # noqa: E402
 
