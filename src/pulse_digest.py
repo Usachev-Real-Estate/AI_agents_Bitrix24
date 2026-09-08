@@ -48,6 +48,7 @@ import plans  # noqa: E402
 import pulse as pulse_metrics  # noqa: E402
 import advice  # noqa: E402
 import advice_rules  # noqa: E402
+import wording  # noqa: E402
 import work  # noqa: E402
 from config import get_settings, setup_logging  # noqa: E402
 from db import db_session, init_db  # noqa: E402
@@ -271,11 +272,7 @@ def _pickup_lines(work_data: dict[str, Any]) -> list[str]:
 
 
 def _cards_word(count: int) -> str:
-    tail = count % 100
-    if 11 <= tail <= 14:
-        return "карточек"
-    return {1: "карточка", 2: "карточки", 3: "карточки", 4: "карточки"}.get(
-        count % 10, "карточек")
+    return wording.cards(count)
 
 
 # Кого называть поимённо. Брокер с тремя карточками, из которых молчат две,

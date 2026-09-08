@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
+import wording
 from advice import SLOT_ACUTE, SLOT_MONEY, SLOT_WORK, Advice
 
 # Сколько карточек должно быть у брокера, чтобы говорить о его доле.
@@ -55,11 +56,91 @@ def collect(
 ) -> list[Advice]:
     """Все кандидаты от всех правил. Порядок здесь ни на что не влияет."""
     out: list[Advice] = []
+    out += breakeven_gap(pulse)
     out += behind_pace(pulse)
     out += broker_cold(sellers_work or work)
     out += went_backwards(events)
     out += left_from_late_stage(events)
     return out
+
+
+def _money_is_trustworthy(pulse: dict[str, Any]) -> bool:
+    """Можно ли советовать по деньгам этого пульса.
+
+    Одно определение на все денежные правила: и рубеж, и отставание считают
+    по одному и тому же факту, и охрана, накрывшая одно из них, оставила бы
+    второе советовать по тому же дырявому числу.
+
+    Ноль закрытых сделок — это отсутствие сведений о покрытии, а не плохое
+    покрытие. Отдел бывает позади именно потому, что не закрыл ничего, и
+    молчать об этом было бы ровно наоборот тому, что нужно.
+    """
+    coverage = pulse.get("coverage") or {}
+    if not coverage.get("deals"):
+        return True
+    return coverage.get("share", 100) >= MIN_MONEY_COVERAGE
+
+
+def breakeven_gap(pulse: dict[str, Any] | None) -> list[Advice]:
+    """Сколько не хватает до нуля по прибыли при нынешнем темпе.
+
+    Главное денежное правило, и оно выше отставания от плана по весу.
+    Причина в природе двух чисел. План агентства — намеренная планка
+    (решение от 07.09): выполнение по ней держится в диапазоне 0–15% весь
+    квартал, и «отстаём на 33,9 млн» верно каждое утро, а сделать с ним
+    сегодня нечего. Рубеж безубыточности отвечает на другой вопрос — не «к
+    чему тянемся», а «доживём ли», — и он движется от каждой сделки.
+
+    Совет обязан назвать, ГДЕ ближайшие деньги, иначе он остаётся числом.
+    Называется отдел с наибольшей суммой на незакрытых сделках: это не
+    обещание, что деньги придут оттуда, а ответ на вопрос «с чего начать».
+    """
+    if not pulse or not _money_is_trustworthy(pulse):
+        return []
+    mark = pulse.get("breakeven")
+    # None — расходы не заданы. Выдуманный рубеж хуже отсутствующего: по
+    # нему принимают решения о людях.
+    if not mark or mark.get("gap") is None or mark.get("reaches"):
+        return []
+    gap = abs(mark["gap"])
+    if gap <= 0:
+        return []
+    where = _richest_stuck(pulse)
+    return [Advice(
+        rule="breakeven_gap",
+        subject="company",
+        slot=SLOT_MONEY,
+        who="Квартал",
+        # Вес выше любого отставания от плана: плановая планка намеренно
+        # высока и от работы не меняется, а рубеж решает прибыль квартала.
+        value=round(gap),
+        weight=gap * 10,
+        title=f"До безубыточности не хватает {_money(gap)} при нынешнем темпе",
+        action=(f"Соберите РОПов и разберите, что закрывается до конца "
+                f"квартала{where}"),
+        proof=(f"порог {_money(mark['gross'])}, сделано {_money(pulse['fact'])} "
+               f"({mark['share']:.0f}%), прогноз по темпу "
+               f"{_money(pulse.get('projection') or 0)}"),
+        check="Завтра скажу, сократился ли разрыв",
+        link="/pulse",
+    )]
+
+
+def _richest_stuck(pulse: dict[str, Any]) -> str:
+    """Отдел с наибольшей суммой на незакрытых сделках — с чего начинать."""
+    best, amount = None, 0.0
+    for row in pulse.get("departments") or []:
+        stuck = row.get("stuck") or {}
+        value = float(stuck.get("amount") or 0)
+        if value > amount:
+            best, amount = row, value
+    if best is None or amount <= 0:
+        return ""
+    # Каждое слово в форме, не зависящей от числа: «на 101 незакрытых
+    # сделках» — ошибка согласования, а склонять числительное в коде ради
+    # одной строки незачем.
+    return (f". Больше всего денег стоит у отдела {best['name']} — "
+            f"{_money(amount)}, незакрытых сделок {best['stuck']['deals']}")
 
 
 def behind_pace(pulse: dict[str, Any] | None) -> list[Advice]:
@@ -73,13 +154,7 @@ def behind_pace(pulse: dict[str, Any] | None) -> list[Advice]:
     Совет, выросший из числа с дырявым покрытием, отправляет руководителя
     разбираться не туда — а такое уже случалось.
     """
-    if not pulse:
-        return []
-    coverage = pulse.get("coverage") or {}
-    # Ноль закрытых сделок — это отсутствие сведений о покрытии, а не плохое
-    # покрытие. Отдел бывает позади темпа именно потому, что не закрыл
-    # ничего, и молчать об этом было бы ровно наоборот тому, что нужно.
-    if coverage.get("deals") and coverage.get("share", 100) < MIN_MONEY_COVERAGE:
+    if not pulse or not _money_is_trustworthy(pulse):
         return []
     out = []
     for row in pulse.get("departments") or []:
@@ -145,8 +220,9 @@ def broker_cold(work: dict[str, Any] | None) -> list[Advice]:
             who=row["name"],
             value=row["cold"],
             weight=row["cold"],
-            title=(f"{row['name']}: {row['cold']} карточек из {row['cards']} "
-                   "лежат без работы"),
+            title=(f"{row['name']}: {row['cold']} "
+                   f"{wording.cards(row['cold'])} из {row['cards']} "
+                   f"{wording.verb(row['cold'], 'лежит', 'лежат')} без работы"),
             action=(f"Разберите {min(row['nothing'], 12)} карточек, где нет "
                     "ни звонка, ни отметки"),
             proof=(f"холодных карточек {row['cold_share']:.0f}%; "
@@ -175,14 +251,16 @@ def went_backwards(events: dict[str, Any] | None) -> list[Advice]:
             rule="deal_returned",
             subject=f"deal:{row['deal_id']}",
             slot=SLOT_ACUTE,
-            who=f"«{row['title'][:34]}»",
+            who=wording.clip(row["title"], 34),
             # Сделка без суммы — не бесплатная, а неоценённая. Единица
             # держит её в кандидатах: иначе откат по карточке с пустой
             # комиссией не попал бы в сводку никогда.
             value=amount or 1,
             weight=amount or 1,
-            title=(f"«{row['title'][:44]}» откатилась "
-                   f"из «{row['from_name']}» в «{row['to_name']}»"),
+            # Стрелка вместо «из … в …»: названия стадий остаются в
+            # именительном, склонять их в коде незачем.
+            title=(f"{wording.name(row['title'], 44)} откатилась: "
+                   f"«{row['from_name']}» → «{row['to_name']}»"),
             action=(f"Спросите, что произошло, пока помнят "
                     f"({row.get('assignee') or 'ответственный не указан'})"),
             proof=(f"{_money(amount)} на карточке" if amount
@@ -211,11 +289,11 @@ def left_from_late_stage(events: dict[str, Any] | None) -> list[Advice]:
             rule="deal_left_work",
             subject=f"deal:{row['deal_id']}",
             slot=SLOT_ACUTE,
-            who=f"«{row['title'][:34]}»",
+            who=wording.clip(row["title"], 34),
             value=amount or 1,
             weight=amount or 1,
-            title=(f"«{row['title'][:44]}» ушла из работы "
-                   f"с «{row['from_name']}» в «{row['to_name']}»"),
+            title=(f"{wording.name(row['title'], 44)} ушла из работы: "
+                   f"«{row['from_name']}» → «{row['to_name']}»"),
             action=("Разберите, почему потеряли на этой стадии "
                     f"({row.get('assignee') or 'ответственный не указан'})"),
             proof=(f"{_money(amount)} на карточке" if amount

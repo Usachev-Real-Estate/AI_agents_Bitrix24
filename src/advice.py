@@ -59,6 +59,18 @@ BETTER_BY = 0.20
 # Дольше месяца — это уже не «сделай сегодня», а другой разговор.
 FOLLOW_DAYS = 30
 
+# Сколько дней отдыхает ПРАВИЛО после того, как высказалось.
+#
+# Пауза по адресату этого не решает. Отделов пять, и все отстают от плана:
+# правило говорит про Кретова, назавтра про Волкову, потом про Трофимову —
+# формально каждый раз про нового, а на вид пять одинаковых утр подряд.
+# Именно так сводку и перестают читать, и память, устроенная только по
+# адресату, этого не видит.
+#
+# Пустое место лучше повтора: слот, промолчавший день, читается как «тут
+# сегодня нечего добавить», а пятое подряд «отдел отстаёт» — как шум.
+RULE_REST_DAYS = 2
+
 
 @dataclass(frozen=True)
 class Advice:
@@ -165,6 +177,7 @@ def select(
     result = Selection(resolved=_resolved(current, memory, moment))
     closed = {row["rule"] + "\x00" + row["subject"] for row in result.resolved}
 
+    resting = _resting_rules(memory, moment)
     for slot in slots:
         pool = [advice for advice in candidates if advice.slot == slot]
         pool.sort(key=lambda advice: (-advice.weight, advice.rule, advice.subject))
@@ -175,10 +188,34 @@ def select(
             if reason is None:
                 result.muted.append(advice)
                 continue
+            # Отдых правила уступает ухудшению. Пауза бережёт внимание, но
+            # «стало хуже» — единственное, ради чего её и заводили рвать:
+            # промолчать о растущей проблеме ради ритма значит променять
+            # работу отчёта на его вид.
+            if advice.rule in resting and reason not in ("хуже", "вернулось"):
+                result.muted.append(advice)
+                continue
             result.advices.append(advice)
             result.reasons[advice.key] = reason
             break
     return result
+
+
+def _resting_rules(
+    memory: dict[tuple[str, str], Memory], now: datetime,
+) -> set[str]:
+    """Правила, высказавшиеся слишком недавно — про любого адресата.
+
+    Смотрит на последнее срабатывание правила в целом, а не на конкретную
+    строку памяти: смысл паузы в том, чтобы сводка не повторяла ОДНУ И ТУ ЖЕ
+    мысль разными именами.
+    """
+    resting = set()
+    for seen in memory.values():
+        quiet = days_since(seen.last_sent_at, now)
+        if quiet is not None and quiet < RULE_REST_DAYS:
+            resting.add(seen.rule)
+    return resting
 
 
 def _why_now(advice: Advice, seen: Memory | None, now: datetime) -> str | None:

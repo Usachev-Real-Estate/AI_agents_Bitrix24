@@ -97,13 +97,36 @@ def test_a_small_drift_is_not_worse():
     assert drift.advices == []
 
 
-def test_the_same_rule_about_two_people_is_two_advices():
-    """Ключ — правило плюс адресат: разные люди молчания друг другу не дают."""
+def test_one_thought_is_not_repeated_under_a_new_name():
+    """Правило отдыхает целиком, а не только про названного человека.
+
+    Отделов пять, и все отстают от плана. Пауза, устроенная только по
+    адресату, выпустила бы «отдел отстаёт» пять утр подряд — формально
+    каждый раз про нового, на вид пять одинаковых сообщений. Именно так
+    сводку и перестают читать, и по адресату этого не видно.
+    """
     _run([_advice(subject="user:11")], NOW)
     other = _run([_advice(subject="user:11"), _advice(subject="user:12")],
                  NOW + DAY)
 
-    assert [a.subject for a in other.advices] == ["user:12"]
+    assert other.advices == [], "та же мысль под другим именем — тот же повтор"
+
+
+def test_the_rule_speaks_again_about_the_next_person_after_its_rest():
+    """Отдых короткий: через два дня очередь следующего."""
+    _run([_advice(subject="user:11")], NOW)
+    later = _run([_advice(subject="user:11"), _advice(subject="user:12")],
+                 NOW + 2 * DAY)
+
+    assert [a.subject for a in later.advices] == ["user:12"]
+
+
+def test_a_rested_rule_never_blocks_a_worsening():
+    """Отдых уступает ухудшению — ради этого исключение и заводилось."""
+    _run([_advice(subject="user:11", value=30)], NOW)
+    worse = _run([_advice(subject="user:11", value=40)], NOW + DAY)
+
+    assert worse.reasons[("broker_cold", "user:11")] == "хуже"
 
 
 # --------------------------------------------------------------------------
@@ -314,3 +337,29 @@ def test_the_praise_names_what_improved():
     better = _run([], NOW + 2 * DAY)
 
     assert better.resolved[0]["who"] == "Марат Абзалилов"
+
+
+# --------------------------------------------------------------------------
+# слова
+
+def test_a_deal_name_is_quoted_so_the_verb_has_something_to_agree_with():
+    """«Ленинградское ш. 12 ушла» читается как ошибка. В кавычках — как имя.
+
+    Род произвольного названия коду неизвестен, и кавычки — единственный
+    способ не спорить с ним в каждой строке. Название со своими кавычками в
+    чужие не заворачивается: матрёшка читается хуже отсутствия внешней пары.
+    """
+    import wording
+
+    assert wording.name("Ленинградское ш. 12", 44) == "«Ленинградское ш. 12»"
+    assert wording.name("ЖК «Снегири Эко»", 44) == "ЖК «Снегири Эко»"
+
+
+def test_a_clipped_name_never_leaves_a_hanging_quote():
+    """Обрезанное название теряет закрывающую кавычку — строка выглядит битой."""
+    import wording
+
+    clipped = wording.name("Катерина Прайм + ЖК «Victory Park Residences»", 34)
+
+    assert clipped.count("«") == clipped.count("»")
+    assert clipped.endswith("…»")
