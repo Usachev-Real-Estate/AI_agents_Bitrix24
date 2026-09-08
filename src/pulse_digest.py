@@ -46,8 +46,11 @@ import events as funnel  # noqa: E402
 import metrics  # noqa: E402
 import plans  # noqa: E402
 import pulse as pulse_metrics  # noqa: E402
+import advice  # noqa: E402
+import advice_rules  # noqa: E402
 import work  # noqa: E402
 from config import get_settings, setup_logging  # noqa: E402
+from db import db_session, init_db  # noqa: E402
 from notify import (  # noqa: E402
     send_chat_message_chunked,
     send_user_chat_message_chunked,
@@ -329,6 +332,71 @@ def _sellers_lines(sellers: dict[str, Any] | None) -> list[str]:
             for row in stalled["top"]
         ]
     return lines
+
+
+def format_advice(selection: Any, today: str) -> str:
+    """Блок «что делать сегодня». Пусто — значит сообщения не будет.
+
+    Стоит первым в личной сводке директора и не идёт в общий чат: совет
+    называет конкретного человека худшим в компании, и это разговор
+    руководителя с РОПом, а не публичное объявление.
+
+    Пустой блок не печатается вовсе. Сводка, каждое утро сообщающая «всё
+    спокойно», приучает не открывать себя раньше, чем в ней появится
+    важное — и ровно в то утро её и пролистают.
+    """
+    if not selection or (not selection.advices and not selection.resolved):
+        return ""
+    lines = [f"☀️ {today} · что делать сегодня", ""]
+    for number, item in enumerate(selection.advices, 1):
+        mark = _SLOT_MARK.get(item.slot, "•")
+        lines.append(f"{number}. {mark} {item.title}")
+        lines.append(f"   → {item.action}")
+        lines.append(f"   Почему: {item.proof}")
+        note = _advice_note(selection.reasons.get(item.key, ""))
+        if note:
+            lines.append(f"   {note}")
+        lines.append(f"   {item.check}")
+        lines.append("")
+    for row in selection.resolved[:2]:
+        what = row.get("who") or row["subject"]
+        lines.append(
+            f"✅ Сработало · {what}: было {_round(row['was'])}, "
+            f"стало {_round(row['now'])}. Говорил {row['days']} дн назад."
+        )
+    return "\n".join(lines).rstrip()
+
+
+# Значок места. Три места закреплены, и значок говорит, о чём строка,
+# раньше, чем читатель дойдёт до слов.
+_SLOT_MARK = {"money": "💰", "work": "🔕", "acute": "⚡"}
+
+# Жанры сообщений. Сводка отвечает «где мы стоим», совет — «что делать
+# сегодня», и обязательства у них разные.
+KIND_PULSE = "pulse"
+KIND_ADVICE = "advice"
+
+
+def _advice_note(reason: str) -> str:
+    """Отметка о том, что об этом уже говорили.
+
+    Повтор обязан назвать себя повтором. Молча повторённый совет читается
+    как новый — и в тот день, когда он повторится третий раз, сводке
+    перестанут верить.
+    """
+    return {
+        "хуже": "⚠️ Об этом уже говорил — стало хуже.",
+        "вернулось": "⚠️ Считал закрытым, проблема вернулась.",
+        "снова": "Говорил об этом неделю назад.",
+    }.get(reason, "")
+
+
+def _round(value: float) -> str:
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f} млн".replace(".", ",")
+    if value >= 10_000:
+        return f"{value / 1000:.0f} тыс"
+    return f"{value:.0f}"
 
 
 def _breakeven_lines(data: dict[str, Any]) -> list[str]:
@@ -633,6 +701,13 @@ def build(period_code: str, url: str, now: datetime | None = None) -> list[dict[
             conn, [int(settings.sellers_category_id)],
         )
 
+    # Советы отбираются ПОСЛЕ закрытия соединения с витриной: отбор ходит в
+    # свою базу памяти, и держать оба соединения открытыми ради этого
+    # незачем. Кандидатов правила отдают всех подряд — порог накладывает
+    # advice.select(), которому значение нужно и для тех, о ком речь уже
+    # шла: иначе проверить «стало лучше» было бы не с чем.
+    selection = _advice_for(company, company_events, sellers_work)
+
     chat_id = int(settings.pulse_events_chat_id or 0)
     if not chat_id:
         company["events"] = company_events
@@ -640,6 +715,33 @@ def build(period_code: str, url: str, now: datetime | None = None) -> list[dict[
     # Владелец отчёта: своя настройка, с откатом на администратора.
     director = int(settings.pulse_digest_to or settings.admin_user_id or 0)
     if director:
+        # Советы — ОТДЕЛЬНОЕ сообщение, а не шапка сводки. Причины две.
+        #
+        # Своя целостность у каждого. У сводки первая строка обязана назвать
+        # воронку, по которой посчитан факт, и новости обязаны стоять раньше
+        # итога; приклеенный сверху блок ломает и то и другое, а заодно
+        # объединяет два разных вопроса — «что делать» и «где мы стоим».
+        #
+        # И его читают с телефона. Короткое сообщение из трёх пунктов
+        # прочитают целиком; те же три пункта в шапке длинной сводки
+        # пролистают вместе с ней.
+        #
+        # Только директору: совет называет человека худшим в компании, и это
+        # разговор руководителя с РОПом, а не объявление в общий чат.
+        head = format_advice(selection, window["label"])
+        if head:
+            deliveries.append({
+                "user_id": director,
+                "name": "Директор · что делать сегодня",
+                # Вид сообщения, а не только имя адресата. Сводка и совет —
+                # разные жанры с разными обязательствами: сводка обязана
+                # назвать воронку в первой строке, совет — назвать человека
+                # и число. Отличать их по тексту имени значит однажды
+                # проверить не то.
+                "kind": KIND_ADVICE,
+                "text": head,
+                "advice": selection,
+            })
         deliveries.append({
             "user_id": director,
             "name": "Директор",
@@ -700,6 +802,8 @@ def build(period_code: str, url: str, now: datetime | None = None) -> list[dict[
                      else f"РОП {row['name']}"),
             "text": text,
         })
+    for item in deliveries:
+        item.setdefault("kind", KIND_PULSE)
     return deliveries
 
 
@@ -751,7 +855,46 @@ def main(argv: list[str] | None = None) -> int:
         else:
             chunks = send_user_chat_message_chunked(item["user_id"], item["text"])
         logger.info("Отправлено: %s (%s сообщ.)", item["name"], chunks)
+        # Память пишется ПОСЛЕ отправки, а не до. Сводка, упавшая на
+        # отправке, не должна замолчать об этой проблеме на неделю: совет,
+        # которого никто не прочитал, сказанным не считается.
+        _remember(item.get("advice"))
     return 0
+
+
+def _advice_for(
+    company: dict[str, Any],
+    events: dict[str, Any],
+    sellers_work: dict[str, Any],
+):
+    """Кандидаты, отобранные по памяти. Ошибка памяти сводку не роняет.
+
+    База памяти — не витрина: она своя, маленькая и может быть недоступна
+    (не создана, заблокирована соседней задачей). Числа при этом верны, и
+    отменять из-за этого утреннюю сводку неверно — она теряет только блок
+    советов, о чём в журнале остаётся строка.
+    """
+    candidates = advice_rules.collect(
+        pulse=company, events=events, sellers_work=sellers_work,
+    )
+    candidates = advice.only_named(candidates)
+    try:
+        init_db()
+        with db_session() as conn:
+            return advice.select(candidates, advice.load(conn))
+    except Exception as error:  # pragma: no cover — база памяти недоступна
+        logger.warning("Память советов недоступна, блок пропущен: %s", error)
+        return None
+
+
+def _remember(selection) -> None:
+    if selection is None:
+        return
+    try:
+        with db_session() as conn:
+            advice.remember(conn, selection)
+    except Exception as error:  # pragma: no cover — база памяти недоступна
+        logger.warning("Не удалось записать память советов: %s", error)
 
 
 if __name__ == "__main__":
