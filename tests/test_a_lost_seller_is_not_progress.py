@@ -173,3 +173,75 @@ def test_the_chat_message_names_the_stage_and_the_broker(sellers):
     assert "«Переговоры» 1" in lines
     assert "«Переговоры» → «Сделка проиграна»" in lines
     assert "Мария Соколова" in lines
+
+
+# --------------------------------------------------------------------------
+# объект в рекламе — не зависшая сделка
+# --------------------------------------------------------------------------
+
+def test_an_advertised_object_is_not_called_stuck(sellers, monkeypatch):
+    """«Поиск клиента» — объект в рекламе, и месяцы там нормальны.
+
+    Норма стадии считается по ЗАВЕРШЁННЫМ интервалам, то есть по тем
+    карточкам, которые со стадии ушли. На «Поиске клиента» уходят первыми
+    самые быстрые, норма выходит по ним короткой, и всё честно
+    рекламируемое оказалось бы «зависшим». Это отбор выживших, а не
+    свойство стадии, и порогом он не лечится.
+    """
+    import metrics
+    from config import get_settings
+
+    monkeypatch.setenv("ANALYTICS_STUCK_EXCLUDE_STAGES_JSON", '{"0": ["UC_FADPBF"]}')
+    get_settings.cache_clear()
+    with analytics_session() as conn:
+        conn.execute("INSERT INTO dim_stage(stage_id, category_id, name, sort,"
+                     " semantic, synced_at)"
+                     " VALUES ('UC_FADPBF', 0, 'Поиск клиента', 40, 'in_progress', 'x')")
+        # Норма стадии — два дня: три карточки ушли быстро.
+        for deal_id in (11, 12, 13):
+            _deal(conn, deal_id, "UC_FADPBF", "Быстрая", closed=1)
+            conn.execute(
+                "INSERT INTO fact_stage_event(entity_type, entity_id, category_id,"
+                " stage_id, entered_at, left_at, duration_sec, seq)"
+                " VALUES ('deal', ?, 0, 'UC_FADPBF', ?, ?, 172800, 0)",
+                (deal_id, _ago(40), _ago(38)))
+        # Объект рекламируется третий месяц — это работа, а не простой.
+        _deal(conn, 14, "UC_FADPBF", "Пентхаус в рекламе")
+        conn.execute(
+            "INSERT INTO fact_stage_event(entity_type, entity_id, category_id,"
+            " stage_id, entered_at, left_at, duration_sec, seq)"
+            " VALUES ('deal', 14, 0, 'UC_FADPBF', ?, NULL, NULL, 0)", (_ago(90),))
+
+    with scoped_session(Scope.everything()) as conn:
+        stuck = metrics._stuck_rows(conn, SELLERS)
+
+    assert [row["deal_id"] for row in stuck] == []
+    get_settings.cache_clear()
+
+
+def test_other_stages_still_report_their_stalls(sellers, monkeypatch):
+    """Исключение адресное: остальные стадии продолжают ловить простой."""
+    import metrics
+    from config import get_settings
+
+    monkeypatch.setenv("ANALYTICS_STUCK_EXCLUDE_STAGES_JSON", '{"0": ["UC_FADPBF"]}')
+    get_settings.cache_clear()
+    with analytics_session() as conn:
+        for deal_id in (21, 22, 23):
+            _deal(conn, deal_id, "UC_KEOOG8", "Быстрая", closed=1)
+            conn.execute(
+                "INSERT INTO fact_stage_event(entity_type, entity_id, category_id,"
+                " stage_id, entered_at, left_at, duration_sec, seq)"
+                " VALUES ('deal', ?, 0, 'UC_KEOOG8', ?, ?, 172800, 0)",
+                (deal_id, _ago(40), _ago(38)))
+        _deal(conn, 24, "UC_KEOOG8", "Собственник, о котором забыли")
+        conn.execute(
+            "INSERT INTO fact_stage_event(entity_type, entity_id, category_id,"
+            " stage_id, entered_at, left_at, duration_sec, seq)"
+            " VALUES ('deal', 24, 0, 'UC_KEOOG8', ?, NULL, NULL, 0)", (_ago(30),))
+
+    with scoped_session(Scope.everything()) as conn:
+        stuck = metrics._stuck_rows(conn, SELLERS)
+
+    assert [row["deal_id"] for row in stuck] == [24]
+    get_settings.cache_clear()

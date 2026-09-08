@@ -830,6 +830,28 @@ def stuck_money(
     }
 
 
+def _stuck_exempt(category_id: int) -> set[str]:
+    """Стадии, на которых простой не считается простоем.
+
+    Норма стадии — перцентиль ЗАВЕРШЁННЫХ интервалов, то есть время тех
+    карточек, которые со стадии ушли. Там, где уходят первыми самые быстрые,
+    норма считается по ним и выходит короткой: у продавцов на «Поиске
+    клиента» объект в рекламе живёт месяцами, и всё честно рекламируемое
+    оказалось бы «зависшим».
+
+    Это отбор выживших, а не свойство стадии, и лечится он не порогом.
+    Отличить работу от забвения на такой стадии можно только по действиям —
+    звонкам, показам, — а их в витрине пока нет. Молчать честнее, чем
+    называть виноватыми не тех.
+    """
+    try:
+        from config import get_settings
+
+        return get_settings().analytics_stuck_exclude_stages.get(int(category_id), set())
+    except Exception:  # pragma: no cover — конфиг недоступен в изолированных тестах
+        return set()
+
+
 def _stuck_rows(
     conn,
     category_id: int,
@@ -855,6 +877,7 @@ def _stuck_rows(
     """
     thresholds = stage_norms(conn, category_id)
     fallback = funnel_norm_days(conn, category_id)
+    skip = _stuck_exempt(category_id)
     rows = _rows(
         conn,
         """
@@ -881,6 +904,8 @@ def _stuck_rows(
     )
     stuck = []
     for row in rows:
+        if row["stage_id"] in skip:
+            continue
         days = row["days_in_stage"]
         own = thresholds.get(row["stage_id"], 0) or 0
         threshold = own or fallback
