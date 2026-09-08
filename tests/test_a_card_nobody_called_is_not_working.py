@@ -7,9 +7,21 @@
 норма там — отбор выживших. Исключение опиралось на обещание, что работу
 покажут действия, и это его проверка.
 
-Считаются только CALL и MEETING. TODO и TASKS_TASK — планирование, их на
-портале 5 902 за год; засчитав их разговором, отчёт назвал бы лучшим
-работником того, кто ведёт список дел и не звонит.
+Состояний три, а не два, и это главное, что здесь проверяется. Агентство
+отмечает работу делами: «Связаться с клиентом» — 3 085 дел за год, «Встреча
+с клиентом» — 401, а отдельных активностей «встреча» всего 68. Считать
+только звонки и встречи — 511 молчащих карточек из 819; засчитать все
+выполненные дела — 315. Ни одно из двух чисел не верно: в первом теряются
+встречи, во втором «Отчет» и «Актуальный» становятся работой с клиентом.
+
+Поэтому карточка бывает в трёх состояниях: разговор был, только отметка
+(дело выполнено, записи разговора нет) и не трогали вовсе. Слить второе с
+первым значит поверить отметке на слово, слить с третьим — обвинить того,
+кто работал мимо портала.
+
+Встреча узнаётся по теме дела, а тему приходится опускать в нижний регистр
+в Python: SQLite делает это только с латиницей, и «Встреча» с «встреча» для
+него разные строки.
 
 Отдельно проверяется связка через контакт. Звонок висит на контакте чаще,
 чем на сделке, и джойн, взявший только сделку, назвал бы молчащими тех, кто
@@ -45,15 +57,16 @@ def _deal(conn, deal_id, *, contact=None, user=10, stage="UC_FADPBF",
 
 
 def _act(conn, activity_id, owner_type, owner_id, *, kind="CALL", direction=2,
-         user=10, created="2026-09-01T10:00:00+00:00"):
+         user=10, created="2026-09-01T10:00:00+00:00", subject="", completed=1):
     conn.execute(
         """
         INSERT INTO fact_activity(activity_id, owner_type_id, owner_id,
             provider_type_id, direction, subject, responsible_id, created_at,
             completed, synced_at)
-        VALUES (?, ?, ?, ?, ?, '', ?, ?, 1, 'x')
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'x')
         """,
-        (activity_id, owner_type, owner_id, kind, direction, user, created),
+        (activity_id, owner_type, owner_id, kind, direction, subject, user,
+         created, completed),
     )
 
 
@@ -93,7 +106,7 @@ def test_a_call_on_the_contact_counts_for_the_card(agency):
     result = _work()
     assert result["cards"] == 1
     assert result["talks"] == 1
-    assert result["untouched"] == 0
+    assert result["talked"] == 1
 
 
 def test_a_call_on_someone_elses_contact_stays_there(agency):
@@ -107,20 +120,69 @@ def test_a_call_on_someone_elses_contact_stays_there(agency):
 
     result = _work()
     assert result["talks"] == 0
-    assert result["untouched"] == 1
+    assert result["nothing"] == 1
 
 
-def test_a_task_is_not_a_conversation(agency):
-    """TODO и TASKS_TASK — планирование, а не разговор с человеком."""
+def test_a_finished_task_is_a_mark_not_a_conversation(agency):
+    """«Связаться с клиентом» выполнено — это отметка, а не запись разговора."""
     with analytics_session() as conn:
         _deal(conn, 1, contact=CONTACT)
-        _act(conn, 100, 2, 1, kind="TODO")
-        _act(conn, 101, 2, 1, kind="TASKS_TASK")
-        _act(conn, 102, 3, CONTACT, kind="CONFIGURABLE")
+        _act(conn, 100, 2, 1, kind="TODO", subject="Связаться с клиентом",
+             completed=1)
 
     result = _work()
     assert result["talks"] == 0
-    assert result["untouched"] == 1, "аккуратный список дел — не работа с клиентом"
+    assert result["marked"] == 1, "брокер отметился — это не «не трогали»"
+    assert result["nothing"] == 0
+    assert result["talked"] == 0, "и не «разговаривал»: портал разговора не видел"
+
+
+def test_an_unfinished_task_is_nothing_at_all(agency):
+    """Запланированное дело — это намерение, а не работа."""
+    with analytics_session() as conn:
+        _deal(conn, 1, contact=CONTACT)
+        _act(conn, 100, 2, 1, kind="TODO", subject="Связаться с клиентом",
+             completed=0)
+
+    assert _work()["nothing"] == 1
+
+
+def test_a_meeting_hides_in_a_finished_task(agency):
+    """Встречу заводят делом: «Встреча с клиентом» выполнено — это встреча."""
+    with analytics_session() as conn:
+        _deal(conn, 1, contact=CONTACT)
+        _act(conn, 100, 2, 1, kind="TODO", subject="Встреча с клиентом",
+             completed=1)
+        _deal(conn, 2, contact=5002)
+        _act(conn, 101, 2, 2, kind="TODO", subject="показ", completed=1)
+
+    result = _work()
+    assert result["meetings"] == 2, "регистр кириллицы обязан разбираться в Python"
+    assert result["talked"] == 2
+    assert result["marked"] == 0
+
+
+def test_a_word_that_only_looks_like_a_meeting(agency):
+    """«Договориться на рекламу объекта» — не встреча, как бы ни звучало."""
+    with analytics_session() as conn:
+        _deal(conn, 1, contact=CONTACT)
+        _act(conn, 100, 2, 1, kind="TODO",
+             subject="Договориться на рекламу объекта", completed=1)
+
+    result = _work()
+    assert result["meetings"] == 0
+    assert result["marked"] == 1
+
+
+def test_a_staff_task_is_not_client_work(agency):
+    """Задачу сотруднику ставят внутри агентства — клиента она не касается."""
+    with analytics_session() as conn:
+        _deal(conn, 1, contact=CONTACT)
+        _act(conn, 100, 2, 1, kind="TASKS_TASK", subject="Проверить документы",
+             completed=1)
+        _act(conn, 101, 3, CONTACT, kind="CONFIGURABLE", completed=1)
+
+    assert _work()["nothing"] == 1
 
 
 def test_an_incoming_call_is_counted_but_named(agency):
@@ -135,6 +197,33 @@ def test_an_incoming_call_is_counted_but_named(agency):
     assert result["outgoing"] == 1
 
 
+def test_a_missed_call_is_not_a_conversation(agency):
+    """Незавершённый входящий — это непринятый вызов. Никто не поговорил."""
+    with analytics_session() as conn:
+        _deal(conn, 1, contact=CONTACT)
+        _act(conn, 100, 2, 1, direction=1, completed=0)
+
+    result = _work()
+    assert result["talks"] == 0
+    assert result["nothing"] == 1, "не дозвонились — значит не работали"
+    assert result["missed"] == 1
+    assert result["missed_cards"] == 1
+    assert result["never_returned"] == 1
+
+
+def test_a_missed_call_answered_back_is_work(agency):
+    """Пропустили и перезвонили — это работа, а не потеря."""
+    with analytics_session() as conn:
+        _deal(conn, 1, contact=CONTACT)
+        _act(conn, 100, 2, 1, direction=1, completed=0)
+        _act(conn, 101, 2, 1, direction=2)
+
+    result = _work()
+    assert result["missed_cards"] == 1
+    assert result["never_returned"] == 0
+    assert result["talked"] == 1
+
+
 def test_a_closed_card_is_silent_by_right(agency):
     """Закрытая сделка молчит законно и в счёт заброшенных не идёт."""
     with analytics_session() as conn:
@@ -143,7 +232,7 @@ def test_a_closed_card_is_silent_by_right(agency):
 
     result = _work()
     assert result["cards"] == 1
-    assert result["untouched"] == 1
+    assert result["nothing"] == 1
 
 
 def test_an_old_conversation_is_silence_not_work(agency):
@@ -156,9 +245,21 @@ def test_an_old_conversation_is_silence_not_work(agency):
 
     result = _work(silent_days=14)
     assert result["silent"] == 1
-    assert result["untouched"] == 0
-    assert result["cold"] == 1, "молчащая и нетронутая складываются в одно число"
+    assert result["nothing"] == 0
+    assert result["cold"] == 1, "брошенная и нетронутая складываются в одно число"
     assert result["silent_days"] == 14
+
+
+def test_a_mark_alone_never_joins_the_cold_count(agency):
+    """Отметка без разговора — вопрос к брокеру, а не приговор ему."""
+    with analytics_session() as conn:
+        _deal(conn, 1, contact=CONTACT)
+        _act(conn, 100, 2, 1, kind="TODO", subject="Связаться с клиентом",
+             completed=1, created="2026-01-10T10:00:00+00:00")
+
+    result = _work()
+    assert result["marked"] == 1
+    assert result["cold"] == 0, "человек мог звонить с личного телефона"
 
 
 def test_the_report_names_the_broker_and_the_stage(agency):
@@ -172,14 +273,14 @@ def test_the_report_names_the_broker_and_the_stage(agency):
     result = _work()
     by_user = {row["name"]: row for row in result["by_user"]}
     assert by_user["Марат Абзалилов"]["cards"] == 2
-    assert by_user["Марат Абзалилов"]["untouched"] == 2
-    assert by_user["Ольга Лобанова"]["untouched"] == 0
+    assert by_user["Марат Абзалилов"]["nothing"] == 2
+    assert by_user["Ольга Лобанова"]["nothing"] == 0
     # Худший сверху: разговор начинают с того, у кого лежит больше всего.
     assert result["by_user"][0]["name"] == "Марат Абзалилов"
 
     by_stage = {row["name"]: row for row in result["by_stage"]}
     assert by_stage["Поиск клиента"]["cards"] == 2
-    assert by_stage["Назначение встречи"]["untouched"] == 1
+    assert by_stage["Назначение встречи"]["nothing"] == 1
     # Стадии идут по порядку воронки, а не по числу карточек.
     assert [row["name"] for row in result["by_stage"]] == [
         "Назначение встречи", "Поиск клиента",
@@ -217,3 +318,74 @@ def test_another_funnel_is_not_this_report(agency):
 
     assert _work()["cards"] == 1
     assert _work(categories=(BUYERS,))["cards"] == 1
+
+
+def test_who_does_not_pick_up_is_counted_across_all_calls(agency):
+    """Не берут трубку — считается по всем звонкам, а не по карточкам.
+
+    По открытым карточкам пропущенных 63 при 5 169 по порталу: почти все
+    непринятые не привязаны ни к одной открытой сделке. Считать их через
+    карточки значит увидеть один процент проблемы — теряют на входе, до
+    того как заводится сделка.
+    """
+    with analytics_session() as conn:
+        _deal(conn, 1, contact=CONTACT)
+        for i in range(40):
+            _act(conn, 200 + i, 3, 9999, direction=1,
+                 completed=0 if i < 30 else 1, user=11)
+
+    pickup = {row["name"]: row for row in _work()["pickup"]}
+    assert pickup["Марат Абзалилов"]["missed"] == 30
+    assert pickup["Марат Абзалилов"]["incoming"] == 40
+    assert pickup["Марат Абзалилов"]["missed_share"] == 75.0
+
+
+def test_a_handful_of_calls_does_not_top_the_table(agency):
+    """Два пропущенных из пяти — это 40% и ничего не значит."""
+    with analytics_session() as conn:
+        _deal(conn, 1, contact=CONTACT)
+        for i in range(5):
+            _act(conn, 300 + i, 3, 9999, direction=1,
+                 completed=0 if i < 2 else 1, user=11)
+
+    assert _work()["pickup"] == []
+
+
+def test_a_robot_is_not_a_person_who_does_not_answer(agency):
+    """Общая линия агентства — вопрос маршрутизации, а не дисциплины.
+
+    На живых данных её строка первая: 929 непринятых из 1286. Число
+    настоящее и с экрана не убирается — но в утреннем сообщении, которое
+    зовёт поговорить с брокером, робота называть нельзя.
+    """
+    with analytics_session() as conn:
+        conn.execute(
+            "INSERT INTO dim_user(user_id, name, department_id, department_name,"
+            " is_active, synced_at)"
+            " VALUES (90, 'Агентство Недвижимости', 44, 'Битрикс', 1, 'x')"
+        )
+        _deal(conn, 1, contact=CONTACT)
+        for i in range(40):
+            _act(conn, 700 + i, 3, 9999, direction=1, completed=0, user=90)
+
+    row = next(r for r in _work()["pickup"] if r["user_id"] == 90)
+    assert row["missed"] == 40, "число остаётся на экране"
+    assert row["service"] is True
+    assert row["person"] is False
+
+
+def test_a_departed_employee_is_not_called_out_daily(agency):
+    """На уволенного всё ещё звонят — это находка, но не ежедневная."""
+    with analytics_session() as conn:
+        conn.execute(
+            "INSERT INTO dim_user(user_id, name, department_id, department_name,"
+            " is_active, synced_at)"
+            " VALUES (91, 'Сергей Миронов', 44, 'Потерянные', 0, 'x')"
+        )
+        _deal(conn, 1, contact=CONTACT)
+        for i in range(35):
+            _act(conn, 800 + i, 3, 9999, direction=1, completed=0, user=91)
+
+    row = next(r for r in _work()["pickup"] if r["user_id"] == 91)
+    assert row["missed"] == 35
+    assert row["person"] is False, "поговорить с ним сегодня нельзя"

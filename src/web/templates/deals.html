@@ -161,16 +161,28 @@
     <div class="empty">В этой воронке нет открытых карточек.</div>
   {% else %}
   <div class="grid grid-kpi">
-    {{ ui.tile('Без разговора', work.untouched | int_ru,
-               hint=(work.untouched_share | pct) ~ ' из ' ~ (work.cards | int_ru)
-                    ~ ' открытых') }}
+    {{ ui.tile('Не трогали вовсе', work.nothing | int_ru,
+               hint='ни звонка, ни отметки — ' ~ (work.nothing_share | pct)
+                    ~ ' из ' ~ (work.cards | int_ru) ~ ' открытых') }}
+    {{ ui.tile('Только отметка', work.marked | int_ru,
+               hint='дело выполнено, записи разговора нет') }}
     {{ ui.tile('Звонили и бросили', work.silent | int_ru,
                hint='последний разговор дольше ' ~ work.silent_days ~ ' дней назад') }}
-    {{ ui.tile('Разговоров всего', work.talks | int_ru,
-               hint='из них исходящих ' ~ (work.outgoing | int_ru)) }}
     {{ ui.tile('Встреч', work.meetings | int_ru,
-               hint='отмечено в портале за всё окно витрины') }}
+               hint='активности «встреча» плюс выполненные дела о встрече') }}
+    {{ ui.tile('Разговоров', work.talks | int_ru,
+               hint='из них исходящих звонков ' ~ (work.outgoing | int_ru)) }}
+    {{ ui.tile('Не приняли звонков', work.missed | int_ru,
+               hint='по ' ~ (work.never_returned | int_ru)
+                    ~ ' карточкам так и не перезвонили') }}
   </div>
+
+  <div class="notice mt-14"><span>ℹ</span>
+    <span>«Только отметка» — это не обвинение и не работа. Брокер закрыл дело,
+      а записи разговора в портале нет: он мог звонить с личного телефона.
+      Сложить эти карточки с разговорами значит поверить отметке на слово;
+      сложить с нетронутыми — обвинить того, кто работал мимо портала. Поэтому
+      они стоят отдельным числом, и это вопрос, а не приговор.</span></div>
 
   <div class="grid grid-2 mt-16">
     <div>
@@ -179,8 +191,8 @@
         <table>
           <thead>
             <tr><th>Стадия</th><th class="num">Карточек</th>
-              <th class="num">Без разговора</th><th class="num">Лежит</th>
-              <th class="num">Разговоров</th></tr>
+              <th class="num">Не трогали</th><th class="num">Отметка</th>
+              <th class="num">Лежит</th><th class="num">Разговоров</th></tr>
           </thead>
           <tbody>
             {% for row in work.by_stage %}
@@ -190,7 +202,8 @@
                    title="Показать карточки этой стадии">{{ row.name }}</a>
               </td>
               <td class="num">{{ row.cards | int_ru }}</td>
-              <td class="num">{{ row.untouched | int_ru }}</td>
+              <td class="num">{{ row.nothing | int_ru }}</td>
+              <td class="num muted">{{ row.marked | int_ru }}</td>
               <td class="num {{ 'delta-down' if row.cold_share >= 50 else '' }}">
                 {{ row.cold_share | pct }}</td>
               <td class="num muted">{{ row.talks | int_ru }}</td>
@@ -207,8 +220,8 @@
         <table>
           <thead>
             <tr><th>Брокер</th><th class="num">Карточек</th>
-              <th class="num">Без разговора</th><th class="num">Лежит</th>
-              <th class="num">Разговоров</th></tr>
+              <th class="num">Не трогали</th><th class="num">Отметка</th>
+              <th class="num">Лежит</th><th class="num">Разговоров</th></tr>
           </thead>
           <tbody>
             {% for row in work.by_user %}
@@ -219,7 +232,8 @@
                 <span class="muted">· {{ row.department }}</span>
               </td>
               <td class="num">{{ row.cards | int_ru }}</td>
-              <td class="num">{{ row.untouched | int_ru }}</td>
+              <td class="num">{{ row.nothing | int_ru }}</td>
+              <td class="num muted">{{ row.marked | int_ru }}</td>
               <td class="num {{ 'delta-down' if row.cold_share >= 50 else '' }}">
                 {{ row.cold_share | pct }}</td>
               <td class="num muted">{{ row.talks | int_ru }}</td>
@@ -231,8 +245,36 @@
     </div>
   </div>
 
+  {% if work.pickup %}
+  <h3 class="section-title sub mt-16">Не берут трубку · от 30 входящих</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Кто</th><th class="num">Входящих</th>
+        <th class="num">Не приняли</th><th class="num">Доля</th></tr></thead>
+      <tbody>
+        {% for row in work.pickup[:10] %}
+        <tr>
+          <td>{{ row.name or '—' }}<span class="muted"> · {{ row.department }}</span>
+            {% if row.service %}<span class="badge">общая линия</span>
+            {% elif not row.is_active %}<span class="badge">не работает</span>{% endif %}</td>
+          <td class="num">{{ row.incoming | int_ru }}</td>
+          <td class="num">{{ row.missed | int_ru }}</td>
+          <td class="num {{ 'delta-down' if row.missed_share >= 50 else '' }}">
+            {{ row.missed_share | pct }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {{ ui.definition('Считается по всем звонкам человека, а не по карточкам этой
+    воронки: непринятых по порталу 5 169, а по открытым карточкам всего 63 —
+    почти все пропущенные не привязаны ни к одной сделке. Потери сидят на входе,
+    до того как карточка заводится, и через карточки видно один процент
+    проблемы.') }}
+  {% endif %}
+
   {% if work.worst %}
-  <h3 class="section-title sub mt-16">Дольше всех лежат без единого разговора</h3>
+  <h3 class="section-title sub mt-16">Дольше всех лежат без единого следа</h3>
   <div class="table-wrap">
     <table>
       <thead><tr><th>Карточка</th><th>Стадия</th><th>Брокер</th>
@@ -260,12 +302,15 @@
       молчание он спрятать может.</span></div>
   {% endif %}
 
-  {{ ui.definition('Разговор — это CALL и MEETING, и только они. TODO и задача
-    сотруднику — планирование: засчитав их, отчёт назвал бы лучшим работником того,
-    кто аккуратно ведёт список дел и не звонит. Действие ищется и на сделке, и на
-    контакте сделки — звонок чаще висит на контакте, и счёт только по сделке назвал
-    бы молчащими тех, кто звонил. Входящий звонок считается разговором, но в
-    «исходящие» не идёт: клиент позвонил сам — это не заслуга брокера.') }}
+  {{ ui.definition('Разговор — завершённый звонок или встреча. Встречу в
+    агентстве заводят делом и после проведения ставят «выполнено», поэтому
+    выполненное дело со словом «встреча», «показ» или «просмотр» считается
+    встречей: отдельных активностей «встреча» в портале всего 68 при 401 деле о
+    встрече. Остальные выполненные дела — «Связаться с клиентом», «Отчет» —
+    считаются отметкой, а не разговором. Задача сотруднику не считается вовсе:
+    её ставят внутри агентства. Непринятый входящий разговором не был. Действие
+    ищется и на сделке, и на её контакте — звонок чаще висит на контакте, и счёт
+    только по сделке назвал бы молчащими тех, кто звонил.') }}
   {% endif %}
 </div>
 

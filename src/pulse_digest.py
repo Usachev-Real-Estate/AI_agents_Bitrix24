@@ -206,14 +206,19 @@ def _work_lines(work_data: dict[str, Any] | None) -> list[str]:
     if not work_data or not work_data["cards"]:
         return []
     lines = [
-        f"\n🔕 Без разговора {work_data['untouched']} "
-        f"{_cards_word(work_data['untouched'])} из {work_data['cards']} "
-        f"({work_data['untouched_share']:.0f}%)"
+        f"\n🔕 Не трогали вовсе {work_data['nothing']} "
+        f"{_cards_word(work_data['nothing'])} из {work_data['cards']} "
+        f"({work_data['nothing_share']:.0f}%) — ни звонка, ни отметки"
     ]
     if work_data["silent"]:
         lines.append(
             f"  · ещё {work_data['silent']} — звонили, но дольше "
             f"{work_data['silent_days']} дней назад"
+        )
+    if work_data["marked"]:
+        lines.append(
+            f"  · {work_data['marked']} с отметкой без разговора: дело закрыто, "
+            "звонка в портале нет"
         )
     worst = [
         row for row in work_data["by_user"]
@@ -223,14 +228,43 @@ def _work_lines(work_data: dict[str, Any] | None) -> list[str]:
         lines.append("  · больше всего лежит у: " + ", ".join(
             f"{row['name']} {row['cold']}/{row['cards']}" for row in worst
         ))
-    stage = max(work_data["by_stage"], key=lambda row: row["untouched"],
+    stage = max(work_data["by_stage"], key=lambda row: row["nothing"],
                 default=None)
-    if stage and stage["untouched"]:
+    if stage and stage["nothing"]:
         lines.append(
             f"  · чаще всего на стадии «{stage['name']}»: "
-            f"{stage['untouched']} из {stage['cards']}"
+            f"{stage['nothing']} из {stage['cards']}"
         )
+    lines += _pickup_lines(work_data)
     return lines
+
+
+def _pickup_lines(work_data: dict[str, Any]) -> list[str]:
+    """Кто не берёт трубку.
+
+    Отдельной строкой, а не вместе с карточками: пропущенный вызов — это
+    единственная потеря, где клиент пришёл сам. Остальное в сводке говорит,
+    что до человека не дошли руки; это — что он дозванивался и не дозвонился.
+
+    Считается по всем звонкам, а не по карточкам воронки: непринятых по
+    порталу 5 169, а по открытым карточкам 63. Потери сидят на входе, до
+    того как заводится сделка, и счёт через карточки показал бы процент.
+
+    Называются только люди. Верх этой таблицы на живых данных занимают общая
+    линия агентства (929 непринятых из 1286) и уволенный сотрудник, на
+    которого всё ещё звонят: обе строки настоящие, обе видны на экране, но в
+    ежедневном сообщении им не место. Оно должно звать к действию сегодня, а
+    не повторять каждое утро один и тот же структурный факт — иначе его
+    перестанут читать раньше, чем в нём появится живой человек.
+    """
+    people = [row for row in work_data["pickup"]
+              if row["person"] and row["missed_share"] >= _MISSED_SHARE][:3]
+    if not people:
+        return []
+    return ["  · не берут трубку: " + ", ".join(
+        f"{row['name'] or 'id ' + str(row['user_id'])} "
+        f"{row['missed']}/{row['incoming']}" for row in people
+    )]
 
 
 def _cards_word(count: int) -> str:
@@ -246,6 +280,11 @@ def _cards_word(count: int) -> str:
 # карточек оставляет в списке тех, у кого лежит настоящий объём.
 _MIN_CARDS = 10
 _COLD_SHARE = 50.0
+
+# Порог доли непринятых, за которым человека называют поимённо. Порог по
+# числу входящих уже стоит в work._pickup — здесь отсекается тот, кто берёт
+# трубку чаще, чем роняет.
+_MISSED_SHARE = 50.0
 
 
 def _sellers_lines(sellers: dict[str, Any] | None) -> list[str]:

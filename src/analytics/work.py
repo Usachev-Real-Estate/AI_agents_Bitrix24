@@ -1,41 +1,47 @@
-"""Работа по карточкам: звонили или нет.
+"""Работа по карточкам: разговаривали, отметились или не трогали.
 
-Движение по стадиям отвечает на вопрос «карточка двигалась». Этот модуль —
-на вопрос «по карточке работали», и для объекта собственника это разные
-вопросы. Объект в рекламе месяцами стоит на одной стадии, пока брокер по
-нему звонит; рядом стоит такой же, по которому не звонил никто. По стадии
-они неотличимы.
+Движение по стадиям отвечает на вопрос «карточка двигалась», не «по
+карточке работали». Объект в рекламе месяцами стоит на одной стадии и у
+того, кто по нему звонит, и у того, кто забыл его в день заведения. Из-за
+этой неразличимости «Поиск клиента» исключён из подсчёта зависших
+(metrics._stuck_exempt); исключение опиралось на обещание, что работу
+покажут действия, и этот модуль его выполняет.
 
-Именно из-за этой неразличимости стадия «Поиск клиента» была исключена из
-подсчёта зависших (metrics._stuck_exempt): норма стадии там — отбор
-выживших, и всё честно рекламируемое оказывалось «зависшим». Исключение
-опиралось на обещание, что работу на такой стадии покажут действия. Этот
-модуль его выполняет.
+СОСТОЯНИЙ ТРИ, А НЕ ДВА. Это главное решение здесь, и оно продиктовано
+устройством портала, а не вкусом.
 
-Что считается разговором. Пока только CALL и MEETING. TODO и TASKS_TASK —
-это дело, заведённое себе, и задача, поставленная сотруднику; на портале их
-5 902 за год, почти четверть всех действий. Засчитывать их все работой
-значит выдать лучшим работником того, кто аккуратно ведёт список дел и не
-звонит.
+Агентство отмечает работу делами: «Связаться с клиентом» — 3 085 дел за
+год, «Встреча с клиентом» — 401. Встречу заводят делом и после проведения
+ставят «выполнено»; отдельных активностей «встреча» всего 68. Считать
+только звонки и встречи значит назвать молчащими 511 карточек из 819.
+Засчитать все выполненные дела — 315. Разница в 196 карточек, и ни одно из
+двух чисел не верно: в первом теряются встречи, во втором «Отчет» и
+«Актуальный» становятся работой с клиентом.
 
-НО: агентство отмечает встречу именно делом — заводит TODO, а после
-проведения ставит ему «выполнено» (ответ собственника 08.09). Значит по
-карточке, где брокер съездил на встречу, этот счёт покажет молчание, и
-число молчащих здесь — ВЕРХНЯЯ ГРАНИЦА, а не факт. Насколько она завышена,
-меряет scripts/meeting_probe.py; до его прогона число нельзя ставить в
-сводку как окончательное и нельзя предъявлять человеку.
+Поэтому карточка бывает в одном из трёх состояний:
 
-Направление считается, но не фильтрует. Входящий звонок — это клиент
-позвонил сам, а не брокер сработал, и «из них исходящих» стоит отдельной
-колонкой. Но карточка, по которой был хоть какой-то разговор, работается —
-а из 818 открытых карточек собственников 512 не имеют ни одного звонка ни в
-ту, ни в другую сторону, и на этом фоне спор про направление второй.
+* **разговор был** — есть завершённый звонок или встреча;
+* **только отметка** — есть выполненное дело, но записи разговора нет.
+  Брокер утверждает, что работал; портал этого не видел. Это не обвинение:
+  человек мог звонить с личного телефона. Но и не работа — это вопрос,
+  который надо задать;
+* **ничего** — ни разговора, ни отметки.
 
-Общий контакт. Один человек бывает и собственником, и покупателем; его
-звонок по покупке попадёт в счёт карточки объекта. Таких карточек три из
-818, и ошибка у них в безопасную сторону: карточка выглядит более
-отработанной, чем она есть. Обвинить брокера напрасно этот перекос не может
-— только не заметить молчание, и число таких карточек печатается рядом.
+Сложить второе с первым значит поверить отметке на слово. Сложить со
+третьим — обвинить того, кто работал мимо портала. Оба слипания дают число,
+которое выглядит правдоподобно и неверно, поэтому состояния держатся
+раздельно и в сводке называются раздельно.
+
+Регистр кириллицы разбирается в Python. SQLite lower() латиницу опускает, а
+кириллицу нет: «Встреча» и «встреча» для него разные строки, и отбор по
+теме, сделанный в SQL, тихо терял бы половину дел.
+
+Пропущенные звонки. Незавершённый входящий — это непринятый вызов
+(подтверждено собственником 08.09), и у всех 5 169 таких записей время
+окончания равно времени начала. Но по открытым карточкам их всего 63:
+подавляющее большинство пропущенных не привязано ни к одной открытой
+сделке. Потери сидят не в пайплайне, а на входе — поэтому «кто не берёт
+трубку» считается по всем звонкам человека, а не по карточкам.
 """
 
 from __future__ import annotations
@@ -46,20 +52,38 @@ from typing import Any
 import plans
 from metrics import _rows, _share
 
-# Разговор с человеком. Всё остальное в таблице действий —
-# планирование: дело себе и задача сотруднику.
-TALK: tuple[str, ...] = ("CALL", "MEETING")
+# Запись разговора. MEETING в портале почти не используют — встречу заводят
+# делом, — но там, где он есть, это встреча.
+CALL = "CALL"
+MEETING = "MEETING"
+
+# Дело: отметка о работе. Задача сотруднику (TASKS_TASK) сюда не входит —
+# её ставят внутри агентства, к клиенту она отношения не имеет.
+MARK = "TODO"
+
+# Слова, по которым выполненное дело считается встречей. Проверены на живых
+# темах: «Встреча с клиентом» 401, «Показ» 36, «просмотр» 18. Слово «объект»
+# в список не входит — оно попадается в «Договориться на рекламу объекта»,
+# где никакой встречи нет.
+MEETING_WORDS = ("встреч", "показ", "просмотр")
 
 # Сколько дней без разговора делают карточку молчащей. Две недели, а не
 # неделя как у движения: объект в рекламе живёт медленнее сделки, и
 # недельный порог назвал бы молчащей половину нормально ведомых карточек.
 SILENT_DAYS = 14
 
-# Сколько строк показывать поимённо. Список — приглашение открыть карточку,
-# а не отчёт: три строки читают, двадцать пролистывают.
+# Сколько строк показывать поимённо: три читают, двадцать пролистывают.
 TOP = 5
 
-_TALK_SQL = ", ".join(f"'{kind}'" for kind in TALK)
+# Минимум входящих, чтобы попасть в таблицу «не берут трубку». У человека с
+# пятью входящими и двумя пропущенными выходит 40%, и он возглавил бы
+# таблицу, ничего при этом не значив.
+MIN_INCOMING = 30
+
+
+def _looks_like_meeting(subject: str) -> bool:
+    text = (subject or "").lower()
+    return any(word in text for word in MEETING_WORDS)
 
 
 def card_work(
@@ -69,60 +93,23 @@ def card_work(
     silent_days: int = SILENT_DAYS,
     department_id: int | None = None,
 ) -> dict[str, Any]:
-    """Кто разговаривал по своим открытым карточкам, а кто нет.
+    """Что происходило по открытым карточкам воронки.
 
-    Считается по ОТКРЫТЫМ карточкам: закрытая сделка молчит по праву, и
-    сложить её с забытой значит утопить вторую в первых.
+    Считается по ОТКРЫТЫМ: закрытая сделка молчит по праву, и сложить её с
+    забытой значит утопить вторую в первых.
 
-    Действие ищется и на сделке, и на контакте сделки. Взяв только сделку,
-    отчёт назвал бы молчащими тех, кто звонил: на портале действий на
-    контактах 13 277 против 7 131 на сделках. У карточек собственников
-    перевес обратный, но 458 разговоров через контакт — это 458 карточек,
-    которые иначе выглядели бы заброшенными.
+    Действие ищется и на сделке, и на её контакте. Звонок чаще висит на
+    контакте (13 277 против 7 131 по порталу), и счёт только по сделке
+    назвал бы молчащими тех, кто звонил.
     """
-    where, params = plans.category_filter("d", categories)
-    params["dept"] = department_id
-    rows = _rows(
-        conn,
-        f"""
-        SELECT d.deal_id, d.title, d.stage_id, d.assigned_by_id,
-               COALESCE(s.name, d.stage_id) AS stage_name,
-               COALESCE(s.sort, 0) AS stage_sort,
-               COALESCE(u.name, '') AS broker,
-               COALESCE(u.department_name, '') AS department,
-               COUNT(a.activity_id) AS talks,
-               SUM(CASE WHEN a.direction = 2 THEN 1 ELSE 0 END) AS outgoing,
-               SUM(CASE WHEN a.provider_type_id = 'MEETING'
-                        THEN 1 ELSE 0 END) AS meetings,
-               (julianday('now') - julianday(MAX(a.created_at))) AS quiet_days,
-               (julianday('now') - julianday(d.date_create)) AS age_days
-        FROM v_deal d
-        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
-        LEFT JOIN dim_stage s
-               ON s.stage_id = d.stage_id AND s.category_id = d.category_id
-        LEFT JOIN v_activity a
-               ON ((a.owner_type_id = 2 AND a.owner_id = d.deal_id)
-                   OR (a.owner_type_id = 3 AND d.contact_id IS NOT NULL
-                       AND d.contact_id > 0 AND a.owner_id = d.contact_id))
-              AND a.provider_type_id IN ({_TALK_SQL})
-        WHERE d.is_closed = 0 AND {where}
-          AND (:dept IS NULL OR u.department_id = :dept)
-        GROUP BY d.deal_id
-        """,
-        params,
-    )
+    cards = {row["deal_id"]: _blank(row) for row in _cards(conn, categories, department_id)}
+    for act in _acts(conn, categories, department_id):
+        card = cards.get(act["deal_id"])
+        if card is not None:
+            _apply(card, act)
+    rows = list(cards.values())
     for row in rows:
-        row["talks"] = row["talks"] or 0
-        row["outgoing"] = row["outgoing"] or 0
-        row["meetings"] = row["meetings"] or 0
-        row["untouched"] = row["talks"] == 0
-        quiet = row["quiet_days"]
-        row["quiet_days"] = round(quiet, 1) if quiet is not None else None
-        row["silent"] = bool(row["talks"] and quiet is not None
-                             and quiet >= silent_days)
-        # Дни с заведения — целые: десятая доля дня у карточки,
-        # лежащей полгода, это шум с видом точности.
-        row["age_days"] = round(row["age_days"] or 0)
+        _settle(row, silent_days)
 
     return {
         "silent_days": silent_days,
@@ -131,31 +118,157 @@ def card_work(
         "by_stage": _group(rows, "stage_id", "stage_name",
                            sort=lambda item: item["stage_sort"]),
         "by_user": _group(rows, "assigned_by_id", "broker", extra="department"),
-        # Самые старые из ни разу не тронутых: карточка, лежащая полгода без
-        # единого звонка, — это не «ещё не дошли руки».
+        # Самые старые из тех, где не было вообще ничего: карточка, лежащая
+        # полгода без звонка и без отметки, — это не «не дошли руки».
         "worst": sorted(
-            (row for row in rows if row["untouched"]),
+            (row for row in rows if row["state"] == "nothing"),
             key=lambda row: -row["age_days"],
         )[:TOP],
+        "pickup": _pickup(conn, department_id),
         "shared_contacts": _shared_contacts(conn, categories),
     }
 
 
+def _cards(conn, categories, department_id) -> list[dict[str, Any]]:
+    where, params = plans.category_filter("d", categories)
+    params["dept"] = department_id
+    return _rows(
+        conn,
+        f"""
+        SELECT d.deal_id, d.title, d.stage_id, d.assigned_by_id,
+               COALESCE(s.name, d.stage_id) AS stage_name,
+               COALESCE(s.sort, 0) AS stage_sort,
+               COALESCE(u.name, '') AS broker,
+               COALESCE(u.department_name, '') AS department,
+               (julianday('now') - julianday(d.date_create)) AS age_days
+        FROM v_deal d
+        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
+        LEFT JOIN dim_stage s
+               ON s.stage_id = d.stage_id AND s.category_id = d.category_id
+        WHERE d.is_closed = 0 AND {where}
+          AND (:dept IS NULL OR u.department_id = :dept)
+        """,
+        params,
+    )
+
+
+def _acts(conn, categories, department_id) -> list[dict[str, Any]]:
+    """Действия по открытым карточкам — строками, а не итогом.
+
+    Итог здесь посчитать нельзя: встреча узнаётся по ТЕМЕ дела, а тему
+    приходится опускать в нижний регистр в Python — SQLite делает это только
+    с латиницей, и «Встреча» с «встреча» для него разные строки. Отбор,
+    сделанный в SQL, тихо терял бы половину дел.
+    """
+    where, params = plans.category_filter("d", categories)
+    params["dept"] = department_id
+    return _rows(
+        conn,
+        f"""
+        SELECT d.deal_id, a.provider_type_id, a.direction, a.completed,
+               a.subject, a.created_at
+        FROM v_deal d
+        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
+        JOIN v_activity a
+             ON ((a.owner_type_id = 2 AND a.owner_id = d.deal_id)
+                 OR (a.owner_type_id = 3 AND d.contact_id IS NOT NULL
+                     AND d.contact_id > 0 AND a.owner_id = d.contact_id))
+        WHERE d.is_closed = 0 AND {where}
+          AND (:dept IS NULL OR u.department_id = :dept)
+          AND a.provider_type_id IN (:call, :meet, :mark)
+        """,
+        {**params, "call": CALL, "meet": MEETING, "mark": MARK},
+    )
+
+
+def _blank(row: dict[str, Any]) -> dict[str, Any]:
+    row.update({"calls": 0, "outgoing": 0, "missed": 0, "meetings": 0,
+                "marks": 0, "last_talk": None})
+    row["age_days"] = round(row["age_days"] or 0)
+    return row
+
+
+def _apply(card: dict[str, Any], act: dict[str, Any]) -> None:
+    kind, done = act["provider_type_id"], bool(act["completed"])
+    if kind == CALL:
+        if not done and act["direction"] == 1:
+            # Непринятый вызов. Разговором он не был — считать его работой
+            # значит записать в актив то, что клиент не дозвонился.
+            card["missed"] += 1
+            return
+        card["calls"] += 1
+        if act["direction"] == 2:
+            card["outgoing"] += 1
+    elif kind == MEETING:
+        card["meetings"] += 1
+    elif kind == MARK and done:
+        card["marks"] += 1
+        if _looks_like_meeting(act["subject"]):
+            card["meetings"] += 1
+        else:
+            return
+    else:
+        return
+    if act["created_at"] and (card["last_talk"] is None
+                              or act["created_at"] > card["last_talk"]):
+        card["last_talk"] = act["created_at"]
+
+
+def _settle(row: dict[str, Any], silent_days: int) -> None:
+    row["talks"] = row["calls"] + row["meetings"]
+    if row["talks"]:
+        row["state"] = "talked"
+    elif row["marks"]:
+        row["state"] = "marked"
+    else:
+        row["state"] = "nothing"
+    row["quiet_days"] = _days_since(row["last_talk"])
+    row["silent"] = bool(row["state"] == "talked" and row["quiet_days"] is not None
+                         and row["quiet_days"] >= silent_days)
+
+
+def _days_since(stamp: str | None) -> float | None:
+    if not stamp:
+        return None
+    from datetime import datetime, timezone
+
+    try:
+        moment = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return round((datetime.now(timezone.utc) - moment).total_seconds() / 86400.0, 1)
+
+
 def _totals(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    untouched = sum(1 for row in rows if row["untouched"])
+    talked = sum(1 for row in rows if row["state"] == "talked")
+    marked = sum(1 for row in rows if row["state"] == "marked")
+    nothing = sum(1 for row in rows if row["state"] == "nothing")
     silent = sum(1 for row in rows if row["silent"])
+    missed = sum(1 for row in rows if row["missed"])
     return {
-        "untouched": untouched,
-        "untouched_share": _share(untouched, len(rows)),
+        "talked": talked,
+        "marked": marked,
+        "marked_share": _share(marked, len(rows)),
+        "nothing": nothing,
+        "nothing_share": _share(nothing, len(rows)),
         "silent": silent,
-        "silent_share": _share(silent, len(rows)),
-        # Ни разу не звонили плюс звонили и бросили. Именно это число
-        # отвечает на вопрос «сколько карточек лежит без работы».
-        "cold": untouched + silent,
-        "cold_share": _share(untouched + silent, len(rows)),
+        # Ни отметки, ни разговора плюс разговор, брошенный давно. Отметка
+        # без разговора сюда не входит: это отдельный вопрос, а не приговор.
+        "cold": nothing + silent,
+        "cold_share": _share(nothing + silent, len(rows)),
         "talks": sum(row["talks"] for row in rows),
         "outgoing": sum(row["outgoing"] for row in rows),
         "meetings": sum(row["meetings"] for row in rows),
+        "marks": sum(row["marks"] for row in rows),
+        "missed": sum(row["missed"] for row in rows),
+        "missed_cards": missed,
+        # Пропущенный, за которым перезвонили, — это работа. Не перезвонили
+        # ни разу — это потерянный человек, и число у них разное.
+        "never_returned": sum(
+            1 for row in rows if row["missed"] and not row["outgoing"]
+        ),
     }
 
 
@@ -173,12 +286,8 @@ def _group(
         groups.setdefault(row[key], []).append(row)
     result = []
     for value, items in groups.items():
-        entry = {
-            "key": value,
-            "name": items[0][label] or "—",
-            "cards": len(items),
-            **_totals(items),
-        }
+        entry = {"key": value, "name": items[0][label] or "—",
+                 "cards": len(items), **_totals(items)}
         if extra:
             entry[extra] = items[0][extra]
         if sort is not None:
@@ -188,6 +297,70 @@ def _group(
         return sorted(result, key=lambda item: item["sort"])
     # Худшие сверху: разговор начинают с того, у кого лежит больше всего.
     return sorted(result, key=lambda item: (-item["cold"], -item["cards"]))
+
+
+def _service_names() -> set[str]:
+    """Учётные записи, которые не человек. Список ведёт агентство.
+
+    Не выдумывается здесь: тот же перечень уже используется замком источника
+    у контактов — это готовый ответ агентства на вопрос «кто из этих имён не
+    сотрудник». Второй список разошёлся бы с первым.
+    """
+    try:
+        from config import get_settings
+
+        return {name.strip().lower()
+                for name in get_settings().contact_source_lock_exclude_names}
+    except Exception:  # pragma: no cover — конфиг недоступен в изолированных тестах
+        return {"агентство недвижимости", "asterisk1 1"}
+
+
+def _pickup(conn, department_id: int | None) -> list[dict[str, Any]]:
+    """Кто не берёт трубку. Считается по всем звонкам, а не по карточкам.
+
+    По открытым карточкам пропущенных всего 63 при 5 169 по порталу:
+    подавляющее большинство непринятых не привязано ни к одной открытой
+    сделке. Считать их через карточки значит увидеть один процент проблемы —
+    потери сидят на входе, до того как заводится сделка.
+
+    Две верхние строки этой таблицы на живых данных — не люди: общая линия
+    агентства (929 непринятых из 1286) и уволенный сотрудник, на которого всё
+    ещё звонят. Обе строки — настоящие потери и обе остаются на экране, но
+    помечены: общая линия это вопрос маршрутизации, а не дисциплины, и
+    называть её в утреннем сообщении наравне с брокером неверно. Поэтому
+    ``person`` отделяет тех, с кем сегодня можно поговорить, от остальных, а
+    решает, кого печатать, уже сводка.
+    """
+    service = _service_names()
+    rows = _rows(
+        conn,
+        """
+        SELECT a.responsible_id AS user_id,
+               COALESCE(u.name, '') AS name,
+               COALESCE(u.department_name, '') AS department,
+               COALESCE(u.is_active, 0) AS is_active,
+               SUM(CASE WHEN a.direction = 1 THEN 1 ELSE 0 END) AS incoming,
+               SUM(CASE WHEN a.direction = 1 AND a.completed = 0
+                        THEN 1 ELSE 0 END) AS missed
+        FROM v_activity a
+        LEFT JOIN v_user u ON u.user_id = a.responsible_id
+        WHERE a.provider_type_id = :call
+          AND (:dept IS NULL OR u.department_id = :dept)
+        GROUP BY a.responsible_id
+        """,
+        {"call": CALL, "dept": department_id},
+    )
+    people = []
+    for row in rows:
+        if (row["incoming"] or 0) < MIN_INCOMING:
+            continue
+        row["missed_share"] = _share(row["missed"], row["incoming"])
+        row["service"] = (row["name"] or "").strip().lower() in service
+        # Человек, с которым можно поговорить сегодня. Уволенный и робот в
+        # ежедневное сообщение не идут: там нужно действие, а не история.
+        row["person"] = bool(row["is_active"]) and not row["service"]
+        people.append(row)
+    return sorted(people, key=lambda row: -row["missed_share"])
 
 
 def _shared_contacts(conn, categories: Sequence[int] | None) -> int:

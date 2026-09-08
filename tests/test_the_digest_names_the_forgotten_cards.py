@@ -87,11 +87,11 @@ def _lines(**kwargs):
 
 
 def test_the_count_of_untouched_cards_leads(agency):
-    """Первое число — карточки без разговора, а не сумма звонков."""
+    """Первое число — карточки без единого следа, а не сумма звонков."""
     text = _lines()
 
-    assert "Без разговора 12 карточек из 24 (50%)" in text
-    assert text.index("Без разговора") < text.index("больше всего лежит")
+    assert "Не трогали вовсе 12 карточек из 24 (50%)" in text
+    assert text.index("Не трогали") < text.index("больше всего лежит")
 
 
 def test_the_broker_is_named_with_his_share(agency):
@@ -155,4 +155,61 @@ def test_the_block_joins_the_sellers_section(agency):
         {}, events, WINDOW, sellers=None, sellers_work=data,
     )
     assert "🏠 Продавцы за вчера" in text
-    assert "Без разговора" in text
+    assert "Не трогали вовсе" in text
+
+
+def test_a_mark_without_a_call_is_its_own_line(agency):
+    """«Дело закрыто, звонка нет» — вопрос к брокеру, а не приговор."""
+    with analytics_session() as conn:
+        for i in range(41, 44):
+            _deal(conn, i, user=11, contact=5000 + i)
+            conn.execute(
+                """
+                INSERT INTO fact_activity(activity_id, owner_type_id, owner_id,
+                    provider_type_id, direction, subject, responsible_id,
+                    created_at, completed, synced_at)
+                VALUES (?, 2, ?, 'TODO', NULL, 'Связаться с клиентом', 11,
+                        '2026-09-07T10:00:00+00:00', 1, 'x')
+                """,
+                (400 + i, i),
+            )
+
+    text = _lines()
+    assert "3 с отметкой без разговора" in text
+    assert "Не трогали вовсе 12" in text, "отметка не приплюсовалась к нетронутым"
+
+
+def test_the_missed_calls_get_their_own_line(agency):
+    """Пропущенный вызов — единственная потеря, где клиент пришёл сам."""
+    with analytics_session() as conn:
+        for i in range(60):
+            conn.execute(
+                """
+                INSERT INTO fact_activity(activity_id, owner_type_id, owner_id,
+                    provider_type_id, direction, subject, responsible_id,
+                    created_at, completed, synced_at)
+                VALUES (?, 3, 9999, 'CALL', 1, '', 11,
+                        '2026-09-07T10:00:00+00:00', ?, 'x')
+                """,
+                (500 + i, 0 if i < 45 else 1),
+            )
+
+    assert "не берут трубку: Марат Абзалилов 45/60" in _lines()
+
+
+def test_a_broker_who_mostly_answers_is_not_named(agency):
+    """Уронил четверть входящих — это не строка в сводке директору."""
+    with analytics_session() as conn:
+        for i in range(60):
+            conn.execute(
+                """
+                INSERT INTO fact_activity(activity_id, owner_type_id, owner_id,
+                    provider_type_id, direction, subject, responsible_id,
+                    created_at, completed, synced_at)
+                VALUES (?, 3, 9999, 'CALL', 1, '', 11,
+                        '2026-09-07T10:00:00+00:00', ?, 'x')
+                """,
+                (600 + i, 0 if i < 15 else 1),
+            )
+
+    assert "не берут трубку" not in _lines()
