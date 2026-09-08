@@ -26,7 +26,7 @@ DEFAULT_DB_PATH = Path("data/analytics.db")
 # запас, что и основная база проекта.
 BUSY_TIMEOUT_MS = 10_000
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Семантика стадии. Без неё нельзя посчитать ни конверсию, ни win rate:
 # «выиграно» и «проиграно» надо отличать от «в работе», а по одному только
@@ -168,6 +168,37 @@ _DDL: tuple[str, ...] = (
     );
     """,
     """
+    CREATE TABLE IF NOT EXISTS fact_comment (
+        comment_id   INTEGER PRIMARY KEY,
+        entity_type  TEXT    NOT NULL DEFAULT 'deal',
+        entity_id    INTEGER NOT NULL,
+        author_id    INTEGER,
+        body         TEXT    NOT NULL DEFAULT '',
+        -- Комментарий, написанный роботом, а не человеком: «Новое
+        -- обращение: Звонок с Cian…». Их в воронке покупателей заметная
+        -- доля, и засчитав их работой, отчёт назвал бы отработанной
+        -- карточку, к которой никто не притрагивался.
+        is_auto      INTEGER NOT NULL DEFAULT 0,
+        created_at   TEXT    NOT NULL,
+        synced_at    TEXT    NOT NULL
+    );
+    """,
+    """
+    -- Когда у карточки в последний раз спрашивали комментарии.
+    --
+    -- Отдельной таблицей, а не колонкой в fact_deal: сделки перезаписываются
+    -- upsert-ом на каждом прогоне, и поле, которого нет в запросе к порталу,
+    -- затиралось бы значением по умолчанию — обход пошёл бы по кругу заново,
+    -- молча и каждые пятнадцать минут.
+    CREATE TABLE IF NOT EXISTS comment_sync (
+        entity_type  TEXT    NOT NULL DEFAULT 'deal',
+        entity_id    INTEGER NOT NULL,
+        synced_at    TEXT    NOT NULL,
+        comments     INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (entity_type, entity_id)
+    );
+    """,
+    """
     CREATE TABLE IF NOT EXISTS plan_period (
         period_code TEXT PRIMARY KEY,
         starts_at   TEXT NOT NULL,
@@ -251,6 +282,10 @@ _DDL: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_lead_status ON fact_lead(status_id);",
     "CREATE INDEX IF NOT EXISTS idx_lead_created ON fact_lead(date_create);",
     "CREATE INDEX IF NOT EXISTS idx_lead_source ON fact_lead(source_id, date_create);",
+    "CREATE INDEX IF NOT EXISTS idx_comment_entity "
+    "ON fact_comment(entity_type, entity_id, created_at);",
+    "CREATE INDEX IF NOT EXISTS idx_comment_created ON fact_comment(created_at);",
+    "CREATE INDEX IF NOT EXISTS idx_comment_sync_at ON comment_sync(synced_at);",
     "CREATE INDEX IF NOT EXISTS idx_lead_modify ON fact_lead(date_modify);",
     "CREATE INDEX IF NOT EXISTS idx_stage_event_entity "
     "ON fact_stage_event(entity_type, entity_id);",

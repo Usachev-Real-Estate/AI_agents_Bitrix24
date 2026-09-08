@@ -212,7 +212,7 @@ def _work_lines(work_data: dict[str, Any] | None) -> list[str]:
     lines = [
         f"\n🔕 Не трогали вовсе {work_data['nothing']} "
         f"{_cards_word(work_data['nothing'])} из {work_data['cards']} "
-        f"({work_data['nothing_share']:.0f}%) — ни звонка, ни отметки"
+        f"({work_data['nothing_share']:.0f}%) — ни звонка, ни записи, ни отметки"
     ]
     if work_data["silent"]:
         lines.append(
