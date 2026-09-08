@@ -47,7 +47,10 @@ import metrics  # noqa: E402
 import plans  # noqa: E402
 import pulse as pulse_metrics  # noqa: E402
 from config import get_settings, setup_logging  # noqa: E402
-from notify import send_user_chat_message_chunked  # noqa: E402
+from notify import (  # noqa: E402
+    send_chat_message_chunked,
+    send_user_chat_message_chunked,
+)
 from qc_delivery import ROP_TO_CHAT  # noqa: E402
 from scope import Scope, scoped_session  # noqa: E402
 
@@ -158,6 +161,22 @@ def format_department(data: dict[str, Any], yesterday: dict[str, Any], url: str)
             "цель отдела завышена на одну норму. Скажите админу — поправим.",
         ]
     return "\n".join(lines + _tail(data, url))
+
+
+def format_events(
+    data: dict[str, Any], events: dict[str, Any], window: dict[str, Any],
+) -> str:
+    """Разбор воронки отдельным сообщением в общий чат.
+
+    Пустой возврат означает «в этот день ничего не произошло» — и тогда
+    сообщения не будет вовсе. Ежедневная рассылка, сообщающая «событий нет»,
+    приучает не открывать себя раньше, чем в ней появится важное.
+    """
+    lines = _event_lines(events)
+    if not lines:
+        return ""
+    head = f"🔎 Воронка за {window['label']}{_funnel_note(data)}"
+    return "\n".join([head] + lines)
 
 
 def _breakeven_lines(data: dict[str, Any]) -> list[str]:
@@ -439,10 +458,17 @@ def build(period_code: str, url: str, now: datetime | None = None) -> list[dict[
     with scoped_session(Scope.everything()) as conn:
         company = pulse_metrics.pulse(conn, period_code, with_stuck=True)
         yesterday = closed_in(conn, window)
-        company["events"] = funnel.funnel_events(
+        company_events = funnel.funnel_events(
             conn, window["since"], window["until"],
             on_plan_ids=_on_plan_ids(company),
         )
+
+    # Разбор воронки уходит в общий чат, а не в личную сводку директора: там
+    # его видят все, кого он касается. Чат не задан — разбор остаётся в
+    # сводке, чтобы выкатка без настройки не потеряла его молча.
+    chat_id = int(settings.pulse_events_chat_id or 0)
+    if not chat_id:
+        company["events"] = company_events
 
     # Владелец отчёта: своя настройка, с откатом на администратора.
     director = int(settings.pulse_digest_to or settings.admin_user_id or 0)
@@ -452,6 +478,14 @@ def build(period_code: str, url: str, now: datetime | None = None) -> list[dict[
             "name": "Директор",
             "text": format_company(company, yesterday, url),
         })
+
+    if chat_id:
+        text = format_events(company, company_events, window)
+        if text:
+            deliveries.append({
+                "chat_id": chat_id, "name": f"Разбор воронки → чат {chat_id}",
+                "text": text,
+            })
 
     for row in company["departments"]:
         # РОП берётся из состава плана, а не из портала напрямую. Портал
@@ -536,13 +570,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if preview:
         for item in deliveries:
-            print(f"\n{'=' * 60}\n{item['name']} (user_id={item['user_id']})\n{'=' * 60}")
+            target = (f"chat_id={item['chat_id']}" if item.get("chat_id")
+                      else f"user_id={item['user_id']}")
+            print(f"\n{'=' * 60}\n{item['name']} ({target})\n{'=' * 60}")
             print(item["text"])
         print(f"\nDRY_RUN: {len(deliveries)} сообщений НЕ отправлено")
         return 0
 
     for item in deliveries:
-        chunks = send_user_chat_message_chunked(item["user_id"], item["text"])
+        if item.get("chat_id"):
+            chunks = send_chat_message_chunked(item["chat_id"], item["text"])
+        else:
+            chunks = send_user_chat_message_chunked(item["user_id"], item["text"])
         logger.info("Отправлено: %s (%s сообщ.)", item["name"], chunks)
     return 0
 
