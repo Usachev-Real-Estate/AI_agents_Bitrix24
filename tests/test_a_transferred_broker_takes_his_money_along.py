@@ -237,3 +237,36 @@ def test_an_empty_mart_opens_too(analytics_db):
 
     with scoped_session(Scope.everything()) as conn:
         assert conn.execute("SELECT COUNT(*) AS n FROM user_home").fetchone()["n"] == 0
+
+
+# --------------------------------------------------------------------------
+# путь к витрине
+# --------------------------------------------------------------------------
+
+def test_the_named_database_wins_over_the_default(tmp_path, monkeypatch):
+    """Указанный путь к витрине не теряется, когда настройки не грузятся.
+
+    Ловушка, на которую я попался сам: скрипту сказали работать с временной
+    базой через ANALYTICS_DB_PATH, настройки молча упали на нехватке ключа
+    Битрикса, и он сходил в боевую data/analytics.db — прочитал чужие данные
+    и записал туда свои, ничем этого не показав.
+
+    Умолчание остаётся для тестов, которым путь не важен; названный путь
+    сильнее умолчания.
+    """
+    import schema
+    from config import get_settings
+
+    named = tmp_path / "named.db"
+    monkeypatch.setenv("ANALYTICS_DB_PATH", str(named))
+    # Настройки не грузятся: снято обязательное поле.
+    monkeypatch.delenv("B24_WEBHOOK_URL", raising=False)
+    get_settings.cache_clear()
+    with pytest.raises(Exception):
+        get_settings()
+
+    assert schema.resolve_db_path() == named
+
+    monkeypatch.delenv("ANALYTICS_DB_PATH", raising=False)
+    get_settings.cache_clear()
+    assert schema.resolve_db_path() == schema.DEFAULT_DB_PATH
