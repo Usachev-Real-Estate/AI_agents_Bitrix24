@@ -20,12 +20,20 @@
 
 Поэтому карточка бывает в одном из трёх состояний:
 
-* **разговор был** — есть завершённый звонок или встреча;
+* **след работы есть** — завершённый звонок, встреча или запись брокера о
+  том, что с клиентом. Комментарий тут не третьесортное свидетельство, а
+  часто единственное: «Был показ 08.09, ушли думать» — это и встреча, и её
+  итог, которых нет больше нигде;
 * **только отметка** — есть выполненное дело, но записи разговора нет.
   Брокер утверждает, что работал; портал этого не видел. Это не обвинение:
   человек мог звонить с личного телефона. Но и не работа — это вопрос,
   который надо задать;
 * **ничего** — ни разговора, ни отметки.
+
+Автоматический комментарий следом не считается. «Новое обращение: Звонок с
+Cian…» пишет робот в момент поступления заявки, до всякой работы, и
+засчитать его значит повторить ошибку с отметкой вместо разговора — только
+теперь в пользу того, кто не сделал ничего.
 
 Сложить второе с первым значит поверить отметке на слово. Сложить со
 третьим — обвинить того, кто работал мимо портала. Оба слипания дают число,
@@ -41,12 +49,17 @@
 состоялись ли они. Засчитать такую разговором значит записать в актив то,
 чего ещё не было.
 
-Состояний четыре, и ценное среди них одно: срок прошёл, а «выполнено» не
-поставлено. Либо встреча не состоялась, либо о ней не отчитались, и оба
-случая — работа руководителя. Проведённые и ещё не наступившие вопросов не
-вызывают, а встречи без даты считаются отдельно: по ним просрочку не
-отличить вовсе, и если их много, признак не годится и дату придётся брать
-из поля карточки, а не из дела.
+НО СПРАШИВАТЬ ЗА ОТСУТСТВИЕ ВСТРЕЧИ МОЖНО НЕ ВЕЗДЕ. С собственниками их в
+портал не заводят вовсе (ответ агентства 08.09), и «просрочено 18» на 822
+карточках означало не восемнадцать сорванных встреч, а восемнадцать записей
+процесса, которым никто не пользуется. Отчёт, обвиняющий брокера в
+отсутствии записи, которую от него не требовали, теряет доверие целиком — и
+вместе с ним теряют силу те его строки, которые верны.
+
+Поэтому просроченные, назначенные и недатированные считаются только в
+воронках, где встречи ведут (настройка ANALYTICS_MEETING_FUNNELS_JSON).
+Проведённая встреча засчитывается работой везде: наличие записи — это
+свидетельство, а не требование, и кредит за него полагается всем.
 
 Пропущенные звонки. Незавершённый входящий — это непринятый вызов
 (подтверждено собственником 08.09), и у всех 5 169 таких записей время
@@ -94,6 +107,28 @@ TOP = 5
 MIN_INCOMING = 30
 
 
+def _meetings_tracked(categories: Sequence[int] | None) -> bool:
+    """Ведут ли в этих воронках встречи.
+
+    Спрашивать за отсутствие записи можно только там, где запись положено
+    делать. У собственников встречи в портал не заводят, и «просрочено» там
+    считало бы не сорванные встречи, а следы процесса, которым никто не
+    пользуется.
+
+    Пустой список воронок в вызове означает «все, несущие план» — то же
+    правило, что у денег, и по той же причине: список воронок агентства
+    живёт в одном месте.
+    """
+    try:
+        from config import get_settings
+
+        tracked = {int(x) for x in get_settings().analytics_meeting_funnels}
+    except Exception:  # pragma: no cover — конфиг недоступен в изолированных тестах
+        tracked = {18}
+    wanted = set(categories or plans.plan_category_ids())
+    return bool(wanted & tracked)
+
+
 def _looks_like_meeting(subject: str) -> bool:
     text = (subject or "").lower()
     return any(word in text for word in MEETING_WORDS)
@@ -120,14 +155,25 @@ def card_work(
         card = cards.get(act["deal_id"])
         if card is not None:
             _apply(card, act)
+    for note in _comments(conn, categories, department_id):
+        card = cards.get(note["deal_id"])
+        if card is not None:
+            _note(card, note)
     rows = list(cards.values())
     for row in rows:
         _settle(row, silent_days)
 
+    totals = _totals(rows)
+    if not _meetings_tracked(categories):
+        # Ключей просто нет — ни ноля, ни строки. Ноль в «просрочено»
+        # прочитался бы как «сорванных встреч нет», а их там не считают
+        # вовсе, и это разные утверждения.
+        for key in ("meetings_overdue", "meetings_planned", "meetings_undated"):
+            totals.pop(key, None)
     return {
         "silent_days": silent_days,
         "cards": len(rows),
-        **_totals(rows),
+        **totals,
         "by_stage": _group(rows, "stage_id", "stage_name",
                            sort=lambda item: item["stage_sort"]),
         "by_user": _group(rows, "assigned_by_id", "broker", extra="department"),
@@ -194,10 +240,56 @@ def _acts(conn, categories, department_id) -> list[dict[str, Any]]:
     )
 
 
+def _comments(conn, categories, department_id) -> list[dict[str, Any]]:
+    """Комментарии брокеров по открытым карточкам.
+
+    Своим запросом, а не вместе с действиями: комментарий висит на сделке
+    напрямую и никакого владельца-контакта у него нет.
+    """
+    where, params = plans.category_filter("d", categories)
+    params["dept"] = department_id
+    return _rows(
+        conn,
+        f"""
+        SELECT d.deal_id, c.body, c.is_auto, c.created_at, c.author_id
+        FROM v_deal d
+        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
+        JOIN v_comment c ON c.entity_id = d.deal_id
+        WHERE d.is_closed = 0 AND {where}
+          AND (:dept IS NULL OR u.department_id = :dept)
+        """,
+        params,
+    )
+
+
+def _note(card: dict[str, Any], note: dict[str, Any]) -> None:
+    """Комментарий как свидетельство работы.
+
+    Написанный человеком — свидетельство сильнее отметки: в отметке сказано
+    «дело закрыто», а в комментарии написано ЧТО с клиентом. «Был показ
+    08.09, ушли думать» и «бюджета не хватает, в июле будет бонус» — это
+    ровно тот разбор, ради которого отчёт и существует.
+
+    Автоматический — не свидетельство ничего. «Новое обращение: Звонок с
+    Cian…» пишет робот в момент поступления заявки, и карточка с одним
+    таким комментарием — это карточка, к которой никто не притрагивался.
+    Засчитать его работой значит повторить ошибку с отметкой вместо
+    разговора, только теперь в пользу того, кто не сделал ничего.
+    """
+    if note["is_auto"]:
+        card["auto_notes"] += 1
+        return
+    card["notes"] += 1
+    if note["created_at"] and (card["last_note"] is None
+                               or note["created_at"] > card["last_note"]):
+        card["last_note"] = note["created_at"]
+
+
 def _blank(row: dict[str, Any]) -> dict[str, Any]:
     row.update({"calls": 0, "outgoing": 0, "missed": 0, "marks": 0,
                 "meetings": 0, "meetings_overdue": 0, "meetings_planned": 0,
-                "meetings_undated": 0, "last_talk": None})
+                "meetings_undated": 0, "notes": 0, "auto_notes": 0,
+                "last_talk": None, "last_note": None})
     row["age_days"] = round(row["age_days"] or 0)
     return row
 
@@ -261,14 +353,31 @@ def _touch(card: dict[str, Any], act: dict[str, Any]) -> None:
 
 
 def _settle(row: dict[str, Any], silent_days: int) -> None:
+    """Свести действия карточки в одно состояние.
+
+    Комментарий брокера считается следом работы наравне с разговором. Он и
+    есть разговор, записанный по-другому: «Связалась с клиентом не продает и
+    не покупает» — это состоявшийся звонок, отмеченный текстом, а не
+    карточкой звонка. Требовать вдобавок запись звонка значит наказывать за
+    способ ведения записей, а не за работу.
+
+    Автоматический комментарий следом не считается: «Новое обращение: Звонок
+    с Cian…» пишет робот в момент заявки, до всякой работы.
+    """
     row["talks"] = row["calls"] + row["meetings"]
-    if row["talks"]:
+    # След работы: разговор ИЛИ запись брокера о том, что с клиентом.
+    row["worked"] = row["talks"] + row["notes"]
+    if row["worked"]:
         row["state"] = "talked"
     elif row["marks"]:
         row["state"] = "marked"
     else:
         row["state"] = "nothing"
-    row["quiet_days"] = _days_since(row["last_talk"])
+    # Свежесть — по последнему следу любого рода: карточка, где вчера
+    # написали «ждём фотографии», не молчит, сколько бы ни было звонков.
+    last = max(filter(None, (row["last_talk"], row["last_note"])), default=None)
+    row["last_touch"] = last
+    row["quiet_days"] = _days_since(last)
     row["silent"] = bool(row["state"] == "talked" and row["quiet_days"] is not None
                          and row["quiet_days"] >= silent_days)
 
@@ -315,6 +424,11 @@ def _totals(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "cold": nothing + silent,
         "cold_share": _share(nothing + silent, len(rows)),
         "talks": sum(row["talks"] for row in rows),
+        # Записи брокеров: единственный источник, где сказано ЧТО с
+        # клиентом, а не только был ли контакт.
+        "notes": sum(row["notes"] for row in rows),
+        "auto_notes": sum(row["auto_notes"] for row in rows),
+        "with_notes": sum(1 for row in rows if row["notes"]),
         "outgoing": sum(row["outgoing"] for row in rows),
         "meetings": sum(row["meetings"] for row in rows),
         # Просроченная встреча — единственное состояние, требующее

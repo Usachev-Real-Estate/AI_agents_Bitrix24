@@ -475,3 +475,127 @@ def test_the_incremental_window_asks_by_created(analytics_db):
 
     assert saved == 1
     assert client.calls[-1][1]["filter"] == {">=CREATED": "2026-09-01T00:00:00+00:00"}
+
+
+# --------------------------------------------------------------------------
+# комментарии таймлайна
+
+def test_comment_sync_asks_card_by_card_and_remembers_whom(analytics_db):
+    """Обход комментариев круговой: у метода обязателен фильтр по карточке.
+
+    crm.timeline.comment.list не умеет отдавать все комментарии портала — в
+    фильтре обязателен ENTITY_ID. Значит стоимость загрузки измеряется в
+    карточках (замер: 0,5 с на запрос, 1124 открытых — девять минут), и
+    опрашивать их все каждые пятнадцать минут нельзя. Обход идёт партиями,
+    начиная с тех, у кого дольше всех не спрашивали.
+    """
+    import etl
+    from schema import analytics_session
+
+    with analytics_session() as conn:
+        for deal_id in (1, 2, 3):
+            conn.execute(
+                """
+                INSERT INTO fact_deal(deal_id, title, category_id, stage_id,
+                    assigned_by_id, source_id, opportunity, currency_id,
+                    date_create, date_modify, closedate, is_closed, is_won,
+                    is_lost, is_deleted, synced_at)
+                VALUES (?, 'Карточка', 0, 'NEW', 10, '', 0, 'RUB',
+                        '2026-06-01T00:00:00+00:00', '2026-06-01T00:00:00+00:00',
+                        NULL, 0, 0, 0, 0, 'x')
+                """,
+                (deal_id,),
+            )
+
+    asked = []
+
+    class _Client:
+        def call(self, method, params):
+            asked.append(params["filter"]["ENTITY_ID"])
+            return [{
+                "ID": 100 + params["filter"]["ENTITY_ID"],
+                "CREATED": "2026-09-07T10:00:00+03:00",
+                "AUTHOR_ID": "10",
+                "COMMENT": "[B]Созвон[/B] клиент думает",
+            }]
+
+    with analytics_session() as conn:
+        saved = etl.sync_comments(_Client(), conn, batch=2)
+        assert saved == 2
+        assert len(asked) == 2, "партия ограничена, а не весь портал"
+
+        # Второй прогон берёт тех, у кого ещё не спрашивали.
+        etl.sync_comments(_Client(), conn, batch=2)
+        assert sorted(set(asked)) == [1, 2, 3]
+
+        rows = conn.execute(
+            "SELECT body, is_auto FROM fact_comment ORDER BY comment_id"
+        ).fetchall()
+    assert rows[0][0] == "Созвон клиент думает", "разметка снята"
+    assert rows[0][1] == 0
+
+
+def test_a_robot_comment_is_marked_on_the_way_in(analytics_db):
+    """«Новое обращение» распознаётся при заливке, а не при каждом чтении."""
+    import etl
+    from schema import analytics_session
+
+    with analytics_session() as conn:
+        conn.execute(
+            """
+            INSERT INTO fact_deal(deal_id, title, category_id, stage_id,
+                assigned_by_id, source_id, opportunity, currency_id, date_create,
+                date_modify, closedate, is_closed, is_won, is_lost, is_deleted,
+                synced_at)
+            VALUES (1, 'Карточка', 18, 'C18:NEW', 10, '', 0, 'RUB',
+                    '2026-06-01T00:00:00+00:00', '2026-06-01T00:00:00+00:00',
+                    NULL, 0, 0, 0, 0, 'x')
+            """
+        )
+
+    class _Client:
+        def call(self, method, params):
+            return [
+                {"ID": 1, "CREATED": "2026-09-07T10:00:00+03:00", "AUTHOR_ID": "1",
+                 "COMMENT": "Новое обращение: Звонок с Cian · тел. +7999"},
+                {"ID": 2, "CREATED": "2026-09-07T11:00:00+03:00", "AUTHOR_ID": "10",
+                 "COMMENT": "Был показ 08.09, ушли думать"},
+            ]
+
+    with analytics_session() as conn:
+        etl.sync_comments(_Client(), conn, batch=10)
+        rows = dict(conn.execute(
+            "SELECT comment_id, is_auto FROM fact_comment"
+        ).fetchall())
+    assert rows == {1: 1, 2: 0}
+
+
+def test_one_bad_card_does_not_lose_the_rest(analytics_db):
+    """Портал отказывает по отдельным сущностям чаще, чем падает целиком."""
+    import etl
+    from schema import analytics_session
+
+    with analytics_session() as conn:
+        for deal_id in (1, 2):
+            conn.execute(
+                """
+                INSERT INTO fact_deal(deal_id, title, category_id, stage_id,
+                    assigned_by_id, source_id, opportunity, currency_id,
+                    date_create, date_modify, closedate, is_closed, is_won,
+                    is_lost, is_deleted, synced_at)
+                VALUES (?, 'Карточка', 0, 'NEW', 10, '', 0, 'RUB',
+                        '2026-06-01T00:00:00+00:00', '2026-06-01T00:00:00+00:00',
+                        NULL, 0, 0, 0, 0, 'x')
+                """,
+                (deal_id,),
+            )
+
+    class _Client:
+        def call(self, method, params):
+            if params["filter"]["ENTITY_ID"] == 1:
+                raise RuntimeError("ACCESS_DENIED")
+            return [{"ID": 5, "CREATED": "2026-09-07T10:00:00+03:00",
+                     "AUTHOR_ID": "10", "COMMENT": "работаю"}]
+
+    with analytics_session() as conn:
+        assert etl.sync_comments(_Client(), conn, batch=10) == 1

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -819,6 +820,14 @@ def run_sync(kind: str, *, since_override: str | None = None) -> dict[str, Any]:
             )
             set_watermark(conn, ENTITY_ACTIVITY, full_sync=not incremental)
 
+            # Комментарии обходятся по карточкам, а не по дате: у метода
+            # обязателен фильтр по сущности. Полный прогон берёт все сделки,
+            # обычный — очередную партию тех, у кого дольше всех не
+            # спрашивали.
+            summary["comments"] = sync_comments(
+                client, conn, batch=COMMENT_BATCH if incremental else None,
+            )
+
             if kind == "full":
                 summary["deleted_deals"] = reconcile_deleted(client, conn, ENTITY_DEAL, since)
                 summary["deleted_leads"] = reconcile_deleted(client, conn, ENTITY_LEAD, since)
@@ -828,6 +837,7 @@ def run_sync(kind: str, *, since_override: str | None = None) -> dict[str, Any]:
 
             counters["rows"] = (
                 len(deal_ids) + len(lead_ids) + summary["activities"]
+                + summary["comments"]
             )
             summary["deals"] = len(deal_ids)
             summary["leads"] = len(lead_ids)
@@ -835,6 +845,140 @@ def run_sync(kind: str, *, since_override: str | None = None) -> dict[str, Any]:
 
     logger.info("Готово: %s", summary)
     return summary
+
+
+# Комментарии таймлайна: сколько карточек опрашивать за один прогон.
+#
+# У crm.timeline.comment.list фильтр по карточке обязателен — все
+# комментарии портала одним запросом не забрать. Значит стоимость измеряется
+# в КАРТОЧКАХ: замер дал 0,5 с на запрос, 1124 открытых карточки — девять
+# минут. Опрашивать их все каждые пятнадцать минут значит держать портал
+# занятым больше половины времени ради данных, которые столько не меняются.
+#
+# Поэтому обход круговой: за прогон берутся те карточки, у которых дольше
+# всех не спрашивали, и круг замыкается примерно за два часа. Полный прогон
+# (--full) обходит всё разом, без круга.
+COMMENT_BATCH = 150
+
+# Комментарии, написанные не человеком. Замер показал их в воронке
+# покупателей: «Новое обращение: Звонок с Cian · … комиссия 3% = 1 707 000 ₽».
+# Засчитав их работой, отчёт назвал бы отработанной карточку, к которой никто
+# не притрагивался, — та же ошибка, что с отметкой вместо разговора.
+AUTO_COMMENT_PREFIXES = ("новое обращение:",)
+
+_COMMENT_UPSERT = """
+INSERT INTO fact_comment(
+    comment_id, entity_type, entity_id, author_id, body, is_auto,
+    created_at, synced_at
+) VALUES (
+    :comment_id, :entity_type, :entity_id, :author_id, :body, :is_auto,
+    :created_at, :synced_at
+)
+ON CONFLICT(comment_id) DO UPDATE SET
+    body=excluded.body, is_auto=excluded.is_auto, synced_at=excluded.synced_at
+"""
+
+_BB_CODE = re.compile(r"\[/?[^\]]{1,40}\]")
+
+
+def _comment_text(raw: str | None) -> str:
+    """Текст комментария без разметки.
+
+    Портал отдаёт его с BB-кодами и переносами: жирный, ссылки, списки.
+    Хранить разметку незачем — читать этот текст будут отчёт и модель, а не
+    браузер, и лишние скобки только мешают и тому и другому.
+    """
+    return " ".join(_BB_CODE.sub(" ", raw or "").split())
+
+
+def _is_auto(text: str) -> bool:
+    lowered = text.lower()
+    return any(lowered.startswith(prefix) for prefix in AUTO_COMMENT_PREFIXES)
+
+
+def _comment_targets(conn, limit: int | None) -> list[int]:
+    """Карточки, у которых спросить комментарии в этот прогон.
+
+    Открытые вперёд закрытых и давно не спрошенные вперёд свежих: по
+    закрытой сделке нового не напишут, а «что с клиентом» — вопрос про
+    живые карточки.
+
+    limit=None — полный обход, все сделки разом.
+    """
+    rows = conn.execute(
+        f"""
+        SELECT d.deal_id
+        FROM fact_deal d
+        LEFT JOIN comment_sync s
+               ON s.entity_type = 'deal' AND s.entity_id = d.deal_id
+        WHERE d.is_deleted = 0 {"AND d.is_closed = 0" if limit else ""}
+        ORDER BY COALESCE(s.synced_at, '') ASC, d.date_modify DESC
+        {"LIMIT " + str(int(limit)) if limit else ""}
+        """
+    ).fetchall()
+    return [row[0] for row in rows]
+
+
+def sync_comments(
+    client: BitrixClient, conn, *, batch: int | None = COMMENT_BATCH,
+) -> int:
+    """Комментарии брокеров из таймлайна карточек.
+
+    Зачем это витрине. Звонок говорит «был контакт», стадия — «карточка
+    сдвинулась», а комментарий говорит, ЧТО с клиентом: почему не покупает,
+    чего ждёт, когда вернуться, был ли показ. Ни один другой источник на
+    этот вопрос не отвечает, и замер это подтвердил — «Был показ 08.09, ушли
+    думать», «бюджета не хватает, в середине июля будет известен бонус».
+
+    Обход круговой и по карточкам: фильтр по ENTITY_ID у метода обязателен,
+    догрузки «по дате комментария» не существует, и единственный честный
+    способ держать данные свежими — опрашивать карточки по очереди.
+
+    Ошибка по одной карточке не роняет прогон: портал отвечает отказом на
+    отдельные сущности чаще, чем падает целиком, и терять из-за одной
+    карточки все остальные незачем.
+    """
+    now = utc_now_iso()
+    saved, asked = 0, 0
+    for deal_id in _comment_targets(conn, batch):
+        try:
+            rows = client.call("crm.timeline.comment.list", {
+                "filter": {"ENTITY_ID": deal_id, "ENTITY_TYPE": "deal"},
+                "select": ["ID", "CREATED", "AUTHOR_ID", "COMMENT"],
+            }) or []
+        except Exception as error:
+            logger.warning("Комментарии сделки %s не получены: %s", deal_id, error)
+            continue
+        asked += 1
+        batch_rows = []
+        for raw in rows:
+            comment_id = _int(raw.get("ID"))
+            created = to_utc_iso(raw.get("CREATED"))
+            if not comment_id or not created:
+                continue
+            text = _comment_text(raw.get("COMMENT"))
+            batch_rows.append({
+                "comment_id": comment_id,
+                "entity_type": ENTITY_DEAL,
+                "entity_id": deal_id,
+                "author_id": _int(raw.get("AUTHOR_ID")),
+                "body": text,
+                "is_auto": 1 if _is_auto(text) else 0,
+                "created_at": created,
+                "synced_at": now,
+            })
+        if batch_rows:
+            conn.executemany(_COMMENT_UPSERT, batch_rows)
+            saved += len(batch_rows)
+        conn.execute(
+            "INSERT INTO comment_sync(entity_type, entity_id, synced_at, comments)"
+            " VALUES ('deal', ?, ?, ?)"
+            " ON CONFLICT(entity_type, entity_id) DO UPDATE SET"
+            " synced_at=excluded.synced_at, comments=excluded.comments",
+            (deal_id, now, len(batch_rows)),
+        )
+    logger.info("Комментарии: опрошено %s карточек, сохранено %s", asked, saved)
+    return saved
 
 
 def _lead_history_supported(conn, client: BitrixClient) -> bool:

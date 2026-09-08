@@ -317,7 +317,7 @@ def test_metrics_never_touch_raw_tables_directly():
     # строки здесь защищена только памятью следующего разработчика.
     forbidden = (
         "fact_deal", "fact_lead", "fact_stage_event", "fact_activity",
-        "dim_user", "plan_norm", "plan_roster",
+        "fact_comment", "dim_user", "plan_norm", "plan_roster",
     )
     for name in ("metrics.py", "plans.py", "pulse.py", "events.py", "work.py"):
         source = (analytics / name).read_text(encoding="utf-8")
@@ -325,7 +325,7 @@ def test_metrics_never_touch_raw_tables_directly():
         assert not found, (
             f"{name} обращается к таблицам мимо представлений: {sorted(found)}. "
             "Используйте v_deal / v_lead / v_stage_event / v_activity / "
-            "v_user / v_plan_norm / v_plan_roster."
+            "v_comment / v_user / v_plan_norm / v_plan_roster."
         )
 
 

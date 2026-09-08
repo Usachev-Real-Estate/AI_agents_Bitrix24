@@ -194,7 +194,7 @@ def test_the_missed_calls_get_their_own_line(agency):
                 (500 + i, 0 if i < 45 else 1),
             )
 
-    assert "не берут трубку: Марат Абзалилов 45/60" in _lines()
+    assert "📞 Не берут трубку: Марат Абзалилов 45/60" in _lines()
 
 
 def test_a_broker_who_mostly_answers_is_not_named(agency):
@@ -212,14 +212,16 @@ def test_a_broker_who_mostly_answers_is_not_named(agency):
                 (600 + i, 0 if i < 15 else 1),
             )
 
-    assert "не берут трубку" not in _lines()
+    assert "Не берут трубку" not in _lines()
 
 
-def test_the_chat_gets_the_overdue_meetings(agency):
-    """Просроченные встречи идут в чат вместе с остальным разбором.
+def test_the_sellers_block_says_nothing_about_meetings(agency):
+    """С собственниками встречи в портал не заводят — спроса за них нет.
 
-    Печатается только просроченное. Проведённые копятся за всё окно витрины
-    и новостью не бывают, назначенные на будущее вопросов не вызывают.
+    Просроченная встреча у продавцов означала не сорванную встречу, а след
+    процесса, которым никто не пользуется. Отчёт, обвиняющий брокера в
+    отсутствии записи, которую от него не требовали, теряет доверие целиком
+    — и вместе с ним теряют силу те его строки, которые верны.
     """
     from datetime import datetime, timedelta, timezone
 
@@ -238,26 +240,92 @@ def test_the_chat_gets_the_overdue_meetings(agency):
             )
 
     text = _lines()
-    assert "Просрочено встреч: 3" in text
-    assert "у кого: Марат Абзалилов 3" in text
+    assert "Просрочено встреч" not in text
+    assert "срок не проставлен" not in text
 
 
-def test_meetings_without_a_date_name_the_blind_spot(agency):
-    """Молчать о размере слепого пятна значит выдать часть картины за всю."""
+def test_a_funnel_that_keeps_meetings_still_gets_the_block(agency):
+    """Обратная проверка: где встречи ведут, просрочка по-прежнему видна."""
+    from datetime import datetime, timedelta, timezone
+
+    past = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
+    with analytics_session() as conn:
+        conn.execute(
+            "INSERT INTO dim_pipeline(category_id, name, is_active, sort,"
+            " synced_at) VALUES (18, 'Покупатели', 1, 20, 'x')"
+        )
+        conn.execute(
+            "INSERT INTO dim_stage(stage_id, category_id, name, sort, semantic,"
+            " synced_at) VALUES ('C18:NEW', 18, 'Подбор', 10, 'in_progress', 'x')"
+        )
+        conn.execute(
+            """
+            INSERT INTO fact_deal(deal_id, title, category_id, stage_id,
+                assigned_by_id, source_id, opportunity, currency_id, date_create,
+                date_modify, closedate, is_closed, is_won, is_lost, contact_id,
+                is_deleted, synced_at)
+            VALUES (90, 'Покупатель', 18, 'C18:NEW', 11, 'ADV', 0, 'RUB',
+                    '2026-03-01T00:00:00+00:00', '2026-03-01T00:00:00+00:00',
+                    NULL, 0, 0, 0, 5090, 0, 'x')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO fact_activity(activity_id, owner_type_id, owner_id,
+                provider_type_id, direction, subject, responsible_id,
+                created_at, start_time, completed, synced_at)
+            VALUES (950, 2, 90, 'TODO', NULL, 'Встреча с клиентом', 11,
+                    '2026-09-01T10:00:00+00:00', ?, 0, 'x')
+            """,
+            (past,),
+        )
+
+    with scoped_session(Scope.everything()) as conn:
+        buyers = work.card_work(conn, [18])
+    text = "\n".join(pulse_digest._work_lines(buyers))
+
+    assert "Просрочено встреч: 1" in text
+
+
+def test_a_funnel_without_meetings_says_nothing_about_them(agency):
+    """Пустой блок не печатается — сводка не сообщает об отсутствии новостей."""
+    assert "Просрочено встреч" not in _lines()
+
+
+def test_each_block_of_the_report_stands_on_its_own(agency):
+    """Непринятые звонки — не продолжение рассказа про встречи.
+
+    Подпунктом без заголовка строка прилипает к блоку выше и читается как
+    его часть: в живом прогоне «не берут трубку» оказалось внутри «просрочено
+    встреч», к которым отношения не имеет вовсе.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    past = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
     with analytics_session() as conn:
         conn.execute(
             """
             INSERT INTO fact_activity(activity_id, owner_type_id, owner_id,
                 provider_type_id, direction, subject, responsible_id,
                 created_at, start_time, completed, synced_at)
-            VALUES (800, 2, 1, 'TODO', NULL, 'Показ', 11,
-                    '2026-09-01T10:00:00+00:00', NULL, 0, 'x')
-            """
+            VALUES (900, 2, 1, 'TODO', NULL, 'Встреча с клиентом', 11,
+                    '2026-09-01T10:00:00+00:00', ?, 0, 'x')
+            """,
+            (past,),
         )
+        for i in range(60):
+            conn.execute(
+                """
+                INSERT INTO fact_activity(activity_id, owner_type_id, owner_id,
+                    provider_type_id, direction, subject, responsible_id,
+                    created_at, start_time, completed, synced_at)
+                VALUES (?, 3, 9999, 'CALL', 1, '', 11,
+                        '2026-09-07T10:00:00+00:00', NULL, ?, 'x')
+                """,
+                (1000 + i, 0 if i < 45 else 1),
+            )
 
-    assert "срок не проставлен" in _lines()
-
-
-def test_a_funnel_without_meetings_says_nothing_about_them(agency):
-    """Пустой блок не печатается — сводка не сообщает об отсутствии новостей."""
-    assert "Просрочено встреч" not in _lines()
+    lines = _lines().splitlines()
+    phone = next(i for i, line in enumerate(lines) if "Не берут трубку" in line)
+    assert lines[phone - 1] == "", "у блока нет пустой строки перед заголовком"
+    assert not lines[phone].startswith("  ·"), "заголовок, а не подпункт"

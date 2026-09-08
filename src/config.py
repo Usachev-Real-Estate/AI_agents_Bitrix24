@@ -478,6 +478,14 @@ class Settings(BaseSettings):
     # Пока в витрине нет действий — звонков и встреч, — отличить работу от
     # забвения на этой стадии нечем, и лучше молчать, чем назвать виноватыми
     # не тех.
+    # Воронки, где встречи заводят в портал. Со собственниками их не ведут
+    # (ответ агентства 08.09): показывать «просрочено 18» там значит мерить
+    # процесс, которого нет, и обвинять брокеров в отсутствии записи, которую
+    # никто не просил делать.
+    analytics_meeting_funnels_json: str = Field(
+        default="[18]",
+        validation_alias="ANALYTICS_MEETING_FUNNELS_JSON",
+    )
     analytics_stuck_exclude_stages_json: str = Field(
         default='{"0": ["UC_FADPBF"]}',
         validation_alias="ANALYTICS_STUCK_EXCLUDE_STAGES_JSON",
@@ -647,6 +655,13 @@ class Settings(BaseSettings):
             else:
                 merged[key] = value
         return merged
+
+    @property
+    def analytics_meeting_funnels(self) -> list[int]:
+        try:
+            return [int(x) for x in json.loads(self.analytics_meeting_funnels_json)]
+        except Exception:
+            return [18]
 
     @property
     def analytics_stuck_exclude_stages(self) -> dict[int, set[str]]:

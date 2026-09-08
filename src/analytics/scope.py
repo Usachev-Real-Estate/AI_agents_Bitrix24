@@ -196,6 +196,18 @@ _VIEW_DDL = (
             WHERE h.user_id = a.responsible_id)
            IN (SELECT department_id FROM scope_department)
     """,
+    # Комментарий сужается по КАРТОЧКЕ, а не по автору. У действия
+    # ответственный — тот, чью работу считают, а комментарий пишет кто
+    # угодно: колл-центр, РОП, коллега по просьбе. Привязка к автору
+    # спрятала бы от РОПа половину написанного по его же сделкам, причём
+    # именно то, что писали не его люди — а «что с клиентом» в такой записи
+    # часто и стоит.
+    """
+    CREATE TEMP VIEW v_comment AS
+    SELECT c.* FROM fact_comment c
+    WHERE c.entity_type = 'deal'
+      AND c.entity_id IN (SELECT deal_id FROM v_deal)
+    """,
     # Периоды плана не сужаются: это календарь, в нём нет ни людей, ни денег.
     """
     CREATE TEMP VIEW v_plan_period AS SELECT * FROM plan_period

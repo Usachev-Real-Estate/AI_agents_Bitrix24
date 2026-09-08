@@ -13,8 +13,14 @@
 
 Встречи без даты считаются отдельно и печатаются рядом. По ним просрочку не
 отличить вовсе, и молчать о размере слепого пятна значит выдать часть
-картины за всю: если их много, признак не годится и дату придётся брать из
-поля карточки, а не из дела.
+картины за всю.
+
+Спрашивать за отсутствие встречи можно не везде. С собственниками их в
+портал не заводят вовсе (ответ агентства 08.09), и «просрочено 18» на 822
+карточках означало не восемнадцать сорванных встреч, а восемнадцать записей
+процесса, которым никто не пользуется. Поэтому состояния считаются только в
+воронках, где встречи ведут, — а вот проведённая встреча засчитывается
+работой везде: наличие записи это свидетельство, а не требование.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -27,23 +33,25 @@ from schema import analytics_session
 from scope import Scope, scoped_session
 
 SELLERS = 0
+BUYERS = 18
 CONTACT = 5001
 NOW = datetime.now(timezone.utc)
 PAST = (NOW - timedelta(days=3)).isoformat()
 FUTURE = (NOW + timedelta(days=3)).isoformat()
 
 
-def _deal(conn, deal_id, *, user=10, contact=CONTACT):
+def _deal(conn, deal_id, *, user=10, contact=CONTACT, category=BUYERS):
+    stage = "C18:NEW" if category == BUYERS else "UC_FADPBF"
     conn.execute(
         """
         INSERT INTO fact_deal(deal_id, title, category_id, stage_id, assigned_by_id,
             source_id, opportunity, currency_id, date_create, date_modify, closedate,
             is_closed, is_won, is_lost, contact_id, is_deleted, synced_at)
-        VALUES (?, ?, 0, 'UC_FADPBF', ?, 'ADV', 0, 'RUB',
+        VALUES (?, ?, ?, ?, ?, 'ADV', 0, 'RUB',
                 '2026-06-01T00:00:00+00:00', '2026-06-01T00:00:00+00:00',
                 NULL, 0, 0, 0, ?, 0, 'x')
         """,
-        (deal_id, f"Объект {deal_id}", user, contact),
+        (deal_id, f"Объект {deal_id}", category, stage, user, contact),
     )
 
 
@@ -65,12 +73,12 @@ def agency(analytics_db):
     with analytics_session() as conn:
         conn.execute(
             "INSERT INTO dim_pipeline(category_id, name, is_active, sort, synced_at)"
-            " VALUES (0, 'Продавцы', 1, 10, 'x')"
+            " VALUES (0, 'Продавцы', 1, 10, 'x'), (18, 'Покупатели', 1, 20, 'x')"
         )
         conn.execute(
             "INSERT INTO dim_stage(stage_id, category_id, name, sort, semantic,"
             " synced_at) VALUES ('UC_FADPBF', 0, 'Поиск клиента', 50,"
-            " 'in_progress', 'x')"
+            " 'in_progress', 'x'), ('C18:NEW', 18, 'Подбор', 10, 'in_progress', 'x')"
         )
         for user_id, name in ((10, "Ольга Лобанова"), (11, "Марат Абзалилов")):
             conn.execute(
@@ -81,9 +89,10 @@ def agency(analytics_db):
     return analytics_db
 
 
-def _work():
+def _work(category=BUYERS):
+    """Встречи ведут у покупателей — состояния проверяются там."""
     with scoped_session(Scope.everything()) as conn:
-        return work.card_work(conn, [SELLERS])
+        return work.card_work(conn, [category])
 
 
 def test_a_scheduled_meeting_does_not_count_as_a_conversation(agency):
@@ -176,3 +185,45 @@ def test_the_overdue_meetings_are_counted_per_broker(agency):
     by_user = {row["name"]: row for row in _work()["by_user"]}
     assert by_user["Марат Абзалилов"]["meetings_overdue"] == 3
     assert by_user["Ольга Лобанова"]["meetings_overdue"] == 1
+
+
+def test_the_sellers_funnel_is_not_asked_about_missing_meetings(agency):
+    """Со собственниками встречи в портал не заводят — спроса нет.
+
+    «Просрочено 18» на 822 карточках означало не восемнадцать сорванных
+    встреч, а восемнадцать следов процесса, которым никто не пользуется.
+    Отчёт, обвиняющий брокера в отсутствии записи, которую от него не
+    требовали, теряет доверие целиком — и вместе с ним теряют силу те его
+    строки, которые верны.
+    """
+    with analytics_session() as conn:
+        _deal(conn, 1, category=SELLERS)
+        _meet(conn, 100, 1, start=PAST)
+
+    result = _work(SELLERS)
+    assert "meetings_overdue" not in result, "ключа нет вовсе"
+    assert "meetings_planned" not in result
+    assert "meetings_undated" not in result
+
+
+def test_a_zero_would_have_lied_where_a_missing_key_does_not(agency):
+    """Ноль прочитался бы как «сорванных встреч нет» — а их там не считают.
+
+    Разные утверждения: «мы посмотрели и не нашли» и «мы туда не смотрим».
+    Первое успокаивает, второе честно.
+    """
+    with analytics_session() as conn:
+        _deal(conn, 1, category=SELLERS)
+
+    assert _work(SELLERS).get("meetings_overdue") is None
+
+
+def test_a_held_meeting_still_counts_as_work_for_sellers(agency):
+    """Наличие записи — свидетельство, а не требование, и кредит за него есть."""
+    with analytics_session() as conn:
+        _deal(conn, 1, category=SELLERS)
+        _meet(conn, 100, 1, completed=1, start=PAST)
+
+    result = _work(SELLERS)
+    assert result["meetings"] == 1
+    assert result["talked"] == 1
