@@ -74,6 +74,18 @@ def agency(analytics_db, monkeypatch):
 # окно «вчера»
 # --------------------------------------------------------------------------
 
+def _pulse_only(deliveries):
+    """Только сообщения-сводки.
+
+    Рядом с ними директору уходит второе сообщение — «что делать сегодня».
+    У него другие обязательства: сводка обязана назвать воронку в первой
+    строке и поставить новости раньше итога, совет — назвать человека и
+    число. Проверять одно правилами другого значит однажды сломать оба.
+    """
+    return [item for item in deliveries
+            if item.get("kind", pulse_digest.KIND_PULSE) == pulse_digest.KIND_PULSE]
+
+
 def test_on_monday_yesterday_covers_the_weekend():
     """В понедельник «вчера» — это пятница, а окно накрывает выходные.
 
@@ -141,7 +153,7 @@ def test_the_director_gets_the_whole_company(agency):
         _won(conn, 1, 2, 1_000_000, "2026-08-10T09:00:00+00:00")
         _won(conn, 2, 3, 9_000_000, "2026-08-10T09:00:00+00:00")
 
-    deliveries = pulse_digest.build(Q3, URL)
+    deliveries = _pulse_only(pulse_digest.build(Q3, URL))
     boss = next(d for d in deliveries if d["user_id"] == 7)
 
     assert "Кретов" in boss["text"] and "Волкова" in boss["text"]
@@ -162,7 +174,7 @@ def test_the_message_names_the_funnel_it_counted(agency):
         )
         _won(conn, 1, 2, 1_000_000, "2026-08-10T09:00:00+00:00")
 
-    deliveries = pulse_digest.build(Q3, URL)
+    deliveries = _pulse_only(pulse_digest.build(Q3, URL))
 
     assert deliveries, "сообщений нет — проверять нечего"
     for delivery in deliveries:
@@ -173,7 +185,7 @@ def test_the_message_names_the_funnel_it_counted(agency):
 
 def test_a_department_without_a_rop_is_named_not_dropped(agency):
     """Отчёт, не дошедший ни до кого, выглядит как отчёт без замечаний."""
-    deliveries = pulse_digest.build(Q3, URL)
+    deliveries = _pulse_only(pulse_digest.build(Q3, URL))
     boss = next(d for d in deliveries if d["user_id"] == 7)
 
     assert [d["user_id"] for d in deliveries] == [7, 1], "у Волковой РОПа нет"
@@ -182,7 +194,7 @@ def test_a_department_without_a_rop_is_named_not_dropped(agency):
 
 def test_the_link_is_omitted_rather_than_wrong(agency):
     """Пустой адрес — нет ссылки. Неверная ссылка хуже: она выглядит рабочей."""
-    deliveries = pulse_digest.build(Q3, "")
+    deliveries = _pulse_only(pulse_digest.build(Q3, ""))
     assert all("http" not in d["text"] for d in deliveries)
 
 
@@ -195,7 +207,7 @@ def test_full_coverage_is_not_mentioned(agency):
     with analytics_session() as conn:
         _won(conn, 1, 2, 1_000_000, "2026-08-10T09:00:00+00:00")
 
-    boss = pulse_digest.build(Q3, URL)[0]
+    boss = _pulse_only(pulse_digest.build(Q3, URL))[0]
     assert "заполнена" not in boss["text"]
 
 
@@ -206,7 +218,7 @@ def test_poor_coverage_is_a_warning(agency):
         for deal_id in range(2, 6):
             _won(conn, deal_id, 2, 0, "2026-08-10T09:00:00+00:00")
 
-    boss = pulse_digest.build(Q3, URL)[0]
+    boss = _pulse_only(pulse_digest.build(Q3, URL))[0]
     assert "Сумма заполнена у 20%" in boss["text"]
 
 
@@ -215,7 +227,7 @@ def test_an_empty_department_stays_out_of_the_summary(agency):
     with analytics_session() as conn:
         conn.execute("DELETE FROM plan_norm WHERE scope_id = 3")
 
-    boss = pulse_digest.build(Q3, URL)[0]
+    boss = _pulse_only(pulse_digest.build(Q3, URL))[0]
     assert "Волкова" not in boss["text"].split("По отделам:")[1].split("\n\n")[0]
 
 
@@ -224,7 +236,7 @@ def test_the_first_line_is_the_news_not_the_total(agency):
     with analytics_session() as conn:
         _won(conn, 1, 2, 1_000_000, "2026-08-10T09:00:00+00:00")
 
-    boss = pulse_digest.build(Q3, URL)[0]
+    boss = _pulse_only(pulse_digest.build(Q3, URL))[0]
     lines = [line for line in boss["text"].splitlines() if line.strip()]
 
     assert lines[0].startswith("📊 Пульс")
@@ -432,7 +444,7 @@ def test_without_a_chat_the_report_stays_in_the_personal_digest(agency):
         _stalled_deal(conn)
 
     deliveries = pulse_digest.build(Q3, URL)
-    boss = next(d for d in deliveries if d.get("user_id") == 7)
+    boss = next(d for d in _pulse_only(deliveries) if d.get("user_id") == 7)
 
     assert not [d for d in deliveries if d.get("chat_id")]
     assert "Пентхаус на Поклонной" in boss["text"]

@@ -16,10 +16,19 @@
              hint='из ' ~ (wins.closed | int_ru) ~ ' закрытых за период') }}
   {{ ui.tile('Цикл сделки', cycle.median | days,
              hint='медиана; p75 ' ~ (cycle.p75 | days)) }}
+  {% if with_money %}
   {{ ui.tile('Выиграно денег', wins.won_amount | money(short=True)) }}
   {{ ui.tile('Средний чек', wins.avg_check | money(short=True),
              hint='по ' ~ (wins.avg_check_base | int_ru) ~ ' сделкам с заполненной суммой') }}
+  {% endif %}
 </div>
+
+{% if not with_money %}
+<div class="notice mt-16"><span>ℹ</span>
+  <span>Комиссию в этой воронке не ведут — здесь держат объект и работают с
+    собственником. Денежные колонки убраны целиком: ноль в них означал бы
+    «сделок на ноль рублей», а не «поле не заполняют».</span></div>
+{% endif %}
 
 <div class="grid grid-2 mt-16">
   <div class="card">
@@ -52,7 +61,7 @@
             <th class="num">Доля когорты</th>
             <th class="num">Из пред. стадии</th>
             <th class="num">Стоит сейчас</th>
-            <th class="num">Сумма открытых</th>
+            {% if with_money %}<th class="num">Сумма открытых</th>{% endif %}
           </tr>
         </thead>
         <tbody>
@@ -68,7 +77,7 @@
             <td class="num">{{ row.conversion_from_start | pct }}</td>
             <td class="num muted">{{ row.conversion_step | pct if row.conversion_step is not none else '—' }}</td>
             <td class="num">{{ row.count_now | int_ru }}</td>
-            <td class="num">{{ row.amount_open | money }}</td>
+            {% if with_money %}<td class="num">{{ row.amount_open | money }}</td>{% endif %}
           </tr>
           {% endfor %}
         </tbody>
@@ -77,7 +86,7 @@
   </div>
 </div>
 
-<div class="grid grid-2 mt-16">
+<div class="grid {{ 'grid-2' if with_money else '' }} mt-16">
   <div class="card">
     <div class="card-head">
       <div>
@@ -92,6 +101,7 @@
       и сколько карточек стоит на стадии прямо сейчас.') }}
   </div>
 
+  {% if with_money %}
   <div class="card">
     <div class="card-head">
       <div>
@@ -136,8 +146,280 @@
       Проценты, проставленные в карточке воронки Bitrix вручную, не используются —
       их ставят один раз при настройке и почти никогда не пересматривают.') }}
   </div>
+  {% endif %}
 </div>
 
+<div class="card mt-16">
+  <div class="card-head">
+    <div>
+      <h2>Работа по карточкам</h2>
+      <p class="card-sub">По каким открытым карточкам разговаривали, а по каким нет</p>
+    </div>
+  </div>
+
+  {% if not work.cards %}
+    <div class="empty">В этой воронке нет открытых карточек.</div>
+  {% else %}
+  <div class="grid grid-kpi">
+    {{ ui.tile('Не трогали вовсе', work.nothing | int_ru,
+               hint='ни звонка, ни отметки — ' ~ (work.nothing_share | pct)
+                    ~ ' из ' ~ (work.cards | int_ru) ~ ' открытых') }}
+    {{ ui.tile('Только отметка', work.marked | int_ru,
+               hint='дело выполнено, записи разговора нет') }}
+    {{ ui.tile('Звонили и бросили', work.silent | int_ru,
+               hint='последний разговор дольше ' ~ work.silent_days ~ ' дней назад') }}
+    {{ ui.tile('Встреч', work.meetings | int_ru,
+               hint='активности «встреча» плюс выполненные дела о встрече') }}
+    {{ ui.tile('Разговоров', work.talks | int_ru,
+               hint='из них исходящих звонков ' ~ (work.outgoing | int_ru)) }}
+    {{ ui.tile('Не приняли звонков', work.missed | int_ru,
+               hint='по ' ~ (work.never_returned | int_ru)
+                    ~ ' карточкам так и не перезвонили') }}
+  </div>
+
+  <div class="notice mt-14"><span>ℹ</span>
+    <span>«Только отметка» — это не обвинение и не работа. Брокер закрыл дело,
+      а записи разговора в портале нет: он мог звонить с личного телефона.
+      Сложить эти карточки с разговорами значит поверить отметке на слово;
+      сложить с нетронутыми — обвинить того, кто работал мимо портала. Поэтому
+      они стоят отдельным числом, и это вопрос, а не приговор.</span></div>
+
+  <div class="grid grid-2 mt-16">
+    <div>
+      <h3 class="section-title sub">По стадиям</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Стадия</th><th class="num">Карточек</th>
+              <th class="num">Не трогали</th><th class="num">Отметка</th>
+              <th class="num">Лежит</th><th class="num">Разговоров</th></tr>
+          </thead>
+          <tbody>
+            {% for row in work.by_stage %}
+            <tr>
+              <td>
+                <a href="{{ base_path }}/table?{{ qs(request, stage=row.key, open='1', all_time='1') }}"
+                   title="Показать карточки этой стадии">{{ row.name }}</a>
+              </td>
+              <td class="num">{{ row.cards | int_ru }}</td>
+              <td class="num">{{ row.nothing | int_ru }}</td>
+              <td class="num muted">{{ row.marked | int_ru }}</td>
+              <td class="num {{ 'delta-down' if row.cold_share >= 50 else '' }}">
+                {{ row.cold_share | pct }}</td>
+              <td class="num muted">{{ row.talks | int_ru }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div>
+      <h3 class="section-title sub">По брокерам</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Брокер</th><th class="num">Карточек</th>
+              <th class="num">Не трогали</th><th class="num">Отметка</th>
+              <th class="num">Лежит</th><th class="num">Разговоров</th></tr>
+          </thead>
+          <tbody>
+            {% for row in work.by_user %}
+            <tr>
+              <td>
+                <a href="{{ base_path }}/table?{{ qs(request, assignee=row.key, open='1', all_time='1') }}"
+                   title="Показать карточки этого брокера">{{ row.name }}</a>
+                <span class="muted">· {{ row.department }}</span>
+              </td>
+              <td class="num">{{ row.cards | int_ru }}</td>
+              <td class="num">{{ row.nothing | int_ru }}</td>
+              <td class="num muted">{{ row.marked | int_ru }}</td>
+              <td class="num {{ 'delta-down' if row.cold_share >= 50 else '' }}">
+                {{ row.cold_share | pct }}</td>
+              <td class="num muted">{{ row.talks | int_ru }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  {% if work.pickup %}
+  <h3 class="section-title sub mt-16">Не берут трубку · от 30 входящих</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Кто</th><th class="num">Входящих</th>
+        <th class="num">Не приняли</th><th class="num">Доля</th></tr></thead>
+      <tbody>
+        {% for row in work.pickup[:10] %}
+        <tr>
+          <td>{{ row.name or '—' }}<span class="muted"> · {{ row.department }}</span>
+            {% if row.service %}<span class="badge">общая линия</span>
+            {% elif not row.is_active %}<span class="badge">не работает</span>{% endif %}</td>
+          <td class="num">{{ row.incoming | int_ru }}</td>
+          <td class="num">{{ row.missed | int_ru }}</td>
+          <td class="num {{ 'delta-down' if row.missed_share >= 50 else '' }}">
+            {{ row.missed_share | pct }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {{ ui.definition('Считается по всем звонкам человека, а не по карточкам этой
+    воронки: непринятых по порталу 5 169, а по открытым карточкам всего 63 —
+    почти все пропущенные не привязаны ни к одной сделке. Потери сидят на входе,
+    до того как карточка заводится, и через карточки видно один процент
+    проблемы.') }}
+  {% endif %}
+
+  {% if work.worst %}
+  <h3 class="section-title sub mt-16">Дольше всех лежат без единого следа</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Карточка</th><th>Стадия</th><th>Брокер</th>
+        <th class="num">Дней с заведения</th></tr></thead>
+      <tbody>
+        {% for row in work.worst %}
+        <tr>
+          <td><a href="{{ crm_link('deal', row.deal_id) }}"
+                 target="_blank" rel="noopener">{{ row.title }}</a></td>
+          <td>{{ row.stage_name }}</td>
+          <td>{{ row.broker }}</td>
+          <td class="num">{{ row.age_days | days }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% if work.shared_contacts %}
+  <div class="notice mt-14"><span>ℹ</span>
+    <span>У {{ work.shared_contacts | int_ru }} карточек контакт заведён ещё и
+      в другой воронке: их звонки по той сделке попадут в счёт этой. Перекос
+      в безопасную сторону — карточка выглядит отработаннее, чем есть, — но
+      молчание он спрятать может.</span></div>
+  {% endif %}
+
+  {{ ui.definition('Разговор — завершённый звонок или встреча. Встречу в
+    агентстве заводят делом и после проведения ставят «выполнено», поэтому
+    выполненное дело со словом «встреча», «показ» или «просмотр» считается
+    встречей: отдельных активностей «встреча» в портале всего 68 при 401 деле о
+    встрече. Остальные выполненные дела — «Связаться с клиентом», «Отчет» —
+    считаются отметкой, а не разговором. Задача сотруднику не считается вовсе:
+    её ставят внутри агентства. Непринятый входящий разговором не был. Действие
+    ищется и на сделке, и на её контакте — звонок чаще висит на контакте, и счёт
+    только по сделке назвал бы молчащими тех, кто звонил.') }}
+  {% endif %}
+</div>
+
+<div class="card mt-16">
+  <div class="card-head">
+    <div>
+      <h2>Источники</h2>
+      <p class="card-sub">Что привёл каждый канал из сделок, созданных за период</p>
+    </div>
+  </div>
+
+  {% if not sources.rows %}
+    <div class="empty">За период в этой воронке не создано ни одной карточки —
+      сравнивать каналы не на чем.</div>
+  {% else %}
+  {% if not sources.matured %}
+  <div class="notice notice-warn"><span>⚠</span>
+    <span>{% if sources.cycle_days %}Период короче цикла сделки
+        ({{ sources.cycle_days | days }} по {{ sources.cycle_base | int_ru }} закрытым).
+        Сделки этой когорты ещё не успели дойти до денег{% else %}За период не закрылось
+        ни одной сделки, и цикл считать не на чем{% endif %} — выигранные и конверсия
+      ниже занижены у всех каналов сразу. Сравнивать их между собой можно, судить о
+      канале по абсолютному числу — нет: возьмите окно длиннее.</span></div>
+  {% endif %}
+
+  <div class="table-wrap mt-14">
+    <table>
+      <thead>
+        <tr>
+          <th>Источник</th>
+          <th class="num">Сделок</th>
+          <th class="num">Доля</th>
+          <th class="num">В работе</th>
+          <th class="num">Зависло</th>
+          <th class="num">Выиграно</th>
+          <th class="num">Проиграно</th>
+          <th class="num">Конверсия</th>
+          {% if with_money %}
+          <th class="num">Комиссия</th>
+          <th class="num">На сделку</th>
+          {% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in sources.rows %}
+        <tr>
+          <td>
+            <a href="{{ base_path }}/table?{{ qs(request, source=row.source_id, all_time='1') }}"
+               title="Показать карточки этого источника">{{ row.name }}</a>
+          </td>
+          <td class="num">{{ row.deals | int_ru }}</td>
+          <td class="num muted">{{ row.share | pct }}</td>
+          <td class="num">{{ row.open_deals | int_ru }}</td>
+          <td class="num {{ 'delta-down' if row.stalled_share >= 50 else '' }}">
+            {% if row.stalled %}{{ row.stalled | int_ru }}
+              <span class="muted">({{ row.stalled_share | pct }})</span>
+            {% else %}<span class="muted">—</span>{% endif %}</td>
+          <td class="num">{{ row.won | int_ru }}</td>
+          <td class="num">{{ row.lost | int_ru }}</td>
+          <td class="num">{{ row.conversion | pct }}</td>
+          {% if with_money %}
+          <td class="num">{{ row.won_amount | money }}</td>
+          <td class="num">{{ row.amount_per_deal | money }}</td>
+          {% endif %}
+        </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot>
+        <tr>
+          <td><strong>{{ sources.total.name }}</strong></td>
+          <td class="num"><strong>{{ sources.total.deals | int_ru }}</strong></td>
+          <td class="num muted">100%</td>
+          <td class="num">{{ sources.total.open_deals | int_ru }}</td>
+          <td class="num">{{ sources.total.stalled | int_ru }}</td>
+          <td class="num">{{ sources.total.won | int_ru }}</td>
+          <td class="num">{{ sources.total.lost | int_ru }}</td>
+          <td class="num">{{ sources.total.conversion | pct }}</td>
+          {% if with_money %}
+          <td class="num"><strong>{{ sources.total.won_amount | money }}</strong></td>
+          <td class="num">{{ sources.total.amount_per_deal | money }}</td>
+          {% endif %}
+        </tr>
+      </tfoot>
+    </table>
+  </div>
+
+  {% if with_money %}
+    {{ ui.coverage(sources.total.coverage, sources.total.won_filled,
+                   sources.total.won - sources.total.won_foreign, 'выигранных') }}
+  {% endif %}
+
+  {% if with_money %}
+    {{ ui.definition('Когорта: сделки, СОЗДАННЫЕ за период, и то, чем они кончились
+      к сегодняшнему дню, — а не сделки, закрытые за период. Иначе канал, включённый
+      в начале года, сравнивался бы с включённым в конце на разном сроке дозревания.
+      «На сделку» — комиссия, делённая на все приведённые сделки, а не на выигранные:
+      именно её сравнивают со стоимостью канала, и канал с одной сделкой из ста по
+      среднему чеку выигранной выглядит прекрасно. «Зависло» — из тех, что в работе,
+      стоят на стадии дольше нормы этой стадии.') }}
+  {% else %}
+    {{ ui.definition('Когорта: карточки, СОЗДАННЫЕ за период, и то, чем они кончились
+      к сегодняшнему дню, — а не закрытые за период. Иначе канал, включённый в начале
+      года, сравнивался бы с включённым в конце на разном сроке дозревания. «Зависло» —
+      из тех, что в работе, стоят на стадии дольше нормы этой стадии.') }}
+  {% endif %}
+  {% endif %}
+</div>
+
+{% if with_money %}
 <div class="card mt-16">
   <div class="card-head">
     <div>
@@ -167,5 +449,6 @@
     </div>
   </div>
 </div>
+{% endif %}
 {% endif %}
 {% endblock %}

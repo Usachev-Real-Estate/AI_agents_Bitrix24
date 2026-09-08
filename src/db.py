@@ -162,6 +162,43 @@ def init_db() -> None:
         """)
         _migrate_exclusive_expiry_notifications(conn)
 
+        # Память советов. Без неё ежедневная сводка через неделю
+        # превращается в три одинаковые строки, и её перестают открывать
+        # раньше, чем в ней появится важное.
+        #
+        # value — «насколько плохо», всегда больше = хуже. Одно направление
+        # для всех правил: иначе сравнение «стало лучше или хуже» пришлось
+        # бы держать в каждом правиле отдельно, и однажды они разошлись бы.
+        #
+        # Ключ — правило плюс адресат: один и тот же совет про разных людей
+        # это разные советы, а про одного человека — один, сколько бы раз
+        # его ни пересчитали.
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS advice_log (
+            rule          TEXT NOT NULL,
+            subject       TEXT NOT NULL,
+            first_sent_at TEXT NOT NULL,
+            last_sent_at  TEXT NOT NULL,
+            sent_count    INTEGER NOT NULL DEFAULT 1,
+            first_value   REAL NOT NULL DEFAULT 0,
+            last_value    REAL NOT NULL DEFAULT 0,
+            -- Короткое имя адресата: «Марат Абзалилов», «Отдел Волкова».
+            -- Хранится, потому что похвала обязана назвать, что именно
+            -- улучшилось, а правило к тому дню проблемы уже не видит и
+            -- строить имя не из чего. Заголовок совета для этого не годится:
+            -- в нём стоит число, и рядом с «было 30, стало 18» оно читается
+            -- как третье, противоречащее обоим.
+            label         TEXT NOT NULL DEFAULT '',
+            closed_at     TEXT,
+            PRIMARY KEY (rule, subject)
+        );
+        """)
+        _migrate_advice_log(conn)
+        conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_advice_open
+            ON advice_log(closed_at, last_sent_at);
+        """)
+
         conn.execute("""
         CREATE TABLE IF NOT EXISTS contact_source_snapshots (
             contact_id INTEGER PRIMARY KEY,
@@ -339,6 +376,13 @@ def init_db() -> None:
             analyzed_events TEXT NOT NULL DEFAULT ''
         );
         """)
+
+
+def _migrate_advice_log(conn: sqlite3.Connection) -> None:
+    """Добавить label к уже созданной таблице советов."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(advice_log)")}
+    if columns and "label" not in columns:
+        conn.execute("ALTER TABLE advice_log ADD COLUMN label TEXT NOT NULL DEFAULT ''")
 
 
 def _migrate_exclusive_expiry_notifications(conn: sqlite3.Connection) -> None:
