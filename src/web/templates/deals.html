@@ -170,9 +170,11 @@
                hint='последний разговор дольше ' ~ work.silent_days ~ ' дней назад') }}
     {{ ui.tile('Встреч проведено', work.meetings | int_ru,
                hint='активности «встреча» плюс выполненные дела о встрече') }}
+    {% if work.meetings_overdue is defined %}
     {{ ui.tile('Встреч просрочено', work.meetings_overdue | int_ru,
                hint='срок прошёл, дело не закрыто; назначено ещё '
                     ~ (work.meetings_planned | int_ru)) }}
+    {% endif %}
     {{ ui.tile('Разговоров', work.talks | int_ru,
                hint='из них исходящих звонков ' ~ (work.outgoing | int_ru)) }}
     {{ ui.tile('Не приняли звонков', work.missed | int_ru,
@@ -180,7 +182,7 @@
                     ~ ' карточкам так и не перезвонили') }}
   </div>
 
-  {% if work.meetings_undated %}
+  {% if work.meetings_undated is defined and work.meetings_undated %}
   <div class="notice notice-warn mt-14"><span>⚠</span>
     <span>У {{ work.meetings_undated | int_ru }} незакрытых встреч не проставлен
       срок — просрочку по ним не отличить. Если таких много, признак не годится

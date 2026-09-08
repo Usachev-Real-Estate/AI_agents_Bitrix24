@@ -256,6 +256,8 @@ def _meeting_lines(work_data: dict[str, Any]) -> list[str]:
     отличить вовсе, и молчать о размере слепого пятна значит выдать часть
     картины за всю.
     """
+    # Ключей нет вовсе там, где встречи не ведут: спрашивать за отсутствие
+    # записи можно только если её положено делать.
     overdue = work_data.get("meetings_overdue") or 0
     undated = work_data.get("meetings_undated") or 0
     if not overdue and not undated:
