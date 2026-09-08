@@ -16,10 +16,19 @@
              hint='из ' ~ (wins.closed | int_ru) ~ ' закрытых за период') }}
   {{ ui.tile('Цикл сделки', cycle.median | days,
              hint='медиана; p75 ' ~ (cycle.p75 | days)) }}
+  {% if with_money %}
   {{ ui.tile('Выиграно денег', wins.won_amount | money(short=True)) }}
   {{ ui.tile('Средний чек', wins.avg_check | money(short=True),
              hint='по ' ~ (wins.avg_check_base | int_ru) ~ ' сделкам с заполненной суммой') }}
+  {% endif %}
 </div>
+
+{% if not with_money %}
+<div class="notice mt-16"><span>ℹ</span>
+  <span>Комиссию в этой воронке не ведут — здесь держат объект и работают с
+    собственником. Денежные колонки убраны целиком: ноль в них означал бы
+    «сделок на ноль рублей», а не «поле не заполняют».</span></div>
+{% endif %}
 
 <div class="grid grid-2 mt-16">
   <div class="card">
@@ -52,7 +61,7 @@
             <th class="num">Доля когорты</th>
             <th class="num">Из пред. стадии</th>
             <th class="num">Стоит сейчас</th>
-            <th class="num">Сумма открытых</th>
+            {% if with_money %}<th class="num">Сумма открытых</th>{% endif %}
           </tr>
         </thead>
         <tbody>
@@ -68,7 +77,7 @@
             <td class="num">{{ row.conversion_from_start | pct }}</td>
             <td class="num muted">{{ row.conversion_step | pct if row.conversion_step is not none else '—' }}</td>
             <td class="num">{{ row.count_now | int_ru }}</td>
-            <td class="num">{{ row.amount_open | money }}</td>
+            {% if with_money %}<td class="num">{{ row.amount_open | money }}</td>{% endif %}
           </tr>
           {% endfor %}
         </tbody>
@@ -77,7 +86,7 @@
   </div>
 </div>
 
-<div class="grid grid-2 mt-16">
+<div class="grid {{ 'grid-2' if with_money else '' }} mt-16">
   <div class="card">
     <div class="card-head">
       <div>
@@ -92,6 +101,7 @@
       и сколько карточек стоит на стадии прямо сейчас.') }}
   </div>
 
+  {% if with_money %}
   <div class="card">
     <div class="card-head">
       <div>
@@ -136,8 +146,115 @@
       Проценты, проставленные в карточке воронки Bitrix вручную, не используются —
       их ставят один раз при настройке и почти никогда не пересматривают.') }}
   </div>
+  {% endif %}
 </div>
 
+<div class="card mt-16">
+  <div class="card-head">
+    <div>
+      <h2>Источники</h2>
+      <p class="card-sub">Что привёл каждый канал из сделок, созданных за период</p>
+    </div>
+  </div>
+
+  {% if not sources.rows %}
+    <div class="empty">За период в этой воронке не создано ни одной карточки —
+      сравнивать каналы не на чем.</div>
+  {% else %}
+  {% if not sources.matured %}
+  <div class="notice notice-warn"><span>⚠</span>
+    <span>{% if sources.cycle_days %}Период короче цикла сделки
+        ({{ sources.cycle_days | days }} по {{ sources.cycle_base | int_ru }} закрытым).
+        Сделки этой когорты ещё не успели дойти до денег{% else %}За период не закрылось
+        ни одной сделки, и цикл считать не на чем{% endif %} — выигранные и конверсия
+      ниже занижены у всех каналов сразу. Сравнивать их между собой можно, судить о
+      канале по абсолютному числу — нет: возьмите окно длиннее.</span></div>
+  {% endif %}
+
+  <div class="table-wrap mt-14">
+    <table>
+      <thead>
+        <tr>
+          <th>Источник</th>
+          <th class="num">Сделок</th>
+          <th class="num">Доля</th>
+          <th class="num">В работе</th>
+          <th class="num">Зависло</th>
+          <th class="num">Выиграно</th>
+          <th class="num">Проиграно</th>
+          <th class="num">Конверсия</th>
+          {% if with_money %}
+          <th class="num">Комиссия</th>
+          <th class="num">На сделку</th>
+          {% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in sources.rows %}
+        <tr>
+          <td>
+            <a href="{{ base_path }}/table?{{ qs(request, source=row.source_id, all_time='1') }}"
+               title="Показать карточки этого источника">{{ row.name }}</a>
+          </td>
+          <td class="num">{{ row.deals | int_ru }}</td>
+          <td class="num muted">{{ row.share | pct }}</td>
+          <td class="num">{{ row.open_deals | int_ru }}</td>
+          <td class="num {{ 'delta-down' if row.stalled_share >= 50 else '' }}">
+            {% if row.stalled %}{{ row.stalled | int_ru }}
+              <span class="muted">({{ row.stalled_share | pct }})</span>
+            {% else %}<span class="muted">—</span>{% endif %}</td>
+          <td class="num">{{ row.won | int_ru }}</td>
+          <td class="num">{{ row.lost | int_ru }}</td>
+          <td class="num">{{ row.conversion | pct }}</td>
+          {% if with_money %}
+          <td class="num">{{ row.won_amount | money }}</td>
+          <td class="num">{{ row.amount_per_deal | money }}</td>
+          {% endif %}
+        </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot>
+        <tr>
+          <td><strong>{{ sources.total.name }}</strong></td>
+          <td class="num"><strong>{{ sources.total.deals | int_ru }}</strong></td>
+          <td class="num muted">100%</td>
+          <td class="num">{{ sources.total.open_deals | int_ru }}</td>
+          <td class="num">{{ sources.total.stalled | int_ru }}</td>
+          <td class="num">{{ sources.total.won | int_ru }}</td>
+          <td class="num">{{ sources.total.lost | int_ru }}</td>
+          <td class="num">{{ sources.total.conversion | pct }}</td>
+          {% if with_money %}
+          <td class="num"><strong>{{ sources.total.won_amount | money }}</strong></td>
+          <td class="num">{{ sources.total.amount_per_deal | money }}</td>
+          {% endif %}
+        </tr>
+      </tfoot>
+    </table>
+  </div>
+
+  {% if with_money %}
+    {{ ui.coverage(sources.total.coverage, sources.total.won_filled,
+                   sources.total.won - sources.total.won_foreign, 'выигранных') }}
+  {% endif %}
+
+  {% if with_money %}
+    {{ ui.definition('Когорта: сделки, СОЗДАННЫЕ за период, и то, чем они кончились
+      к сегодняшнему дню, — а не сделки, закрытые за период. Иначе канал, включённый
+      в начале года, сравнивался бы с включённым в конце на разном сроке дозревания.
+      «На сделку» — комиссия, делённая на все приведённые сделки, а не на выигранные:
+      именно её сравнивают со стоимостью канала, и канал с одной сделкой из ста по
+      среднему чеку выигранной выглядит прекрасно. «Зависло» — из тех, что в работе,
+      стоят на стадии дольше нормы этой стадии.') }}
+  {% else %}
+    {{ ui.definition('Когорта: карточки, СОЗДАННЫЕ за период, и то, чем они кончились
+      к сегодняшнему дню, — а не закрытые за период. Иначе канал, включённый в начале
+      года, сравнивался бы с включённым в конце на разном сроке дозревания. «Зависло» —
+      из тех, что в работе, стоят на стадии дольше нормы этой стадии.') }}
+  {% endif %}
+  {% endif %}
+</div>
+
+{% if with_money %}
 <div class="card mt-16">
   <div class="card-head">
     <div>
@@ -167,5 +284,6 @@
     </div>
   </div>
 </div>
+{% endif %}
 {% endif %}
 {% endblock %}

@@ -882,7 +882,7 @@ def _stuck_rows(
         conn,
         """
         SELECT d.deal_id, d.title, d.stage_id, d.opportunity, d.currency_id,
-               d.assigned_by_id,
+               d.assigned_by_id, d.source_id, d.date_create,
                COALESCE(s.name, d.stage_id) AS stage_name,
                COALESCE(u.name, '') AS assignee,
                COALESCE(u.department_name, '') AS department,
@@ -916,6 +916,142 @@ def _stuck_rows(
         row["threshold_source"] = "стадия" if own else "воронка"
         stuck.append(row)
     return stuck
+
+
+def money_funnel(category_id: int | None) -> bool:
+    """Считаются ли в этой воронке деньги.
+
+    Тот же список, что несёт план: решение «где деньги» принимается один раз и
+    живёт в plans. У продавцов комиссии в карточке нет вовсе — там держат
+    объект и проверяют работу с собственником, — и колонка сумм показывала бы
+    нули, которые читаются как «канал не принёс ничего».
+
+    Импорт локальный: plans импортирует metrics, и на уровне модуля это цикл.
+    """
+    if category_id is None:
+        return False
+    import plans
+
+    return int(category_id) in plans.plan_category_ids()
+
+
+def _window_days(since: str, until: str) -> float:
+    start, end = _parse_day(since), _parse_day(until)
+    if start is None or end is None:
+        return 0.0
+    return max(0.0, (end - start).days)
+
+
+def _stalled_by_source(
+    conn, category_id: int, since: str, until: str,
+) -> dict[str, int]:
+    """Сколько сделок когорты стоят на стадии дольше нормы — по источникам.
+
+    Считается через _stuck_rows, а не своим запросом: «зависла» определено
+    один раз, вместе с нормой стадии и списком стадий-исключений. Второе
+    определение разошлось бы с первым молча — и разошлось бы именно в тот
+    день, когда кто-нибудь поправит норму в одном месте из двух.
+    """
+    counts: dict[str, int] = {}
+    for row in _stuck_rows(conn, category_id):
+        created = row.get("date_create")
+        if not created or created < since or created >= until:
+            continue
+        key = row.get("source_id") or ""
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def deal_sources(conn, category_id: int, since: str, until: str) -> dict[str, Any]:
+    """Разрез сделок по источнику: что канал привёл и чем это кончилось.
+
+    Когорта — сделки, СОЗДАННЫЕ в периоде, а не закрытые в нём. Иначе каналы
+    сравнивались бы на разном сроке дозревания: включённый в марте успел
+    довести сделки до конца, включённый в августе — нет, и второй выглядел бы
+    хуже при том же качестве трафика.
+
+    Плата за это — молодая когорта недосчитывает выигранных: сделка живёт
+    дольше окна, за которое на неё смотрят. Поэтому рядом возвращается
+    медианный цикл воронки и признак ``matured``. Без них окно в 30 дней
+    показало бы ноль выигранных у всех каналов сразу — и было бы право.
+
+    «Зависло» считается по той же когорте, а не по всем открытым сделкам
+    источника: строка обязана описывать одну совокупность. Снимок всех
+    открытых рядом с когортной конверсией — это два отчёта в одной таблице,
+    и разойтись они успевают уже на втором взгляде.
+    """
+    base = base_currency()
+    with_money = money_funnel(category_id)
+    rows = _rows(
+        conn,
+        f"""
+        SELECT d.source_id,
+               COALESCE(s.name, NULLIF(d.source_id, ''), 'Не указан') AS name,
+               COUNT(*) AS deals,
+               SUM(CASE WHEN d.is_closed = 0 THEN 1 ELSE 0 END) AS open_deals,
+               SUM(CASE WHEN d.is_won = 1 THEN 1 ELSE 0 END) AS won,
+               SUM(CASE WHEN d.is_lost = 1 THEN 1 ELSE 0 END) AS lost,
+               COALESCE(SUM(CASE WHEN d.is_won = 1 AND {_money_of('d')}
+                                 THEN d.opportunity ELSE 0 END), 0) AS won_amount,
+               SUM(CASE WHEN d.is_won = 1 AND {_money_of('d')} AND d.opportunity > 0
+                        THEN 1 ELSE 0 END) AS won_filled,
+               SUM(CASE WHEN d.is_won = 1 AND NOT {_money_of('d')}
+                        THEN 1 ELSE 0 END) AS won_foreign
+        FROM v_deal d
+        LEFT JOIN dim_source s ON s.source_id = d.source_id
+        WHERE d.category_id = :cat
+          AND d.date_create >= :since AND d.date_create < :until
+        GROUP BY d.source_id
+        """,
+        {"cat": category_id, "since": since, "until": until, "base": base},
+    )
+
+    stalled = _stalled_by_source(conn, category_id, since, until)
+    total: dict[str, Any] = {
+        "source_id": None, "name": "Итого", "deals": 0, "open_deals": 0,
+        "won": 0, "lost": 0, "won_amount": 0.0, "won_filled": 0,
+        "won_foreign": 0, "stalled": 0,
+    }
+    for row in rows:
+        row["stalled"] = stalled.get(row["source_id"] or "", 0)
+        for key in ("deals", "open_deals", "won", "lost",
+                    "won_filled", "won_foreign", "stalled"):
+            total[key] += row[key] or 0
+        total["won_amount"] += row["won_amount"] or 0
+
+    for row in (*rows, total):
+        row["conversion"] = _share(row["won"], row["deals"])
+        row["stalled_share"] = _share(row["stalled"], row["open_deals"])
+        row["share"] = _share(row["deals"], total["deals"])
+        if not with_money:
+            for key in ("won_amount", "won_filled", "won_foreign"):
+                row.pop(key, None)
+            continue
+        row["won_amount"] = round(row["won_amount"], 0)
+        # Деньги на одну ПРИВЕДЁННУЮ сделку, а не на выигранную: с ценой
+        # канала сравнивают именно её. Средний чек выигранной у канала с
+        # одной сделкой из ста выглядит прекрасно и не значит ничего.
+        row["amount_per_deal"] = (
+            round(row["won_amount"] / row["deals"], 0) if row["deals"] else 0
+        )
+        row["coverage"] = _share(row["won_filled"], row["won"] - row["won_foreign"])
+
+    # Крупные каналы вверх: решение принимают по ним, а хвост из одной сделки
+    # читают редко и никогда первым.
+    rows.sort(key=lambda item: (item["deals"], item["won"]), reverse=True)
+    cycle = deal_cycle_days(conn, category_id, since, until)
+    median = cycle["median"] if cycle["count"] else None
+    return {
+        "rows": rows,
+        "total": total,
+        "with_money": with_money,
+        "currency": base,
+        # Медиана цикла — мерка зрелости окна. Короче цикла — выигранных в
+        # когорте почти нет, и сравнивать каналы по ним нельзя.
+        "cycle_days": median,
+        "cycle_base": cycle["count"],
+        "matured": median is not None and _window_days(since, until) >= median,
+    }
 
 
 # --------------------------------------------------------------------------

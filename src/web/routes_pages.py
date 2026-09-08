@@ -112,6 +112,16 @@ async def deals(request: Request) -> HTMLResponse:
             ),
             "money": metrics.money(conn, category_id, period["since"], period["until"]),
             "forecast": metrics.weighted_forecast(conn, category_id),
+            # Разрез по источнику живёт здесь, а не на «Лидах»: лид до сделки
+            # доходит не всегда, и канал, который приводит сразу сделку, в
+            # отчёте по лидам не виден вовсе.
+            "sources": metrics.deal_sources(
+                conn, category_id, period["since"], period["until"],
+            ),
+            # Воронка продавцов комиссию не ведёт: там держат объект и
+            # проверяют работу. Денежные блоки страницы показывали бы нули,
+            # а ноль рублей и «поле не заполняют» — разные утверждения.
+            "with_money": metrics.money_funnel(category_id),
             "charts": {
                 "funnel": chartdata.funnel_chart(funnel),
                 "durations": chartdata.durations_chart(durations),
