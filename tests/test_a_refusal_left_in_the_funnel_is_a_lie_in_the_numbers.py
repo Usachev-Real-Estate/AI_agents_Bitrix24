@@ -146,7 +146,7 @@ def test_the_advice_quotes_the_client_and_names_the_stage(mart):
     assert item.value == 1
     assert "1 карточка с отказом клиента числится в работе" in item.title
     assert "«есть свой риэлтор»" in item.proof
-    assert "«Назначение встречи»" in item.proof
+    assert "на стадии «Назначение встречи»" in item.proof
     assert "Закройте" in item.action
 
 
