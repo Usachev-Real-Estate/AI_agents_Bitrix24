@@ -122,3 +122,52 @@ def test_the_count_of_deals_agrees_with_the_number():
 
     assert "незакрытых сделок 101" in action
     assert "101 незакрытых сделках" not in action
+
+
+# --------------------------------------------------------------------------
+# совет по брокеру
+
+_WORK = {"by_user": [{
+    "key": 11, "name": "Иван Мамонтов", "cards": 36, "cold": 30,
+    "nothing": 9, "silent": 21, "cold_share": 83.3,
+}]}
+
+
+def _broker(nothing, silent, **extra):
+    row = dict(_WORK["by_user"][0], nothing=nothing, silent=silent,
+               cold=nothing + silent, **extra)
+    return advice_rules.broker_cold({"by_user": [row]})[0]
+
+
+def test_the_action_addresses_the_bigger_half():
+    """Холодная карточка бывает двух видов, и делать с ними надо разное.
+
+    До одной не дошли руки вовсе, с другой поговорили и бросили. После
+    заливки комментариев вторых стало втрое больше первых, и совет, зовущий
+    «разобрать 9 нетронутых» при 21 брошенной, отвечал бы на треть вопроса.
+    """
+    assert "их 21" in _broker(9, 21).action
+    assert "разговор был давно" in _broker(9, 21).action
+
+    assert "их 30" in _broker(30, 2).action
+    assert "без единого следа" in _broker(30, 2).action
+
+
+def test_an_action_never_asks_for_zero_cards():
+    """«Разберите 0 карточек» — то, во что превращался совет, когда
+    нетронутых не осталось, а брошенные никуда не делись."""
+    action = _broker(0, 21).action
+
+    assert "0" not in action
+    assert "их 21" in action
+
+
+def test_the_number_needs_no_declension():
+    """«Вернитесь к 21 карточкам» требует дательного падежа.
+
+    Число стоит отдельным сказуемым — «их 21», — и склонять числительное в
+    коде ради одной строки не приходится.
+    """
+    for nothing, silent in ((1, 0), (2, 0), (5, 0), (0, 1), (0, 11), (0, 22)):
+        action = _broker(nothing, silent).action
+        assert "их " in action, action

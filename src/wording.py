@@ -13,6 +13,11 @@
 from __future__ import annotations
 
 
+def form(count: int, one: str, few: str, many: str) -> str:
+    """Форма существительного под число. Публичная: нужна и вне этого модуля."""
+    return _form(count, one, few, many)
+
+
 def _form(count: int, one: str, few: str, many: str) -> str:
     tail = abs(count) % 100
     if 11 <= tail <= 14:

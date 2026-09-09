@@ -208,6 +208,14 @@ _VIEW_DDL = (
     WHERE c.entity_type = 'deal'
       AND c.entity_id IN (SELECT deal_id FROM v_deal)
     """,
+    # Прочитанное сужается так же, как комментарий, из которого выросло, —
+    # по карточке.
+    """
+    CREATE TEMP VIEW v_comment_read AS
+    SELECT r.* FROM fact_comment_read r
+    WHERE r.entity_type = 'deal'
+      AND r.entity_id IN (SELECT deal_id FROM v_deal)
+    """,
     # Периоды плана не сужаются: это календарь, в нём нет ни людей, ни денег.
     """
     CREATE TEMP VIEW v_plan_period AS SELECT * FROM plan_period
