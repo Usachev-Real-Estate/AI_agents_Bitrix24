@@ -216,3 +216,39 @@ def test_every_entry_point_passes_a_log_level():
             bare.append(path.name)
 
     assert not bare, f"setup_logging() без уровня журнала: {sorted(bare)}"
+
+
+def test_the_review_shows_the_source_next_to_the_answer(mart, monkeypatch, capsys):
+    """Проверить прочитанное можно только рядом с исходной записью.
+
+    В таблице лежат аккуратные поля, и на вид они правдоподобны всегда.
+    «Показывала 15.08», превращённое в обещание, выглядит идеально — пока
+    не увидишь, что это прошедшее время.
+    """
+    _read(_Model('{"promised": "Позвонить в пятницу", "promised_at": "2026-08-15",'
+                 ' "terms": "комиссия 3%"}'))
+    monkeypatch.setattr("sys.argv", ["comment_reader.py", "--show", "5"])
+
+    assert comment_reader.main() == 0
+
+    out = capsys.readouterr().out
+    assert "Позвонить в пятницу, согласовать фотосессию" in out, "исходная запись"
+    assert "обещание: Позвонить в пятницу" in out, "что вынула модель"
+    assert "условия: комиссия 3%" in out
+
+
+def test_the_review_says_plainly_when_nothing_was_extracted(mart, monkeypatch, capsys):
+    """Пустой ответ — тоже ответ, и он должен быть виден как пустой."""
+    _read(_Model('{"promised": "", "promised_at": null}'))
+    monkeypatch.setattr("sys.argv", ["comment_reader.py", "--show", "5"])
+    comment_reader.main()
+
+    assert "(пусто)" in capsys.readouterr().out
+
+
+def test_the_review_without_anything_read_says_so(analytics_db, monkeypatch, capsys):
+    """Пустая таблица — это не пустой экран, а объяснение, что делать."""
+    monkeypatch.setattr("sys.argv", ["comment_reader.py", "--show", "5"])
+    comment_reader.main()
+
+    assert "сначала запустите без --show" in capsys.readouterr().out

@@ -269,11 +269,63 @@ def read_cards(conn, llm, *, limit: int = BATCH, today: date | None = None) -> i
     return done
 
 
+def _show(conn, limit: int) -> None:
+    """Что модель вынула, рядом с тем, из чего вынимала.
+
+    Без этого прочитанное проверить нечем: в таблице лежат аккуратные поля,
+    и на вид они правдоподобны всегда. Ошибку видно только рядом с исходной
+    записью — «показывала 15.08» превращённое в обещание выглядит идеально,
+    пока не увидишь, что это прошедшее время.
+    """
+    rows = conn.execute(
+        """
+        SELECT r.entity_id, d.title, r.promised, r.promised_at, r.wait_until,
+               r.refused, r.refused_why, r.ready, r.terms, r.read_at
+        FROM fact_comment_read r
+        JOIN fact_deal d ON d.deal_id = r.entity_id
+        ORDER BY r.read_at DESC, r.entity_id DESC LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    if not rows:
+        print("Прочитанных карточек нет — сначала запустите без --show")
+        return
+    print(f"Последние {len(rows)} прочитанных\n")
+    for row in rows:
+        print("=" * 62)
+        print(f"Сделка {row['entity_id']} · {row['title']}")
+        print("  Записи:")
+        for note in conn.execute(
+            "SELECT created_at, body FROM fact_comment WHERE entity_type = 'deal'"
+            " AND entity_id = ? AND is_auto = 0 ORDER BY created_at DESC LIMIT ?",
+            (row["entity_id"], NOTES),
+        ):
+            print(f"    [{note['created_at'][:10]}] {note['body'][:150]}")
+        print("  Вынуто:")
+        for label, value in (
+            ("обещание", row["promised"]),
+            ("срок обещания", row["promised_at"]),
+            ("ждём до", row["wait_until"]),
+            ("отказ", row["refused_why"] if row["refused"] else ""),
+            ("готово", row["ready"]),
+            ("условия", row["terms"]),
+        ):
+            if value:
+                print(f"    {label}: {value}")
+        if not any((row["promised"], row["promised_at"], row["wait_until"],
+                    row["refused"], row["ready"], row["terms"])):
+            print("    (пусто)")
+        print()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Чтение комментариев карточек")
     parser.add_argument("--limit", type=int, default=BATCH)
     parser.add_argument("--dry-run", action="store_true",
                         help="показать, что уйдёт модели, и не звать её")
+    parser.add_argument("--show", type=int, metavar="N",
+                        help="показать N последних прочитанных карточек: "
+                             "исходные записи рядом с тем, что вынула модель")
     args = parser.parse_args()
     # Настройки сначала: уровень журнала берётся из них, как во всех
     # остальных точках входа проекта.
@@ -281,6 +333,9 @@ def main() -> int:
     setup_logging(settings.log_level)
 
     with analytics_session() as conn:
+        if args.show:
+            _show(conn, args.show)
+            return 0
         if args.dry_run:
             # Очередь целиком, а не партия: «120 карточек» при лимите 120
             # не отвечает на вопрос, сколько их всего и на сколько
