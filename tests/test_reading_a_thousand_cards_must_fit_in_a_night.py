@@ -258,3 +258,47 @@ def test_an_empty_run_does_not_divide_by_zero(caplog):
         comment_reader._report(0, usage, _Tariff(), seconds=0.4)
 
     assert "0 карточек" in caplog.text
+
+
+# ── Куда уходят токены ─────────────────────────────────────────────────
+def test_the_raw_answer_can_be_looked_at(mart, monkeypatch, capsys):
+    """Сырой ответ модели рядом с его ценой.
+
+    Счёт говорит: 640 токенов выхода на карточку при ответе строк на
+    восемьдесят. Разница либо размышления, которых провайдер не разделяет,
+    либо пояснения вокруг JSON, которых мы просили не писать. Первое
+    лечится только сменой модели, второе — строкой промпта, и различить их
+    можно единственным способом: посмотреть, что пришло.
+    """
+    class _Chatty:
+        def invoke(self, messages):
+            return _Answer(
+                content="Разбираю запись.\n" + ANSWER,
+                usage={"input_tokens": 1_500, "output_tokens": 640,
+                       "output_token_details": {"reasoning": 0}},
+            )
+
+    monkeypatch.setattr(comment_reader, "_clients",
+                        lambda settings: (_Chatty(), None))
+    monkeypatch.setattr("sys.argv", ["comment_reader.py", "--raw", "1"])
+
+    assert comment_reader.main() == 0
+    out = capsys.readouterr().out
+    assert "выход 640 токенов, из них размышления 0" in out
+    assert "Разбираю запись." in out, "пояснение модели должно быть видно"
+
+
+def test_the_probe_writes_nothing(mart, monkeypatch, capsys):
+    """Проба состояния не меняет: посмотреть и записать — разные действия."""
+    class _Model:
+        def invoke(self, messages):
+            return _Answer()
+
+    monkeypatch.setattr(comment_reader, "_clients",
+                        lambda settings: (_Model(), None))
+    monkeypatch.setattr("sys.argv", ["comment_reader.py", "--raw", "2"])
+    comment_reader.main()
+
+    with analytics_session() as conn:
+        read = conn.execute("SELECT COUNT(*) FROM fact_comment_read").fetchone()[0]
+    assert read == 0

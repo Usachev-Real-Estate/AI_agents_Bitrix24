@@ -431,6 +431,37 @@ def _report(done: int, usage: dict[str, int], settings: Any,
     )
 
 
+def _raw(conn, llm, spare, limit: int, today: date) -> None:
+    """Сырой ответ модели рядом с тем, во что он обошёлся.
+
+    Счёт говорит: 640 токенов выхода на карточку при ответе строк на
+    восемьдесят. Разница либо размышления, которых провайдер не показывает
+    отдельно, либо пояснения вокруг JSON, которых мы просили не писать.
+    Разница между этими двумя случаями большая: первое лечится только
+    сменой модели, второе — одной строкой промпта.
+
+    Заодно видно, чем рискует разбор. Из ответа мы вырезаем JSON жадным
+    поиском от первой скобки до последней, и болтливая модель однажды
+    подсунет туда лишнюю пару.
+
+    В витрину не пишем: проба не должна менять состояние.
+    """
+    for card in _targets(conn, limit):
+        response = _ask(llm, spare, card, today)
+        content = getattr(response, "content", response)
+        content = content if isinstance(content, str) else str(content)
+        usage = extract_usage(response)
+        print("=" * 62)
+        print(f"Сделка {card['deal_id']} · {card['title']}")
+        print(f"  выход {usage['output_tokens']} токенов, "
+              f"из них размышления {usage['reasoning_tokens']}; "
+              f"в ответе {len(content)} знаков")
+        print("  ── ответ целиком ──")
+        for line in content.splitlines():
+            print(f"  {line}")
+        print()
+
+
 def _show(conn, limit: int) -> None:
     """Что модель вынула, рядом с тем, из чего вынимала.
 
@@ -487,6 +518,9 @@ def main() -> int:
                         help="показать, что уйдёт модели, и не звать её")
     parser.add_argument("--workers", type=int, default=WORKERS,
                         help="сколько карточек спрашивать одновременно")
+    parser.add_argument("--raw", type=int, metavar="N",
+                        help="прочитать N карточек и показать сырой "
+                             "ответ модели целиком, ничего не записывая")
     parser.add_argument("--show", type=int, metavar="N",
                         help="показать N последних прочитанных карточек: "
                              "исходные записи рядом с тем, что вынула модель")
@@ -519,6 +553,10 @@ def main() -> int:
                 print()
             return 0
         model, spare = _clients(settings)
+        if args.raw:
+            _raw(conn, model, spare, args.raw,
+                 datetime.now(timezone.utc).date())
+            return 0
         usage = {key: 0 for key in USAGE_KEYS}
         started = time.monotonic()
         done = read_cards(conn, model, limit=args.limit, spare=spare,
