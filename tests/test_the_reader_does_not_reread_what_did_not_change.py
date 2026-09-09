@@ -309,3 +309,37 @@ def test_an_old_mart_is_migrated_before_work(mart, monkeypatch, capsys):
 
     assert comment_reader.main() == 0
     assert "К прочтению" in capsys.readouterr().out
+
+
+def test_the_answer_comes_wrapped_in_a_fence(mart):
+    """Живая модель всегда отвечает JSON в ```json-заборе.
+
+    Просили «только JSON без пояснений» — приходит забор. Формат, в
+    котором ответ приходит на самом деле, обязан быть в тестах: иначе
+    первая же правка разбора сломает боевое чтение, а тесты промолчат.
+    """
+    fenced = '```json\n{"promised": "Позвонить", "promised_at": "2026-08-15"}\n```'
+
+    assert _read(_Model(fenced)) == 1
+    with analytics_session() as conn:
+        row = conn.execute(
+            "SELECT promised, promised_at FROM fact_comment_read"
+        ).fetchone()
+    assert tuple(row) == ("Позвонить", "2026-08-15")
+
+
+def test_a_talkative_answer_is_dropped_and_not_guessed(mart):
+    """Пояснение вокруг ответа — это пропуск карточки, а не кривая запись.
+
+    JSON вырезается жадно, от первой скобки до последней. Скобка внутри
+    пояснения утащит в кусок лишнее, разбор не состоится — и это верное
+    поведение: пустая строка в витрине честнее выдуманной.
+    """
+    chatty = ('Разбираю запись {тут брокер обещает}: '
+              '```json\n{"promised": "Позвонить"}\n```')
+
+    assert _read(_Model(chatty)) == 0
+    with analytics_session() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM fact_comment_read"
+        ).fetchone()[0] == 0
