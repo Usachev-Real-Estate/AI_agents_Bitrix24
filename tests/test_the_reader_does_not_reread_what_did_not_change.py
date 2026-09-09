@@ -280,3 +280,32 @@ def test_the_version_is_stored_with_the_answer(mart):
             "SELECT prompt_version FROM fact_comment_read WHERE entity_id = 1"
         ).fetchone()[0]
     assert stored == comment_reader.PROMPT_VERSION
+
+
+def test_an_old_mart_is_migrated_before_work(mart, monkeypatch, capsys):
+    """Точка входа сама приводит схему в порядок.
+
+    Читатель открывал витрину напрямую и падал на колонке, которой в ней
+    ещё нет: миграция живёт в init_analytics_db(), а он её не звал. Тесты
+    этого не видели — фикстура создаёт витрину уже по новой схеме, и колонка
+    там была всегда. Настоящий случай — боевая база, созданная раньше.
+    """
+    with analytics_session() as conn:
+        conn.execute("DROP TABLE fact_comment_read")
+        conn.execute(
+            """
+            CREATE TABLE fact_comment_read (
+                entity_type TEXT NOT NULL DEFAULT 'deal',
+                entity_id INTEGER NOT NULL, source_hash TEXT NOT NULL,
+                promised TEXT NOT NULL DEFAULT '', promised_at TEXT,
+                wait_until TEXT, refused INTEGER NOT NULL DEFAULT 0,
+                refused_why TEXT NOT NULL DEFAULT '',
+                ready TEXT NOT NULL DEFAULT '', terms TEXT NOT NULL DEFAULT '',
+                read_at TEXT NOT NULL, PRIMARY KEY (entity_type, entity_id)
+            )
+            """
+        )
+    monkeypatch.setattr("sys.argv", ["comment_reader.py", "--dry-run"])
+
+    assert comment_reader.main() == 0
+    assert "К прочтению" in capsys.readouterr().out

@@ -57,7 +57,7 @@ from langchain_core.messages import HumanMessage, SystemMessage  # noqa: E402
 
 from config import get_settings, setup_logging  # noqa: E402
 from llm import make_llm  # noqa: E402
-from schema import analytics_session  # noqa: E402
+from schema import analytics_session, init_analytics_db  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -376,6 +376,11 @@ def main() -> int:
     # остальных точках входа проекта.
     settings = get_settings()
     setup_logging(settings.log_level)
+    # Схема приводится в порядок до работы, как это делают ETL и дашборд.
+    # Читатель открывал витрину напрямую и падал на колонке, которой ещё нет:
+    # миграция живёт в init_analytics_db(), а он её не звал — точка входа,
+    # работающая с витриной, обязана сначала убедиться, что схема на месте.
+    init_analytics_db()
 
     with analytics_session() as conn:
         if args.show:
