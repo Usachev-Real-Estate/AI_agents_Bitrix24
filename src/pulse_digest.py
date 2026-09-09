@@ -241,6 +241,7 @@ def _work_lines(work_data: dict[str, Any] | None) -> list[str]:
         )
     lines += _promise_lines(work_data)
     lines += _refusal_lines(work_data)
+    lines += _vague_lines(work_data)
     lines += _meeting_lines(work_data)
     lines += _pickup_lines(work_data)
     return lines
@@ -305,6 +306,31 @@ def _refusal_lines(work_data: dict[str, Any]) -> list[str]:
             f"стадия «{row['stage_name']}»"
             + (f", {days} дн" if days else "")
             + f" ({row['broker']})"
+        )
+    if len(rows) > 3:
+        lines.append(f"  · и ещё {len(rows) - 3} — весь список в дашборде")
+    return lines
+
+
+def _vague_lines(work_data: dict[str, Any]) -> list[str]:
+    """Обещания без срока по замолчавшим карточкам.
+
+    Отдельной строкой от просроченных: там брокер назвал день и день
+    прошёл, здесь дня нет вовсе. Смешав их, мы предъявили бы одно и то же
+    обвинение к двум разным вещам, и половину его брокер справедливо
+    отвёл бы.
+    """
+    rows = work_data.get("vague") or []
+    if not rows:
+        return []
+    rows = sorted(rows, key=lambda row: -(row.get("quiet_days") or 0))
+    lines = [f"\n🕓 Обещали без срока и замолчали: {len(rows)} "
+             f"{wording.form(len(rows), 'карточка', 'карточки', 'карточек')}"]
+    for row in rows[:3]:
+        lines.append(
+            f"  · {wording.name(row['title'], 34)} — «{row['promised'][:50]}», "
+            f"записей нет {int(row.get('quiet_days') or 0)} дн "
+            f"({row['broker']})"
         )
     if len(rows) > 3:
         lines.append(f"  · и ещё {len(rows) - 3} — весь список в дашборде")
@@ -830,6 +856,9 @@ def build(period_code: str, url: str, now: datetime | None = None) -> list[dict[
         refusals = work.refused_in_work(conn, [
             int(settings.sellers_category_id), *plans.plan_category_ids(),
         ])
+        vague = work.promises_without_date(conn, [
+            int(settings.sellers_category_id), *plans.plan_category_ids(),
+        ])
 
     # Советы отбираются ПОСЛЕ закрытия соединения с витриной: отбор ходит в
     # свою базу памяти, и держать оба соединения открытыми ради этого
@@ -837,7 +866,7 @@ def build(period_code: str, url: str, now: datetime | None = None) -> list[dict[
     # advice.select(), которому значение нужно и для тех, о ком речь уже
     # шла: иначе проверить «стало лучше» было бы не с чем.
     selection = _advice_for(company, company_events, sellers_work,
-                            promises, refusals)
+                            promises, refusals, vague)
 
     chat_id = int(settings.pulse_events_chat_id or 0)
     if not chat_id:
@@ -999,6 +1028,7 @@ def _advice_for(
     sellers_work: dict[str, Any],
     promises: list[dict[str, Any]] | None = None,
     refusals: list[dict[str, Any]] | None = None,
+    vague: list[dict[str, Any]] | None = None,
 ):
     """Кандидаты, отобранные по памяти. Ошибка памяти сводку не роняет.
 
@@ -1009,7 +1039,7 @@ def _advice_for(
     """
     candidates = advice_rules.collect(
         pulse=company, events=events, sellers_work=sellers_work,
-        promises=promises, refusals=refusals,
+        promises=promises, refusals=refusals, vague=vague,
     )
     candidates = advice.only_named(candidates)
     try:

@@ -186,6 +186,10 @@ def card_work(
         # Обещания лежат рядом с работой: это её же след, только
         # записанный словами, а не действием.
         "promises": promises(conn, categories, department_id=department_id),
+        # Обещания без срока лежат рядом с просроченными, но отдельно:
+        # спрашивать по ним нечего, пока карточка не замолчала.
+        "vague": promises_without_date(conn, categories,
+                                       department_id=department_id),
         # Отказ лежит рядом с обещанием: обе строки взяты из записей
         # брокера, и обе проверяются его же словами.
         "refusals": refused_in_work(conn, categories,
@@ -626,6 +630,67 @@ def promises(
           -- данное до этой договорённости, ею же и отменено.
           AND (r.wait_until IS NULL OR r.wait_until < :today)
         ORDER BY overdue_days DESC
+        """,
+        params,
+    )
+
+
+def promises_without_date(
+    conn,
+    categories: Sequence[int] | None = None,
+    *,
+    department_id: int | None = None,
+    today: str | None = None,
+    quiet_days: int = SILENT_DAYS,
+) -> list[dict[str, Any]]:
+    """Обещал, дня не назвал и замолчал.
+
+    Половина обещаний портфеля — без срока: «перезвонить позднее»,
+    «свяжемся». Спрашивать по ним нечего: дня нет, значит и просрочки нет,
+    и брокер прав, если возразит.
+
+    Проверяемым это делает молчание. «Обещал перезвонить, и с тех пор
+    сорок дней ни одной записи» — уже не придирка: обещание есть, времени
+    прошло больше, чем на любую задержку, а следа работы нет. Порог взят
+    не новый, а тот же SILENT_DAYS, которым во всей витрине меряется
+    брошенная карточка: заводить второе определение молчания значило бы
+    однажды получить два разных ответа на один вопрос.
+
+    Дата обещания нам неизвестна — модель хранит ответ, а не запись, из
+    которой он взят. Считаем от последнего комментария: обещание пришло из
+    последних записей, а новая запись перечитывает карточку и заменяет
+    обещание. Значит «дней с последней записи» и есть «дней, за которые
+    ничего не произошло».
+    """
+    where, params = plans.category_filter("d", categories)
+    params.update({"dept": department_id, "today": today or _today(),
+                   "quiet": quiet_days})
+    return _rows(
+        conn,
+        f"""
+        SELECT d.deal_id, d.title, d.stage_id,
+               COALESCE(s.name, d.stage_id) AS stage_name,
+               COALESCE(u.name, '') AS broker,
+               u.user_id AS user_id,
+               r.promised, r.terms, r.ready,
+               (julianday(:today) - julianday(MAX(c.created_at))) AS quiet_days
+        FROM v_deal d
+        JOIN v_comment_read r
+             ON r.entity_type = 'deal' AND r.entity_id = d.deal_id
+        JOIN v_comment c
+             ON c.entity_type = 'deal' AND c.entity_id = d.deal_id
+            AND c.is_auto = 0
+        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
+        LEFT JOIN dim_stage s
+               ON s.stage_id = d.stage_id AND s.category_id = d.category_id
+        WHERE d.is_closed = 0 AND {where}
+          AND (:dept IS NULL OR u.department_id = :dept)
+          AND r.promised <> '' AND r.promised_at IS NULL
+          -- Договорились ждать — молчание законно и здесь.
+          AND (r.wait_until IS NULL OR r.wait_until < :today)
+        GROUP BY d.deal_id
+        HAVING quiet_days >= :quiet
+        ORDER BY quiet_days DESC
         """,
         params,
     )
