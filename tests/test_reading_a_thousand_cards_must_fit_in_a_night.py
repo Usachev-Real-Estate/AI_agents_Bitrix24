@@ -337,3 +337,43 @@ def test_an_empty_queue_is_not_a_failure(mart, monkeypatch):
 
     # Второй прогон подряд: всё уже прочитано, очередь пуста.
     assert comment_reader.main() == 0
+
+
+def test_the_leftover_queue_is_reported(mart, monkeypatch, caplog):
+    """Остаток очереди виден в логе — иначе узкое место не отличить от нормы.
+
+    Прочитано ровно столько, сколько разрешено, — прогон выглядит удачным,
+    а разбор отстаёт на день, потом на два, и советы тихо стареют. Замер
+    на живом портале: за два часа рабочего дня очередь набрала 72
+    карточки, то есть упереться в лимит — не гипотеза.
+    """
+    class _Model:
+        def invoke(self, messages):
+            return _Answer()
+
+    monkeypatch.setattr(comment_reader, "_clients",
+                        lambda settings: (_Model(), None))
+    monkeypatch.setattr(comment_reader, "setup_logging", lambda level: None)
+    monkeypatch.setattr("sys.argv", ["comment_reader.py", "--limit", "1"])
+
+    with caplog.at_level(logging.WARNING, logger=comment_reader.__name__):
+        assert comment_reader.main() == 0
+
+    assert "В очереди осталось 3 карточек" in caplog.text
+
+
+def test_a_drained_queue_says_nothing(mart, monkeypatch, caplog):
+    """Всё прочитано — молчим: предупреждение о пустом остатке это шум."""
+    class _Model:
+        def invoke(self, messages):
+            return _Answer()
+
+    monkeypatch.setattr(comment_reader, "_clients",
+                        lambda settings: (_Model(), None))
+    monkeypatch.setattr(comment_reader, "setup_logging", lambda level: None)
+    monkeypatch.setattr("sys.argv", ["comment_reader.py", "--limit", "10"])
+
+    with caplog.at_level(logging.WARNING, logger=comment_reader.__name__):
+        assert comment_reader.main() == 0
+
+    assert "В очереди осталось" not in caplog.text
