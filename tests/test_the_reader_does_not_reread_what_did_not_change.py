@@ -252,3 +252,31 @@ def test_the_review_without_anything_read_says_so(analytics_db, monkeypatch, cap
     comment_reader.main()
 
     assert "сначала запустите без --show" in capsys.readouterr().out
+
+
+def test_a_new_prompt_sends_every_card_back(mart, monkeypatch):
+    """Правка правил чтения перечитывает всё, что читали по старым.
+
+    Отпечаток записей не меняется от того, что мы стали читать иначе, и без
+    версии промпта карточка осталась бы с прежним ответом навсегда. На живых
+    данных это были ложные отказы: «есть свой агент, НО показывать можем»
+    модель посчитала отказом, промпт поправили — а двадцать карточек так и
+    лежали бы с обвинением.
+    """
+    model = _Model()
+    assert _read(model) == 1
+    assert _read(model) == 0, "по той же версии не перечитываем"
+
+    monkeypatch.setattr(comment_reader, "PROMPT_VERSION", "следующая")
+    assert _read(model) == 1, "по новой версии — заново"
+
+
+def test_the_version_is_stored_with_the_answer(mart):
+    """Иначе неизвестно, по каким правилам получен лежащий ответ."""
+    _read(_Model())
+
+    with analytics_session() as conn:
+        stored = conn.execute(
+            "SELECT prompt_version FROM fact_comment_read WHERE entity_id = 1"
+        ).fetchone()[0]
+    assert stored == comment_reader.PROMPT_VERSION

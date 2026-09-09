@@ -71,6 +71,18 @@ BATCH = 120
 # Вся история карточки удорожает запрос и ответ не улучшает.
 NOTES = 4
 
+# Версия промпта. Поднимается КАЖДЫЙ раз, когда правила чтения меняются:
+# карточка, прочитанная по старым правилам, иначе осталась бы с прежним
+# ответом навсегда — отпечаток её записей не меняется от того, что мы стали
+# читать иначе. Поднятая версия сама ставит все карточки в очередь, и
+# перечитываются они тем же кругом, а не разом.
+#
+# 3: ограничение отделено от отказа («есть свой агент, НО показывать можем»
+#    считалось отказом), состояние — от обещания («в рекламу»).
+# 2: прошедшее время не обещание, торг не отказ, записи-пустышки пусты.
+# 1: первая редакция, написана до чтения живых записей.
+PROMPT_VERSION = "3"
+
 PROMPT = """Ты разбираешь записи риелтора в карточке сделки и достаёшь из них факты.
 
 Верни ТОЛЬКО JSON без пояснений, с полями:
@@ -95,6 +107,11 @@ PROMPT = """Ты разбираешь записи риелтора в карт�
 15.06», «провели фотосессию» — это уже сделано, и дата в них означает день
 события, а не срок. Такое идёт в ready, а promised_at остаётся null.
 
+Состояние — тоже не обещание. «В рекламе», «в рекламу», «работаю с ним»,
+«в работе» описывают положение дел, а не намеченное действие. Обещание
+всегда содержит глагол того, что риелтор СДЕЛАЕТ: позвонить, съездить,
+подготовить, согласовать.
+
 Даты приводи к календарю. Тебе дана дата записи и сегодняшняя дата. «В
 пятницу» — ближайшая пятница ПОСЛЕ даты записи. «Середина августа» —
 15 августа того года, в котором запись. «В конце осени» — 30 ноября. Год
@@ -104,10 +121,25 @@ promised_at и wait_until — разное. Первое: риелтор обя�
 этому дню. Второе: договорились ЖДАТЬ до этого дня, и молчать до него
 правильно. «Созвонимся в конце осени» — это wait_until, не обещание.
 
-refused — клиент отказался РАБОТАТЬ: свой риелтор, не хочет договор, не
-планирует продавать, отказался от эксклюзива. Не ставь refused, если клиент
-думает, не отвечает или торгуется: «не хотят опускать цену», «больше 2% не
-платит» — это позиция в переговорах, её место в terms.
+refused — клиент не хочет, чтобы агентство занималось объектом ДАЛЬШЕ: не
+планирует продавать, снял с продажи, отказался от эксклюзива, не хочет
+договор.
+
+ОГРАНИЧЕНИЕ — НЕ ОТКАЗ. «Есть свой агент, но показывать можем приводить»,
+«рекламирует другое агентство, но взаимодействуем напрямую», «показ только
+через представителя», «просмотр только с покупателем» — работа идёт, просто
+на своих условиях. Это не refused; способ работы опиши в ready.
+
+Читай фразу до конца. Половина записей устроена как «нет, НО да»: первая
+половина звучит отказом, а вторая говорит, что сотрудничество есть.
+Решает вторая.
+
+Торг — тоже не отказ: «не хотят опускать цену», «больше 2% не платит» —
+позиция в переговорах, её место в terms.
+
+Одно и то же не повторяй в двух полях. terms — только про деньги и цифры:
+комиссия, цена, задаток, метраж. «Принят задаток» как факт работы идёт в
+ready, а «задаток 2 млн» — в terms.
 
 Пустое поле — пустая строка, отсутствующая дата — null. Не выдумывай
 ничего, чего нет в тексте: пустой ответ полезнее придуманного. Записи вида
@@ -134,7 +166,17 @@ refused — клиент отказался РАБОТАТЬ: свой риел�
 эксклюзив не хочет категорически»
 {"promised": "", "promised_at": null, "wait_until": null, "refused": true,
  "refused_why": "не хочет эксклюзив", "ready": "показ состоялся 15.08",
- "terms": "не платит больше 2%"}"""
+ "terms": "не платит больше 2%"}
+
+Запись: «у неё есть свой агент, но в случае необходимости показа можем к ней
+приводить»
+{"promised": "", "promised_at": null, "wait_until": null, "refused": false,
+ "refused_why": "", "ready": "показ через собственника, у неё свой агент",
+ "terms": ""}
+
+Запись: «в рекламе, работаю с ним»
+{"promised": "", "promised_at": null, "wait_until": null, "refused": false,
+ "refused_why": "", "ready": "объект в рекламе", "terms": ""}"""
 
 
 def _hash(rows: list[dict[str, Any]]) -> str:
@@ -152,7 +194,8 @@ def _targets(conn, limit: int) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
         SELECT d.deal_id, d.title, COALESCE(u.name, '') AS broker,
-               r.source_hash AS known
+               r.source_hash AS known,
+               COALESCE(r.prompt_version, '') AS version
         FROM fact_deal d
         LEFT JOIN dim_user u ON u.user_id = d.assigned_by_id
         LEFT JOIN fact_comment_read r
@@ -178,7 +221,7 @@ def _targets(conn, limit: int) -> list[dict[str, Any]]:
         if not card["notes"]:
             continue
         card["hash"] = _hash(card["notes"])
-        if card["hash"] == card["known"]:
+        if card["hash"] == card["known"] and card["version"] == PROMPT_VERSION:
             continue
         out.append(card)
         if len(out) >= limit:
@@ -251,18 +294,20 @@ def read_cards(conn, llm, *, limit: int = BATCH, today: date | None = None) -> i
             """
             INSERT INTO fact_comment_read(entity_type, entity_id, source_hash,
                 promised, promised_at, wait_until, refused, refused_why,
-                ready, terms, read_at)
-            VALUES ('deal', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ready, terms, read_at, prompt_version)
+            VALUES ('deal', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(entity_type, entity_id) DO UPDATE SET
                 source_hash=excluded.source_hash, promised=excluded.promised,
                 promised_at=excluded.promised_at, wait_until=excluded.wait_until,
                 refused=excluded.refused, refused_why=excluded.refused_why,
-                ready=excluded.ready, terms=excluded.terms, read_at=excluded.read_at
+                ready=excluded.ready, terms=excluded.terms,
+                read_at=excluded.read_at, prompt_version=excluded.prompt_version
             """,
             (card["deal_id"], card["hash"], _text(data.get("promised")),
              _day(data.get("promised_at")), _day(data.get("wait_until")),
              1 if data.get("refused") else 0, _text(data.get("refused_why")),
-             _text(data.get("ready")), _text(data.get("terms")), now),
+             _text(data.get("ready")), _text(data.get("terms")), now,
+             PROMPT_VERSION),
         )
         done += 1
     logger.info("Прочитано карточек: %s", done)
