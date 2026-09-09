@@ -33,7 +33,6 @@ import argparse
 import csv
 import re
 import sys
-from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +46,10 @@ for _root in (Path(__file__).resolve().parent.parent, Path.cwd(), Path("/app")):
 else:  # pragma: no cover — на сервере каталог есть всегда
     raise SystemExit("не найден каталог src: запускайте из корня проекта")
 
-from schema import get_connection  # noqa: E402
+from config import get_settings  # noqa: E402
+from plans import plan_category_ids  # noqa: E402
+from scope import Scope, scoped_session  # noqa: E402
+from work import promises as overdue_promises  # noqa: E402
 
 _PHONE = re.compile(r"(?<!\d)(?:\+?\d[\s\-()]?){10,14}(?!\d)")
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
@@ -69,7 +71,7 @@ def hide(text: str) -> str:
     )
 
 
-def rows(conn, today: str):
+def rows(conn, late: set[int]):
     """Разбор рядом с записями, из которых он сделан."""
     found = conn.execute(
         """
@@ -83,12 +85,12 @@ def rows(conn, today: str):
                      - julianday(MAX(c.created_at))) AS quiet_days,
                ROUND(julianday('now')
                      - julianday(r.promised_at)) AS overdue_days
-        FROM fact_comment_read r
-        JOIN fact_deal d ON d.deal_id = r.entity_id
-        LEFT JOIN dim_user u ON u.user_id = d.assigned_by_id
+        FROM v_comment_read r
+        JOIN v_deal d ON d.deal_id = r.entity_id
+        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
         LEFT JOIN dim_stage s
                ON s.stage_id = d.stage_id AND s.category_id = d.category_id
-        LEFT JOIN fact_comment c
+        LEFT JOIN v_comment c
                ON c.entity_type = 'deal' AND c.entity_id = r.entity_id
               AND c.is_auto = 0
         WHERE r.entity_type = 'deal' AND d.is_closed = 0
@@ -110,27 +112,27 @@ def rows(conn, today: str):
                 (card["deal_id"],),
             )
         )
-        card["sign"] = _sign(card, today)
+        card["sign"] = _sign(card, late)
         out.append(card)
     return out
 
 
-def _sign(card: dict, today: str) -> str:
+def _sign(card: dict, late: set[int]) -> str:
     """Чем эта карточка интересна — одним словом.
 
     Порядок важен: просроченное обещание сильнее всего остального, ради
     него разбор и делался. Отказ идёт раньше готовности, потому что
     карточка с отказом на живой стадии — это ошибка воронки, а не работа.
 
-    Договорённое молчание вычитается — ровно как в work.promises(), откуда
-    советы берут ту же просрочку. Сперва здесь этой проверки не было, и
-    выгрузка насчитала девяносто две просрочки против тридцати семи в
-    сводке. Диагностический счёт, спорящий с рабочим, хуже, чем никакой:
-    по нему делают выводы, которых система не подтверждает.
+    Просрочку спрашиваем у work.promises() — у того же кода, из которого
+    её берут советы. Здесь была своя копия правила, и она дважды разошлась
+    с оригиналом: сперва не вычитала договорённое молчание, потом считала
+    обещанием пустую фразу с датой. Выгрузка показывала 92 против 37 в
+    сводке, и каждая починка была новым поводом разойтись снова.
+    Диагностический счёт, спорящий с рабочим, хуже, чем никакой: по нему
+    делают выводы, которых система не подтверждает.
     """
-    overdue = card["overdue_days"]
-    waiting = bool(card["wait_until"]) and card["wait_until"] >= today
-    if card["promised_at"] and overdue is not None and overdue > 0 and not waiting:
+    if card["deal_id"] in late:
         return "просрочено"
     if card["promised"]:
         return "обещано"
@@ -203,10 +205,17 @@ def main() -> None:
                         help="ограничить выгрузку (0 — без ограничения)")
     args = parser.parse_args()
 
-    conn = get_connection(readonly=True)
-    today = date.today().isoformat()
-    cards = rows(conn, today)
-    conn.close()
+    # Область видимости — вся компания: выгрузку смотрит тот, кто отвечает
+    # за портфель целиком. Соединение суженное, потому что просрочку даёт
+    # work.promises(), а она читает только представления.
+    with scoped_session(Scope.everything()) as conn:
+        # Те же воронки, что у дайджеста. None здесь означало бы не «все»,
+        # а «несущие план», и продавцы выпали бы целиком.
+        funnels = [int(get_settings().sellers_category_id),
+                   *plan_category_ids()]
+        late = {int(row["deal_id"])
+                for row in overdue_promises(conn, funnels)}
+        cards = rows(conn, late)
     summary(cards)
 
     chosen = [c for c in cards if args.only in ("all", c["sign"])]

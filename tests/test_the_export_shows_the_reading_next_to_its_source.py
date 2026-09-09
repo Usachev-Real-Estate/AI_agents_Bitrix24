@@ -94,29 +94,30 @@ def mart(analytics_db):
 
 
 # ── Признак карточки ───────────────────────────────────────────────────
-def test_the_card_is_named_by_the_strongest_thing_in_it(mart, export):
-    """Просроченное обещание сильнее всего остального — ради него всё и делалось."""
-    both = {"promised": "Позвонить", "promised_at": _day(-3),
+def test_the_card_is_named_by_the_strongest_thing_in_it(export):
+    """Просроченное обещание сильнее всего остального: ради него всё и делалось."""
+    both = {"deal_id": 1, "promised": "Позвонить", "promised_at": _day(-3),
             "ready": "в рекламе", "terms": "2%", "refused": 1,
-            "refused_why": "свой агент", "wait_until": None,
-            "overdue_days": 3.0}
-    assert export._sign(both, _day(0)) == "просрочено"
+            "refused_why": "свой агент", "wait_until": None}
 
-    # Обещание есть, срок не наступил — карточка ждёт, а не просрочена.
-    waiting = dict(both, promised_at=_day(+3), overdue_days=-3.0,
-                   refused=0)
-    assert export._sign(waiting, _day(0)) == "обещано"
-
-    assert export._sign({"promised": "", "promised_at": None, "refused": 1,
-                         "wait_until": None, "ready": "в рекламе",
-                         "terms": "", "overdue_days": None},
-                        _day(0)) == "отказ"
+    assert export._sign(both, {1}) == "просрочено"
+    # Та же карточка, но советы её просроченной не считают — значит и здесь
+    # она не просрочена: правило одно, и живёт оно в work.promises().
+    assert export._sign(both, set()) == "обещано"
+    assert export._sign(dict(both, promised=""), set()) == "отказ"
 
 
 def test_an_empty_card_says_so(export):
-    empty = {"promised": "", "promised_at": None, "wait_until": None,
-             "refused": 0, "ready": "", "terms": "", "overdue_days": None}
-    assert export._sign(empty, _day(0)) == "пусто"
+    empty = {"deal_id": 1, "promised": "", "promised_at": None,
+             "wait_until": None, "refused": 0, "ready": "", "terms": ""}
+    assert export._sign(empty, set()) == "пусто"
+
+
+def test_a_promise_without_a_date_is_not_overdue(export):
+    """Обещание есть, срока нет — спрашивать не с чего."""
+    card = {"deal_id": 1, "promised": "Перезвонить позднее", "promised_at": None,
+            "wait_until": None, "refused": 0, "ready": "", "terms": ""}
+    assert export._sign(card, set()) == "обещано"
 
 
 # ── Сводка ─────────────────────────────────────────────────────────────
@@ -183,24 +184,6 @@ def test_the_phone_is_hidden_but_the_meaning_is_not(mart, export, tmp_path):
 
     assert "89156542609" not in notes["5"]
     assert "представитель Влад" in notes["5"]
-
-
-def test_an_agreed_silence_cancels_the_overdue(export):
-    """Договорились ждать — обещание, данное раньше, этим и отменено.
-
-    Ровно так считает work.promises(), откуда советы берут просрочку. Пока
-    этой проверки здесь не было, выгрузка насчитывала девяносто две
-    просрочки против тридцати семи в сводке — и число из диагностики
-    спорило с числом, по которому работают.
-    """
-    card = {"promised": "Позвонить", "promised_at": _day(-10),
-            "overdue_days": 10.0, "wait_until": _day(+20),
-            "refused": 0, "ready": "", "terms": ""}
-
-    assert export._sign(card, _day(0)) == "обещано"
-
-    # Срок ожидания истёк — обещание снова спрашивается.
-    assert export._sign(dict(card, wait_until=_day(-1)), _day(0)) == "просрочено"
 
 
 def test_a_closed_card_is_not_in_the_export(mart, export, tmp_path):
