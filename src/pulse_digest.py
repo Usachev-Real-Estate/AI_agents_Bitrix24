@@ -240,6 +240,7 @@ def _work_lines(work_data: dict[str, Any] | None) -> list[str]:
             f"{stage['nothing']} из {stage['cards']}"
         )
     lines += _promise_lines(work_data)
+    lines += _refusal_lines(work_data)
     lines += _meeting_lines(work_data)
     lines += _pickup_lines(work_data)
     return lines
@@ -281,6 +282,33 @@ def _day(stamp: str | None) -> str:
     if len(text) != 10:
         return text
     return f"{text[8:10]}.{text[5:7]}"
+
+
+def _refusal_lines(work_data: dict[str, Any]) -> list[str]:
+    """Карточки, где клиент отказал, а они числятся в работе.
+
+    Отдельно от обещаний: обещание — это невыполненная работа, а отказ —
+    работа, которой нет вовсе. Первое разбирают с брокером, второе чинят в
+    воронке, и смешивать их в одну строку значит просить о двух разных
+    вещах сразу.
+    """
+    rows = work_data.get("refusals") or []
+    if not rows:
+        return []
+    rows = sorted(rows, key=lambda row: -(row.get("days_in_stage") or 0))
+    lines = [f"\n🚫 Клиент отказал, а карточка в работе: {len(rows)} "
+             f"{wording.form(len(rows), 'карточка', 'карточки', 'карточек')}"]
+    for row in rows[:3]:
+        days = int(row.get("days_in_stage") or 0)
+        lines.append(
+            f"  · {wording.name(row['title'], 34)} — «{row['refused_why'][:50]}», "
+            f"стадия «{row['stage_name']}»"
+            + (f", {days} дн" if days else "")
+            + f" ({row['broker']})"
+        )
+    if len(rows) > 3:
+        lines.append(f"  · и ещё {len(rows) - 3} — весь список в дашборде")
+    return lines
 
 
 def _meeting_lines(work_data: dict[str, Any]) -> list[str]:
@@ -796,13 +824,20 @@ def build(period_code: str, url: str, now: datetime | None = None) -> list[dict[
         promises = work.promises(conn, [
             int(settings.sellers_category_id), *plans.plan_category_ids(),
         ])
+        # Отказы — по тем же двум воронкам и по той же причине: карточка,
+        # где клиент сказал «нет», одинаково лишняя в пайплайне продавцов
+        # и покупателей.
+        refusals = work.refused_in_work(conn, [
+            int(settings.sellers_category_id), *plans.plan_category_ids(),
+        ])
 
     # Советы отбираются ПОСЛЕ закрытия соединения с витриной: отбор ходит в
     # свою базу памяти, и держать оба соединения открытыми ради этого
     # незачем. Кандидатов правила отдают всех подряд — порог накладывает
     # advice.select(), которому значение нужно и для тех, о ком речь уже
     # шла: иначе проверить «стало лучше» было бы не с чем.
-    selection = _advice_for(company, company_events, sellers_work, promises)
+    selection = _advice_for(company, company_events, sellers_work,
+                            promises, refusals)
 
     chat_id = int(settings.pulse_events_chat_id or 0)
     if not chat_id:
@@ -963,6 +998,7 @@ def _advice_for(
     events: dict[str, Any],
     sellers_work: dict[str, Any],
     promises: list[dict[str, Any]] | None = None,
+    refusals: list[dict[str, Any]] | None = None,
 ):
     """Кандидаты, отобранные по памяти. Ошибка памяти сводку не роняет.
 
@@ -973,7 +1009,7 @@ def _advice_for(
     """
     candidates = advice_rules.collect(
         pulse=company, events=events, sellers_work=sellers_work,
-        promises=promises,
+        promises=promises, refusals=refusals,
     )
     candidates = advice.only_named(candidates)
     try:
