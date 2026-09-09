@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from langchain_openai import ChatOpenAI
 
 from config import Settings
@@ -62,6 +64,76 @@ def make_llm(
     elif service_tier:
         kwargs["service_tier"] = service_tier
     return ChatOpenAI(**kwargs)
+
+
+def _coerce_int(value: Any) -> int:
+    """Число из чего угодно, 0 при неудаче."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+USAGE_KEYS = (
+    "input_tokens", "output_tokens", "cached_tokens", "reasoning_tokens",
+    # Токены, записанные в кэш. У RouterAI своя, самая дешёвая ставка, и
+    # без этого счётчика она не к чему было бы применить.
+    "cache_write_tokens",
+)
+
+
+def extract_usage(response: Any) -> dict[str, int]:
+    """Токены одного ответа: {input_tokens, output_tokens, cached_tokens}.
+
+    Провайдеры отдают счётчики по-разному, поэтому читаем и стандартное поле
+    LangChain (usage_metadata), и сырой token_usage из response_metadata.
+    Ничего не нашли — возвращаем нули: телеметрия не повод ронять разбор.
+    """
+    usage = {key: 0 for key in USAGE_KEYS}
+    meta = getattr(response, "usage_metadata", None)
+    if isinstance(meta, dict):
+        usage["input_tokens"] = _coerce_int(meta.get("input_tokens"))
+        usage["output_tokens"] = _coerce_int(meta.get("output_tokens"))
+        details = meta.get("input_token_details")
+        if isinstance(details, dict):
+            usage["cached_tokens"] = _coerce_int(details.get("cache_read"))
+            usage["cache_write_tokens"] = _coerce_int(
+                details.get("cache_creation"),
+            )
+        out_details = meta.get("output_token_details")
+        if isinstance(out_details, dict):
+            usage["reasoning_tokens"] = _coerce_int(out_details.get("reasoning"))
+    raw = getattr(response, "response_metadata", None)
+    if isinstance(raw, dict):
+        token_usage = raw.get("token_usage")
+        if isinstance(token_usage, dict):
+            if not usage["input_tokens"]:
+                usage["input_tokens"] = _coerce_int(token_usage.get("prompt_tokens"))
+            if not usage["output_tokens"]:
+                usage["output_tokens"] = _coerce_int(
+                    token_usage.get("completion_tokens"),
+                )
+            if not usage["cached_tokens"]:
+                # DeepSeek называет это prompt_cache_hit_tokens, OpenAI прячет
+                # в prompt_tokens_details.cached_tokens.
+                details = token_usage.get("prompt_tokens_details")
+                if isinstance(details, dict):
+                    usage["cached_tokens"] = _coerce_int(
+                        details.get("cached_tokens"),
+                    )
+                if not usage["cached_tokens"]:
+                    usage["cached_tokens"] = _coerce_int(
+                        token_usage.get("prompt_cache_hit_tokens"),
+                    )
+            if not usage["reasoning_tokens"]:
+                # Самая дорогая строка тарифа RouterAI — её нужно видеть
+                # отдельно, а не в общей сумме выходных токенов.
+                out_details = token_usage.get("completion_tokens_details")
+                if isinstance(out_details, dict):
+                    usage["reasoning_tokens"] = _coerce_int(
+                        out_details.get("reasoning_tokens"),
+                    )
+    return usage
 
 
 def estimate_cost(usage: dict[str, int], settings: Settings) -> float:

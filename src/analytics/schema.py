@@ -222,6 +222,12 @@ _DDL: tuple[str, ...] = (
         ready        TEXT    NOT NULL DEFAULT '',
         terms        TEXT    NOT NULL DEFAULT '',
         read_at      TEXT    NOT NULL,
+        -- Версия промпта, по которому читали. Промпт правится по мере того,
+        -- как в живых записях находятся жанры, которых он не предусмотрел, —
+        -- и без этой колонки прочитанное по старой версии осталось бы
+        -- навсегда: отпечаток записей не меняется от того, что мы стали
+        -- читать иначе. Поднятая версия сама ставит карточки в очередь.
+        prompt_version TEXT  NOT NULL DEFAULT '',
         PRIMARY KEY (entity_type, entity_id)
     );
     """,
@@ -400,6 +406,15 @@ def analytics_session(
         conn.close()
 
 
+def _migrate_comment_read_prompt(conn: sqlite3.Connection) -> None:
+    """Добавить версию промпта витринам, созданным до её появления."""
+    try:
+        conn.execute("ALTER TABLE fact_comment_read "
+                     "ADD COLUMN prompt_version TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+
+
 def _migrate_dim_user_last_name(conn: sqlite3.Connection) -> None:
     """Добавить last_name витринам, созданным до появления колонки.
 
@@ -419,6 +434,7 @@ def init_analytics_db(db_path: str | Path | None = None) -> None:
         for statement in _DDL:
             conn.execute(statement)
         _migrate_dim_user_last_name(conn)
+        _migrate_comment_read_prompt(conn)
         conn.execute(
             "INSERT INTO analytics_meta(key, value) VALUES('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
