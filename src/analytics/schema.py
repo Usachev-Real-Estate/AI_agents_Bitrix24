@@ -26,7 +26,7 @@ DEFAULT_DB_PATH = Path("data/analytics.db")
 # запас, что и основная база проекта.
 BUSY_TIMEOUT_MS = 10_000
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Семантика стадии. Без неё нельзя посчитать ни конверсию, ни win rate:
 # «выиграно» и «проиграно» надо отличать от «в работе», а по одному только
@@ -199,6 +199,33 @@ _DDL: tuple[str, ...] = (
     );
     """,
     """
+    -- Что модель вычитала из комментариев карточки.
+    --
+    -- Хранится отдельно от самих комментариев и рядом с отпечатком того, по
+    -- чему читали: перечитывать карточку, где ничего не изменилось, значит
+    -- платить за один и тот же ответ каждый день. Отпечаток меняется вместе
+    -- с последней записью, и только тогда карточка идёт к модели снова.
+    CREATE TABLE IF NOT EXISTS fact_comment_read (
+        entity_type  TEXT    NOT NULL DEFAULT 'deal',
+        entity_id    INTEGER NOT NULL,
+        source_hash  TEXT    NOT NULL,
+        -- Что брокер обещал сделать и к какому сроку. Дата в прошлом плюс
+        -- отсутствие новой записи — самый надёжный сигнал из всех: он
+        -- конкретен, проверяем и назван самим брокером.
+        promised     TEXT    NOT NULL DEFAULT '',
+        promised_at  TEXT,
+        -- До какой даты молчание законно: «созвонимся в конце осени».
+        -- Без этого поля отчёт ругает за правильную работу.
+        wait_until   TEXT,
+        refused      INTEGER NOT NULL DEFAULT 0,
+        refused_why  TEXT    NOT NULL DEFAULT '',
+        ready        TEXT    NOT NULL DEFAULT '',
+        terms        TEXT    NOT NULL DEFAULT '',
+        read_at      TEXT    NOT NULL,
+        PRIMARY KEY (entity_type, entity_id)
+    );
+    """,
+    """
     CREATE TABLE IF NOT EXISTS plan_period (
         period_code TEXT PRIMARY KEY,
         starts_at   TEXT NOT NULL,
@@ -286,6 +313,8 @@ _DDL: tuple[str, ...] = (
     "ON fact_comment(entity_type, entity_id, created_at);",
     "CREATE INDEX IF NOT EXISTS idx_comment_created ON fact_comment(created_at);",
     "CREATE INDEX IF NOT EXISTS idx_comment_sync_at ON comment_sync(synced_at);",
+    "CREATE INDEX IF NOT EXISTS idx_comment_read_promise "
+    "ON fact_comment_read(promised_at);",
     "CREATE INDEX IF NOT EXISTS idx_lead_modify ON fact_lead(date_modify);",
     "CREATE INDEX IF NOT EXISTS idx_stage_event_entity "
     "ON fact_stage_event(entity_type, entity_id);",

@@ -183,6 +183,9 @@ def card_work(
             (row for row in rows if row["state"] == "nothing"),
             key=lambda row: -row["age_days"],
         )[:TOP],
+        # Обещания лежат рядом с работой: это её же след, только
+        # записанный словами, а не действием.
+        "promises": promises(conn, categories, department_id=department_id),
         "pickup": _pickup(conn, department_id),
         "shared_contacts": _shared_contacts(conn, categories),
     }
@@ -571,6 +574,61 @@ def _pickup(conn, department_id: int | None) -> list[dict[str, Any]]:
                          and row["sells"])
         people.append(row)
     return sorted(people, key=lambda row: -row["missed_share"])
+
+
+def promises(
+    conn,
+    categories: Sequence[int] | None = None,
+    *,
+    department_id: int | None = None,
+    today: str | None = None,
+) -> list[dict[str, Any]]:
+    """Обещания брокеров, срок которых прошёл, а новой записи нет.
+
+    Самый надёжный сигнал из всех, что есть в витрине: он назван самим
+    брокером, конкретен и проверяем. «Позвонить в пятницу» — пятница
+    прошла, записи нет, вопрос задан.
+
+    Договорённое молчание вычитается. «Созвонимся в конце осени» — это не
+    просрочка, а план: карточка молчит сорок дней, и так и надо. Без этой
+    проверки отчёт ругал бы за правильную работу, а один такой упрёк
+    обесценивает соседние верные строки.
+
+    Обещание, после которого появилась новая запись, снимается само:
+    отпечаток изменился, карточку прочитали заново, и обещание там уже
+    другое. Сравнивать даты записей здесь не нужно.
+    """
+    where, params = plans.category_filter("d", categories)
+    params.update({"dept": department_id, "today": today or _today()})
+    return _rows(
+        conn,
+        f"""
+        SELECT d.deal_id, d.title, d.stage_id,
+               COALESCE(s.name, d.stage_id) AS stage_name,
+               COALESCE(u.name, '') AS broker,
+               u.user_id AS user_id,
+               r.promised, r.promised_at, r.terms, r.ready,
+               (julianday(:today) - julianday(r.promised_at)) AS overdue_days
+        FROM v_deal d
+        JOIN v_comment_read r ON r.entity_id = d.deal_id
+        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
+        LEFT JOIN dim_stage s
+               ON s.stage_id = d.stage_id AND s.category_id = d.category_id
+        WHERE d.is_closed = 0 AND {where}
+          AND (:dept IS NULL OR u.department_id = :dept)
+          AND r.promised_at IS NOT NULL AND r.promised_at < :today
+          AND r.promised <> ''
+          -- Договорились ждать — значит молчание законно, и обещание,
+          -- данное до этой договорённости, ею же и отменено.
+          AND (r.wait_until IS NULL OR r.wait_until < :today)
+        ORDER BY overdue_days DESC
+        """,
+        params,
+    )
+
+
+def _today() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
 
 
 def _shared_contacts(conn, categories: Sequence[int] | None) -> int:

@@ -53,12 +53,14 @@ def collect(
     work: dict[str, Any] | None = None,
     events: dict[str, Any] | None = None,
     sellers_work: dict[str, Any] | None = None,
+    promises: list[dict[str, Any]] | None = None,
 ) -> list[Advice]:
     """Все кандидаты от всех правил. Порядок здесь ни на что не влияет."""
     out: list[Advice] = []
     out += breakeven_gap(pulse)
     out += behind_pace(pulse)
     out += broker_cold(sellers_work or work)
+    out += promise_overdue(promises)
     out += went_backwards(events)
     out += left_from_late_stage(events)
     return out
@@ -259,6 +261,73 @@ def _cold_action(row: dict[str, Any]) -> str:
         return ("Вернитесь к тем, где разговор был давно — "
                 f"их {silent}")
     return "Разберите холодные карточки вместе с ним"
+
+
+def promise_overdue(rows: list[dict[str, Any]] | None) -> list[Advice]:
+    """Брокер написал, что сделает, и не сделал.
+
+    Самый сильный совет из всех, потому что не мы решили, что должно было
+    произойти, — так написал сам брокер. Спорить с этим нельзя, и разговор
+    получается короткий: «ты написал «позвонить в пятницу», пятница прошла».
+
+    Группируется по человеку, а не по карточке. На живых данных четыре
+    просроченных обещания оказались у одного брокера, все за один день и
+    все по одному дому: это не четыре забытые карточки, а один брошенный
+    день работы, и разговор о нём один.
+    """
+    if not rows:
+        return []
+    by_user: dict[Any, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_user.setdefault(row["user_id"], []).append(row)
+
+    out = []
+    for user_id, items in by_user.items():
+        items.sort(key=lambda item: -(item["overdue_days"] or 0))
+        oldest = items[0]
+        name = oldest["broker"] or f"id {user_id}"
+        days = int(oldest["overdue_days"] or 0)
+        out.append(Advice(
+            rule="promise_overdue",
+            subject=f"user:{user_id}",
+            slot=SLOT_ACUTE,
+            who=name,
+            value=len(items),
+            # Вес — число обещаний, а не давность: пять просроченных дел
+            # важнее одного очень старого, и разговор о них один.
+            weight=len(items) * 100 + days,
+            title=(f"{name}: {len(items)} "
+                   f"{wording.form(len(items), 'обещание', 'обещания', 'обещаний')} "
+                   f"без выполнения"),
+            action=_promise_action(items),
+            proof=(f"дольше всех — {wording.name(oldest['title'], 34)}: "
+                   f"«{_text(oldest['promised'], 80)}», срок был "
+                   f"{_day(oldest['promised_at'])}, {days} дн назад"
+                   + (f"; {_text(oldest['terms'], 60)}" if oldest["terms"] else "")),
+            check="Скажу, если появится новая запись",
+            link="/deals",
+        ))
+    return out
+
+
+def _promise_action(items: list[dict[str, Any]]) -> str:
+    """Что сделать. При нескольких обещаниях называются первые три карточки."""
+    if len(items) == 1:
+        return f"Спросите про {wording.name(items[0]['title'], 40)} — срок прошёл"
+    names = ", ".join(wording.name(item["title"], 26) for item in items[:3])
+    tail = "" if len(items) <= 3 else f" и ещё {len(items) - 3}"
+    return f"Разберите вместе: {names}{tail}"
+
+
+def _text(value: Any, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+
+def _day(stamp: str | None) -> str:
+    """Дата по-человечески: 12.08 вместо 2026-08-12."""
+    text = (stamp or "").strip()[:10]
+    return f"{text[8:10]}.{text[5:7]}" if len(text) == 10 else text
 
 
 def went_backwards(events: dict[str, Any] | None) -> list[Advice]:

@@ -239,9 +239,48 @@ def _work_lines(work_data: dict[str, Any] | None) -> list[str]:
             f"  · чаще всего на стадии «{stage['name']}»: "
             f"{stage['nothing']} из {stage['cards']}"
         )
+    lines += _promise_lines(work_data)
     lines += _meeting_lines(work_data)
     lines += _pickup_lines(work_data)
     return lines
+
+
+def _promise_lines(work_data: dict[str, Any]) -> list[str]:
+    """Обещания, срок которых прошёл.
+
+    Отдельным блоком, а не внутри холодных карточек: холодная карточка —
+    это наш вывод из молчания, а просроченное обещание брокер написал сам.
+    Спорить с ним нельзя, и разговор о нём короче любого другого.
+    """
+    rows = work_data.get("promises") or []
+    if not rows:
+        return []
+    # Порядок задаётся здесь, а не наследуется от вызывающего: строка
+    # называет «дольше всех», и полагаться на чужую сортировку значит
+    # однажды напечатать не то под этой подписью.
+    rows = sorted(rows, key=lambda row: -(row.get("overdue_days") or 0))
+    lines = [f"\n📌 Обещали и не сделали: {len(rows)} "
+             f"{wording.form(len(rows), 'карточка', 'карточки', 'карточек')}"]
+    for row in rows[:3]:
+        lines.append(
+            f"  · {wording.name(row['title'], 38)} — «{row['promised'][:60]}», "
+            f"срок был {_day(row['promised_at'])} ({row['broker']})"
+        )
+    if len(rows) > 3:
+        lines.append(f"  · и ещё {len(rows) - 3} — весь список в дашборде")
+    return lines
+
+
+def _day(stamp: str | None) -> str:
+    """Дата по-человечески: 12.08 вместо 2026-08-12.
+
+    ISO нужен машине, а сводку читает человек с телефона, и год в ней
+    почти всегда сегодняшний.
+    """
+    text = (stamp or "").strip()[:10]
+    if len(text) != 10:
+        return text
+    return f"{text[8:10]}.{text[5:7]}"
 
 
 def _meeting_lines(work_data: dict[str, Any]) -> list[str]:
@@ -751,13 +790,19 @@ def build(period_code: str, url: str, now: datetime | None = None) -> list[dict[
         sellers_work = work.card_work(
             conn, [int(settings.sellers_category_id)],
         )
+        # Просроченные обещания — по обеим воронкам сразу: «позвонить в
+        # пятницу» одинаково не выполнено и у продавца, и у покупателя, а
+        # разговор с брокером всё равно один.
+        promises = work.promises(conn, [
+            int(settings.sellers_category_id), *plans.plan_category_ids(),
+        ])
 
     # Советы отбираются ПОСЛЕ закрытия соединения с витриной: отбор ходит в
     # свою базу памяти, и держать оба соединения открытыми ради этого
     # незачем. Кандидатов правила отдают всех подряд — порог накладывает
     # advice.select(), которому значение нужно и для тех, о ком речь уже
     # шла: иначе проверить «стало лучше» было бы не с чем.
-    selection = _advice_for(company, company_events, sellers_work)
+    selection = _advice_for(company, company_events, sellers_work, promises)
 
     chat_id = int(settings.pulse_events_chat_id or 0)
     if not chat_id:
@@ -917,6 +962,7 @@ def _advice_for(
     company: dict[str, Any],
     events: dict[str, Any],
     sellers_work: dict[str, Any],
+    promises: list[dict[str, Any]] | None = None,
 ):
     """Кандидаты, отобранные по памяти. Ошибка памяти сводку не роняет.
 
@@ -927,6 +973,7 @@ def _advice_for(
     """
     candidates = advice_rules.collect(
         pulse=company, events=events, sellers_work=sellers_work,
+        promises=promises,
     )
     candidates = advice.only_named(candidates)
     try:
