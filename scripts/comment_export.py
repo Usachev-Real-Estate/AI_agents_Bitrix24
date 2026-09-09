@@ -33,7 +33,9 @@ import argparse
 import csv
 import re
 import sys
+from datetime import date
 from pathlib import Path
+from typing import Any
 
 for _root in (Path(__file__).resolve().parent.parent, Path.cwd(), Path("/app")):
     _src = _root / "src"
@@ -51,7 +53,7 @@ _PHONE = re.compile(r"(?<!\d)(?:\+?\d[\s\-()]?){10,14}(?!\d)")
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
 
 COLUMNS = (
-    "deal_id", "broker", "stage", "title", "quiet_days", "sign",
+    "deal_id", "funnel", "broker", "stage", "title", "quiet_days", "sign",
     "promised", "promised_at", "overdue_days", "wait_until",
     "refused", "refused_why", "ready", "terms",
     "prompt_version", "read_at", "notes",
@@ -67,11 +69,12 @@ def hide(text: str) -> str:
     )
 
 
-def rows(conn):
+def rows(conn, today: str):
     """Разбор рядом с записями, из которых он сделан."""
     found = conn.execute(
         """
         SELECT r.entity_id AS deal_id, d.title,
+               d.category_id AS funnel,
                COALESCE(u.name, '') AS broker,
                COALESCE(s.name, d.stage_id) AS stage,
                r.promised, r.promised_at, r.wait_until, r.refused,
@@ -88,7 +91,7 @@ def rows(conn):
         LEFT JOIN fact_comment c
                ON c.entity_type = 'deal' AND c.entity_id = r.entity_id
               AND c.is_auto = 0
-        WHERE r.entity_type = 'deal'
+        WHERE r.entity_type = 'deal' AND d.is_closed = 0
         GROUP BY r.entity_id
         ORDER BY overdue_days DESC, quiet_days DESC
         """
@@ -107,20 +110,27 @@ def rows(conn):
                 (card["deal_id"],),
             )
         )
-        card["sign"] = _sign(card)
+        card["sign"] = _sign(card, today)
         out.append(card)
     return out
 
 
-def _sign(card: dict) -> str:
+def _sign(card: dict, today: str) -> str:
     """Чем эта карточка интересна — одним словом.
 
     Порядок важен: просроченное обещание сильнее всего остального, ради
     него разбор и делался. Отказ идёт раньше готовности, потому что
     карточка с отказом на живой стадии — это ошибка воронки, а не работа.
+
+    Договорённое молчание вычитается — ровно как в work.promises(), откуда
+    советы берут ту же просрочку. Сперва здесь этой проверки не было, и
+    выгрузка насчитала девяносто две просрочки против тридцати семи в
+    сводке. Диагностический счёт, спорящий с рабочим, хуже, чем никакой:
+    по нему делают выводы, которых система не подтверждает.
     """
     overdue = card["overdue_days"]
-    if card["promised_at"] and overdue is not None and overdue > 0:
+    waiting = bool(card["wait_until"]) and card["wait_until"] >= today
+    if card["promised_at"] and overdue is not None and overdue > 0 and not waiting:
         return "просрочено"
     if card["promised"]:
         return "обещано"
@@ -158,6 +168,16 @@ def summary(cards: list[dict]) -> None:
 
     late = [c for c in cards if c["sign"] == "просрочено"]
     if late:
+        # Разрез по воронкам не украшение: советы смотрят только на
+        # продавцов и воронки с планом, и без этой строки разница между
+        # выгрузкой и сводкой выглядит расхождением, а не настройкой.
+        by_funnel: dict[Any, int] = {}
+        for card in late:
+            by_funnel[card["funnel"]] = by_funnel.get(card["funnel"], 0) + 1
+        parts = ", ".join(f"воронка {key}: {value}"
+                          for key, value in sorted(by_funnel.items()))
+        print(f"\n## Просрочено по воронкам\n   {parts}")
+
         print(f"\n## Просрочено по брокерам ({len(late)} карточек)")
         by_broker: dict[str, int] = {}
         for card in late:
@@ -184,7 +204,8 @@ def main() -> None:
     args = parser.parse_args()
 
     conn = get_connection(readonly=True)
-    cards = rows(conn)
+    today = date.today().isoformat()
+    cards = rows(conn, today)
     conn.close()
     summary(cards)
 
