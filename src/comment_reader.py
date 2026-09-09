@@ -44,6 +44,8 @@ import json
 import logging
 import re
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -56,7 +58,9 @@ for _path in (_SRC, _SRC / "analytics"):
 from langchain_core.messages import HumanMessage, SystemMessage  # noqa: E402
 
 from config import get_settings, setup_logging  # noqa: E402
-from llm import make_llm  # noqa: E402
+from llm import (  # noqa: E402
+    USAGE_KEYS, estimate_cost, extract_usage, make_llm,
+)
 from schema import analytics_session, init_analytics_db  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -65,6 +69,17 @@ logger = logging.getLogger(__name__)
 # растянется на несколько запусков — и пусть: разбор не срочный, а тысяча
 # обращений подряд стоит денег и времени сразу.
 BATCH = 120
+
+# Сколько карточек спрашивать одновременно. Ждём мы здесь не своего
+# процессора, а чужой сети: карточка отвечает за полминуты, и тысяча
+# карточек подряд — это десять часов, то есть первый проход не влезает ни
+# в какую ночь ни при какой модели. Карточки друг от друга не зависят,
+# поэтому лечится это не выбором модели, а тем, чтобы не ждать по одной.
+#
+# Четыре, а не сорок: у провайдера есть предел частоты, и упереться в него
+# значит купить отказы вместо скорости. Точное число подбирается замером,
+# для того прогон и печатает секунды на карточку.
+WORKERS = 4
 
 # Сколько последних записей давать модели. Четырёх хватает: обещание живёт
 # в последней, а предыдущие нужны, только чтобы понять, повторяется ли оно.
@@ -271,47 +286,130 @@ def _text(value: Any, limit: int = 300) -> str:
     return " ".join(str(value or "").split())[:limit]
 
 
-def read_cards(conn, llm, *, limit: int = BATCH, today: date | None = None) -> int:
-    """Прочитать очередную партию карточек. Возвращает число прочитанных."""
+def _clients(settings: Any) -> tuple[Any, Any | None]:
+    """Основной клиент и запасной — ровно как у аудитора.
+
+    Читатель звал make_llm(settings) без аргументов, и это тихо стоило
+    вдвое. Тариф и закреплённый провайдер приходят в make_llm аргументами,
+    а не из настроек, поэтому голый вызов означал «обычная цена, любой
+    провайдер» — при том что в .env стоит flex, и аудитор им пользуется.
+
+    Провайдер важнее тарифа. Неявный кэш живёт У ПРОВАЙДЕРА, а у читателя
+    постоянная часть запроса — это ВЕСЬ промпт, переменная же — четыре
+    коротких записи. Ни у одной другой нашей задачи доля прогретого
+    префикса не бывает так высока, и ни одна другая так не проигрывает от
+    того, что RouterAI раскидывает запросы по провайдерам.
+
+    Запасной клиент — тот же провайдер, обычный тариф: flex обещает при
+    нехватке мощностей вернуть ошибку, и половина цены куплена риском не
+    получить ответ. Аудитор платит этот риск повтором; читателю достаётся
+    тот же приём.
+    """
+    tier = (settings.llm_service_tier or "").strip()
+    pinned = (settings.llm_provider or "").strip()
+    model = make_llm(settings, service_tier=tier, provider=pinned)
+    spare = make_llm(settings, provider=pinned) if tier else None
+    return model, spare
+
+
+def _ask(llm: Any, spare: Any | None, card: dict[str, Any], today: date) -> Any:
+    """Спросить про одну карточку: дешёвым клиентом, при отказе — обычным."""
+    messages = [SystemMessage(content=PROMPT),
+                HumanMessage(content=_payload(card, today))]
+    try:
+        return llm.invoke(messages)
+    except Exception as error:  # noqa: BLE001 — отказ flex неотличим от аварии
+        if spare is None:
+            raise
+        logger.info("Карточка %s: повтор в обычном режиме (%s)",
+                    card["deal_id"], error)
+        return spare.invoke(messages)
+
+
+def read_cards(conn, llm, *, limit: int = BATCH, today: date | None = None,
+               spare: Any | None = None, workers: int = WORKERS,
+               usage: dict[str, int] | None = None) -> int:
+    """Прочитать очередную партию карточек. Возвращает число прочитанных.
+
+    Спрашиваем несколько карточек сразу, а пишем по одной и здесь: очередь
+    карточек собрана заранее и в базу ходит только этот поток, так что
+    соединение SQLite остаётся там же, где было создано.
+    """
     now = datetime.now(timezone.utc).isoformat()
     today = today or datetime.now(timezone.utc).date()
+    cards = _targets(conn, limit)
     done = 0
-    for card in _targets(conn, limit):
-        try:
-            response = llm.invoke([
-                SystemMessage(content=PROMPT),
-                HumanMessage(content=_payload(card, today)),
-            ])
-        except Exception as error:
-            logger.warning("Карточка %s не прочитана: %s", card["deal_id"], error)
-            continue
-        content = getattr(response, "content", response)
-        data = _parse(content if isinstance(content, str) else str(content))
-        if data is None:
-            logger.warning("Карточка %s: ответ не разобран", card["deal_id"])
-            continue
-        conn.execute(
-            """
-            INSERT INTO fact_comment_read(entity_type, entity_id, source_hash,
-                promised, promised_at, wait_until, refused, refused_why,
-                ready, terms, read_at, prompt_version)
-            VALUES ('deal', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(entity_type, entity_id) DO UPDATE SET
-                source_hash=excluded.source_hash, promised=excluded.promised,
-                promised_at=excluded.promised_at, wait_until=excluded.wait_until,
-                refused=excluded.refused, refused_why=excluded.refused_why,
-                ready=excluded.ready, terms=excluded.terms,
-                read_at=excluded.read_at, prompt_version=excluded.prompt_version
-            """,
-            (card["deal_id"], card["hash"], _text(data.get("promised")),
-             _day(data.get("promised_at")), _day(data.get("wait_until")),
-             1 if data.get("refused") else 0, _text(data.get("refused_why")),
-             _text(data.get("ready")), _text(data.get("terms")), now,
-             PROMPT_VERSION),
-        )
-        done += 1
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        pending = {pool.submit(_ask, llm, spare, card, today): card
+                   for card in cards}
+        for future in as_completed(pending):
+            card = pending[future]
+            try:
+                response = future.result()
+            except Exception as error:  # noqa: BLE001 — одна карточка не роняет партию
+                logger.warning("Карточка %s не прочитана: %s",
+                               card["deal_id"], error)
+                continue
+            # Токены считаем до разбора ответа: за нечитаемый ответ уже
+            # заплачено, и прятать его из счёта значит занижать цену
+            # прогона ровно на самых неудачных карточках.
+            if usage is not None:
+                for key, value in extract_usage(response).items():
+                    usage[key] = usage.get(key, 0) + value
+            content = getattr(response, "content", response)
+            data = _parse(content if isinstance(content, str) else str(content))
+            if data is None:
+                logger.warning("Карточка %s: ответ не разобран", card["deal_id"])
+                continue
+            conn.execute(
+                """
+                INSERT INTO fact_comment_read(entity_type, entity_id, source_hash,
+                    promised, promised_at, wait_until, refused, refused_why,
+                    ready, terms, read_at, prompt_version)
+                VALUES ('deal', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                    source_hash=excluded.source_hash, promised=excluded.promised,
+                    promised_at=excluded.promised_at, wait_until=excluded.wait_until,
+                    refused=excluded.refused, refused_why=excluded.refused_why,
+                    ready=excluded.ready, terms=excluded.terms,
+                    read_at=excluded.read_at, prompt_version=excluded.prompt_version
+                """,
+                (card["deal_id"], card["hash"], _text(data.get("promised")),
+                 _day(data.get("promised_at")), _day(data.get("wait_until")),
+                 1 if data.get("refused") else 0, _text(data.get("refused_why")),
+                 _text(data.get("ready")), _text(data.get("terms")), now,
+                 PROMPT_VERSION),
+            )
+            done += 1
     logger.info("Прочитано карточек: %s", done)
     return done
+
+
+def _report(done: int, usage: dict[str, int], settings: Any,
+            seconds: float) -> None:
+    """Чем кончился прогон: время, рубли, куда ушли и то и другое.
+
+    Без этой строки вопрос «дорого ли и долго ли читать тысячу карточек»
+    решается голосованием. С ней он решается делением: секунды на карточку
+    говорят, хватит ли ночи, доля размышлений в выходе — сколько мы платим
+    за раздумья над задачей, где думать не над чем, доля кэша во входе —
+    попадаем ли мы в прогретый префикс. Три числа, по которым видно, что
+    менять: настройки, промпт или всё-таки модель.
+    """
+    cost = estimate_cost(usage, settings)
+    logger.info(
+        "Чтение: %d карточек за %.0f с (%.1f с/карточка), %.2f ₽ "
+        "(%.3f ₽/карточка) · вход %d (%d из кэша, %.0f%%) · "
+        "выход %d (%d размышления, %.0f%%)",
+        done, seconds, seconds / done if done else 0.0,
+        cost, cost / done if done else 0.0,
+        usage["input_tokens"], usage["cached_tokens"],
+        100.0 * usage["cached_tokens"] / usage["input_tokens"]
+        if usage["input_tokens"] else 0.0,
+        usage["output_tokens"], usage["reasoning_tokens"],
+        100.0 * usage["reasoning_tokens"] / usage["output_tokens"]
+        if usage["output_tokens"] else 0.0,
+    )
 
 
 def _show(conn, limit: int) -> None:
@@ -368,6 +466,8 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=BATCH)
     parser.add_argument("--dry-run", action="store_true",
                         help="показать, что уйдёт модели, и не звать её")
+    parser.add_argument("--workers", type=int, default=WORKERS,
+                        help="сколько карточек спрашивать одновременно")
     parser.add_argument("--show", type=int, metavar="N",
                         help="показать N последних прочитанных карточек: "
                              "исходные записи рядом с тем, что вынула модель")
@@ -399,7 +499,12 @@ def main() -> int:
                 print(_payload(card, datetime.now(timezone.utc).date()))
                 print()
             return 0
-        read_cards(conn, make_llm(settings), limit=args.limit)
+        model, spare = _clients(settings)
+        usage = {key: 0 for key in USAGE_KEYS}
+        started = time.monotonic()
+        done = read_cards(conn, model, limit=args.limit, spare=spare,
+                          workers=args.workers, usage=usage)
+        _report(done, usage, settings, time.monotonic() - started)
     return 0
 
 
