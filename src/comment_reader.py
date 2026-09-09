@@ -246,8 +246,10 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true",
                         help="показать, что уйдёт модели, и не звать её")
     args = parser.parse_args()
-    setup_logging()
+    # Настройки сначала: уровень журнала берётся из них, как во всех
+    # остальных точках входа проекта.
     settings = get_settings()
+    setup_logging(settings.log_level)
 
     with analytics_session() as conn:
         if args.dry_run:
