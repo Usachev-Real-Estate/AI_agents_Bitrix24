@@ -291,6 +291,11 @@ def test_an_old_mart_is_migrated_before_work(mart, monkeypatch, capsys):
     там была всегда. Настоящий случай — боевая база, созданная раньше.
     """
     with analytics_session() as conn:
+        # Старая витрина — это старая ОТМЕТКА версии плюс старая таблица.
+        # Одной таблицы мало: init_analytics_db() судит по версии, и
+        # база, помеченная текущей, объявлена приведённой в порядок.
+        conn.execute("UPDATE analytics_meta SET value = '6'"
+                     " WHERE key = 'schema_version'")
         conn.execute("DROP TABLE fact_comment_read")
         conn.execute(
             """

@@ -26,7 +26,12 @@ DEFAULT_DB_PATH = Path("data/analytics.db")
 # запас, что и основная база проекта.
 BUSY_TIMEOUT_MS = 10_000
 
-SCHEMA_VERSION = 6
+# 7: колонка prompt_version в fact_comment_read. Миграция под неё приехала
+#    ещё при версии 6 — то есть боевая витрина отмечена как «шестая», а
+#    колонки в ней нет. Пока init_analytics_db() гнал DDL безусловно, это
+#    сходило с рук; с проверкой версии такая база осталась бы без миграции
+#    навсегда. Поднимаем версию задним числом: это и есть починка.
+SCHEMA_VERSION = 7
 
 # Семантика стадии. Без неё нельзя посчитать ни конверсию, ни win rate:
 # «выиграно» и «проиграно» надо отличать от «в работе», а по одному только
@@ -428,8 +433,36 @@ def _migrate_dim_user_last_name(conn: sqlite3.Connection) -> None:
         pass
 
 
+def _schema_is_current(db_path: str | Path | None) -> bool:
+    """Схема уже нужной версии — писать нечего.
+
+    Проверка нарочно read-only: у витрины включён WAL, и читатель
+    работающему ETL не мешает, а вот DDL — даже ничего не меняющий —
+    берёт блокировку записи. Отсюда «database is locked» у любой задачи,
+    которая просто убедилась, что схема на месте, и стартовала в ту же
+    минуту, что и догрузка. ETL тикает каждые 15 минут, читатель стоит на
+    03:00 — встреча была вопросом времени.
+    """
+    try:
+        with analytics_session(db_path, readonly=True) as conn:
+            row = conn.execute(
+                "SELECT value FROM analytics_meta WHERE key = 'schema_version'"
+            ).fetchone()
+    except sqlite3.OperationalError:
+        # Таблиц ещё нет (или файла): витрину надо создавать целиком.
+        return False
+    return bool(row) and str(row[0]) == str(SCHEMA_VERSION)
+
+
 def init_analytics_db(db_path: str | Path | None = None) -> None:
-    """Создать таблицы витрины, если их нет. Идемпотентно."""
+    """Создать таблицы витрины, если их нет. Идемпотентно.
+
+    ВАЖНО: новая миграция обязана поднимать SCHEMA_VERSION. Версия здесь
+    не украшение, а условие: совпала — функция не делает НИЧЕГО, и
+    миграцию, добавленную без поднятия версии, никто не позовёт.
+    """
+    if _schema_is_current(db_path):
+        return
     with analytics_session(db_path) as conn:
         for statement in _DDL:
             conn.execute(statement)
