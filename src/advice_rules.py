@@ -57,6 +57,7 @@ def collect(
     sellers_work: dict[str, Any] | None = None,
     promises: list[dict[str, Any]] | None = None,
     refusals: list[dict[str, Any]] | None = None,
+    vague: list[dict[str, Any]] | None = None,
 ) -> list[Advice]:
     """Все кандидаты от всех правил. Порядок здесь ни на что не влияет."""
     out: list[Advice] = []
@@ -65,6 +66,7 @@ def collect(
     out += broker_cold(sellers_work or work)
     out += promise_overdue(promises)
     out += refusal_in_funnel(refusals)
+    out += promise_without_date(vague)
     out += went_backwards(events)
     out += left_from_late_stage(events)
     return out
@@ -337,6 +339,64 @@ def _day(stamp: str | None) -> str:
     """Дата по-человечески: 12.08 вместо 2026-08-12."""
     text = (stamp or "").strip()[:10]
     return f"{text[8:10]}.{text[5:7]}" if len(text) == 10 else text
+
+
+def promise_without_date(rows: list[dict[str, Any]] | None) -> list[Advice]:
+    """Обещал, дня не назвал и замолчал.
+
+    Половина обещаний портфеля — без срока. Просрочки у них нет и быть не
+    может, и брокер прав, если возразит: он не обещал «в пятницу», он
+    обещал «позднее». Проверяемым это делает только молчание — две недели
+    без единой записи после обещания уже не придирка.
+
+    Вес намеренно на два порядка ниже, чем у просроченного обещания, хотя
+    место в сводке общее. Это не приём против правила, а его смысл: одно
+    невыполненное «позвонить в пятницу» весит больше любой горки
+    «перезвоню как-нибудь», потому что разговор по нему короткий и
+    спорить не о чем. Пока в агентстве есть просроченные обещания со
+    сроком, говорить надо о них; когда кончатся — очередь этих.
+    """
+    if not rows:
+        return []
+    by_user: dict[Any, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_user.setdefault(row["user_id"], []).append(row)
+
+    out = []
+    for user_id, items in by_user.items():
+        items.sort(key=lambda item: -(item["quiet_days"] or 0))
+        oldest = items[0]
+        name = oldest["broker"] or f"id {user_id}"
+        days = int(oldest["quiet_days"] or 0)
+        out.append(Advice(
+            rule="promise_no_date",
+            subject=f"user:{user_id}",
+            slot=SLOT_PROMISE,
+            who=name,
+            value=len(items),
+            weight=len(items) + days,
+            title=(f"{name}: {len(items)} "
+                   f"{wording.form(len(items), 'обещание', 'обещания', 'обещаний')} "
+                   f"без срока, и "
+                   f"{wording.verb(len(items), 'карточка молчит', 'карточки молчат')}"),
+            action=_vague_action(items),
+            proof=(f"дольше всех — {wording.name(oldest['title'], 32)}: "
+                   f"«{_text(oldest['promised'], 60)}», "
+                   f"а записей нет {days} дн"),
+            check="Скажу, если появится новая запись",
+            link="/deals",
+        ))
+    return out
+
+
+def _vague_action(items: list[dict[str, Any]]) -> str:
+    """Что сделать. Просьба одна: назвать день, иначе спрашивать нечего."""
+    if len(items) == 1:
+        return (f"Спросите про {wording.name(items[0]['title'], 34)} "
+                "и попросите называть день")
+    names = ", ".join(wording.name(item["title"], 24) for item in items[:3])
+    tail = "" if len(items) <= 3 else f" и ещё {len(items) - 3}"
+    return f"Спросите и попросите называть день: {names}{tail}"
 
 
 def refusal_in_funnel(rows: list[dict[str, Any]] | None) -> list[Advice]:
