@@ -94,28 +94,30 @@ def mart(analytics_db):
 
 
 # ── Признак карточки ───────────────────────────────────────────────────
-def test_the_card_is_named_by_the_strongest_thing_in_it(mart, export):
-    """Просроченное обещание сильнее всего остального — ради него всё и делалось."""
-    both = {"promised": "Позвонить", "promised_at": _day(-3),
+def test_the_card_is_named_by_the_strongest_thing_in_it(export):
+    """Просроченное обещание сильнее всего остального: ради него всё и делалось."""
+    both = {"deal_id": 1, "promised": "Позвонить", "promised_at": _day(-3),
             "ready": "в рекламе", "terms": "2%", "refused": 1,
-            "refused_why": "свой агент", "wait_until": _day(+10),
-            "overdue_days": 3.0}
-    assert export._sign(both) == "просрочено"
+            "refused_why": "свой агент", "wait_until": None}
 
-    # Обещание есть, срок не наступил — карточка ждёт, а не просрочена.
-    waiting = dict(both, promised_at=_day(+3), overdue_days=-3.0,
-                   refused=0)
-    assert export._sign(waiting) == "обещано"
-
-    assert export._sign({"promised": "", "promised_at": None, "refused": 1,
-                         "wait_until": None, "ready": "в рекламе",
-                         "terms": "", "overdue_days": None}) == "отказ"
+    assert export._sign(both, {1}) == "просрочено"
+    # Та же карточка, но советы её просроченной не считают — значит и здесь
+    # она не просрочена: правило одно, и живёт оно в work.promises().
+    assert export._sign(both, set()) == "обещано"
+    assert export._sign(dict(both, promised=""), set()) == "отказ"
 
 
 def test_an_empty_card_says_so(export):
-    empty = {"promised": "", "promised_at": None, "wait_until": None,
-             "refused": 0, "ready": "", "terms": "", "overdue_days": None}
-    assert export._sign(empty) == "пусто"
+    empty = {"deal_id": 1, "promised": "", "promised_at": None,
+             "wait_until": None, "refused": 0, "ready": "", "terms": ""}
+    assert export._sign(empty, set()) == "пусто"
+
+
+def test_a_promise_without_a_date_is_not_overdue(export):
+    """Обещание есть, срока нет — спрашивать не с чего."""
+    card = {"deal_id": 1, "promised": "Перезвонить позднее", "promised_at": None,
+            "wait_until": None, "refused": 0, "ready": "", "terms": ""}
+    assert export._sign(card, set()) == "обещано"
 
 
 # ── Сводка ─────────────────────────────────────────────────────────────
@@ -182,3 +184,15 @@ def test_the_phone_is_hidden_but_the_meaning_is_not(mart, export, tmp_path):
 
     assert "89156542609" not in notes["5"]
     assert "представитель Влад" in notes["5"]
+
+
+def test_a_closed_card_is_not_in_the_export(mart, export, tmp_path):
+    """Работа по закрытой карточке кончилась, разбирать её незачем."""
+    with analytics_session() as conn:
+        conn.execute("UPDATE fact_deal SET is_closed = 1 WHERE deal_id = 9")
+    sys.argv = ["comment_export.py", "--out", str(tmp_path)]
+    export.main()
+
+    with (tmp_path / "read_cards.csv").open(encoding="utf-8-sig") as handle:
+        ids = [row["deal_id"] for row in csv.DictReader(handle)]
+    assert "9" not in ids

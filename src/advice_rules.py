@@ -23,7 +23,7 @@ from __future__ import annotations
 from typing import Any, Sequence
 
 import wording
-from advice import SLOT_ACUTE, SLOT_MONEY, SLOT_WORK, Advice
+from advice import SLOT_ACUTE, SLOT_MONEY, SLOT_PROMISE, SLOT_WORK, Advice
 
 # Сколько карточек должно быть у брокера, чтобы говорить о его доле.
 # Двое из трёх — это 67% и ничего не значит.
@@ -290,7 +290,12 @@ def promise_overdue(rows: list[dict[str, Any]] | None) -> list[Advice]:
         out.append(Advice(
             rule="promise_overdue",
             subject=f"user:{user_id}",
-            slot=SLOT_ACUTE,
+            # Своё место, а не общее с событиями по сделкам. Там вес —
+            # сумма на карточке, здесь число обещаний, и в одном ряду
+            # рубли побеждают штуки всегда: девяносто два невыполненных
+            # обещания по агентству молчали, пока хоть одна сделка уходила
+            # из работы. Соревноваться должны сопоставимые вещи.
+            slot=SLOT_PROMISE,
             who=name,
             value=len(items),
             # Вес — число обещаний, а не давность: пять просроченных дел

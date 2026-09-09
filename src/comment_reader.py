@@ -562,6 +562,14 @@ def main() -> int:
         done = read_cards(conn, model, limit=args.limit, spare=spare,
                           workers=args.workers, usage=usage)
         _report(done, usage, settings, time.monotonic() - started)
+        # Ничего не прочитали, а читать было что — это авария, и она обязана
+        # быть слышна. По крону скрипт молча вернул бы ноль, советы неделю
+        # опирались бы на устаревший разбор, и заметили бы это по тому, что
+        # утренняя сводка перестала называть новые карточки. Ненулевой код
+        # поднимает штатный алерт из cron_job.sh.
+        if done == 0 and _targets(conn, 1):
+            logger.error("Ни одной карточки не прочитано, а очередь не пуста")
+            return 1
     return 0
 
 

@@ -93,3 +93,22 @@
 #       docker run --rm --env-file .env -v $(pwd)/data:/app/data \
 #         b24-ai-auditor:latest python src/pulse_digest.py --dry-run
 0 6 * * 1-5 cd /home/Ai_agents_crm && scripts/cron_job.sh pulse-digest docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/pulse_digest.py >> logs/cron.log 2>&1
+
+# 20. Чтение комментариев брокеров моделью: ежедневно в 06:00 МСК (03:00 UTC).
+#     Стоит между полной сверкой витрины (03:30 МСК) и утренним дайджестом
+#     (09:00 МСК): комментарии к этому часу уже залиты, а совет о
+#     просроченных обещаниях читает то, что разобрано этой ночью.
+#
+#     Ночью читается только изменившееся — карточки, где брокер что-то
+#     дописал. Обычно это десятки штук и несколько минут. Лимит 200 стоит
+#     не ради экономии, а как потолок: замер даёт 0,46 ₽ и 3 секунды на
+#     карточку, то есть худшая ночь — это 92 ₽ и десять минут, и никакая
+#     ошибка в очереди не превратит задачу в многочасовую.
+#
+#     Смена версии промпта отправляет на перечтение ВЕСЬ портфель (1050
+#     карточек, 53 минуты, ~490 ₽). Такой прогон делается руками сразу
+#     после правки, а не размазывается на неделю ночных лимитов:
+#       docker run --rm --env-file .env -v $(pwd)/logs:/app/logs \
+#         -v $(pwd)/data:/app/data b24-ai-auditor:latest \
+#         python src/comment_reader.py --limit 1200
+0 3 * * * cd /home/Ai_agents_crm && scripts/cron_job.sh comment-reader docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/comment_reader.py --limit 200 >> logs/cron.log 2>&1

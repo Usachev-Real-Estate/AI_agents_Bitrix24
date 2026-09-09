@@ -302,3 +302,38 @@ def test_the_probe_writes_nothing(mart, monkeypatch, capsys):
     with analytics_session() as conn:
         read = conn.execute("SELECT COUNT(*) FROM fact_comment_read").fetchone()[0]
     assert read == 0
+
+
+# ── Провал должен быть слышен ──────────────────────────────────────────
+def test_a_run_that_read_nothing_fails_loudly(mart, monkeypatch):
+    """Модель отказала на всех карточках — это авария, а не пустая ночь.
+
+    По крону такой прогон возвращал ноль и молчал: советы неделю опирались
+    бы на устаревший разбор, и заметить это можно было бы только по тому,
+    что утренняя сводка перестала называть новые карточки. Ненулевой код
+    поднимает штатный алерт.
+    """
+    class _Dead:
+        def invoke(self, messages):
+            raise RuntimeError("нет ответа")
+
+    monkeypatch.setattr(comment_reader, "_clients",
+                        lambda settings: (_Dead(), None))
+    monkeypatch.setattr("sys.argv", ["comment_reader.py", "--limit", "4"])
+
+    assert comment_reader.main() == 1
+
+
+def test_an_empty_queue_is_not_a_failure(mart, monkeypatch):
+    """Читать было нечего — это нормальная ночь, а не повод будить админа."""
+    class _Model:
+        def invoke(self, messages):
+            return _Answer()
+
+    monkeypatch.setattr(comment_reader, "_clients",
+                        lambda settings: (_Model(), None))
+    monkeypatch.setattr("sys.argv", ["comment_reader.py", "--limit", "4"])
+    assert comment_reader.main() == 0
+
+    # Второй прогон подряд: всё уже прочитано, очередь пуста.
+    assert comment_reader.main() == 0

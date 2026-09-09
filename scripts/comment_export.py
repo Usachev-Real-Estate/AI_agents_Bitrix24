@@ -34,6 +34,7 @@ import csv
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 for _root in (Path(__file__).resolve().parent.parent, Path.cwd(), Path("/app")):
     _src = _root / "src"
@@ -45,13 +46,16 @@ for _root in (Path(__file__).resolve().parent.parent, Path.cwd(), Path("/app")):
 else:  # pragma: no cover — на сервере каталог есть всегда
     raise SystemExit("не найден каталог src: запускайте из корня проекта")
 
-from schema import get_connection  # noqa: E402
+from config import get_settings  # noqa: E402
+from plans import plan_category_ids  # noqa: E402
+from scope import Scope, scoped_session  # noqa: E402
+from work import promises as overdue_promises  # noqa: E402
 
 _PHONE = re.compile(r"(?<!\d)(?:\+?\d[\s\-()]?){10,14}(?!\d)")
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
 
 COLUMNS = (
-    "deal_id", "broker", "stage", "title", "quiet_days", "sign",
+    "deal_id", "funnel", "broker", "stage", "title", "quiet_days", "sign",
     "promised", "promised_at", "overdue_days", "wait_until",
     "refused", "refused_why", "ready", "terms",
     "prompt_version", "read_at", "notes",
@@ -67,11 +71,12 @@ def hide(text: str) -> str:
     )
 
 
-def rows(conn):
+def rows(conn, late: set[int]):
     """Разбор рядом с записями, из которых он сделан."""
     found = conn.execute(
         """
         SELECT r.entity_id AS deal_id, d.title,
+               d.category_id AS funnel,
                COALESCE(u.name, '') AS broker,
                COALESCE(s.name, d.stage_id) AS stage,
                r.promised, r.promised_at, r.wait_until, r.refused,
@@ -80,15 +85,15 @@ def rows(conn):
                      - julianday(MAX(c.created_at))) AS quiet_days,
                ROUND(julianday('now')
                      - julianday(r.promised_at)) AS overdue_days
-        FROM fact_comment_read r
-        JOIN fact_deal d ON d.deal_id = r.entity_id
-        LEFT JOIN dim_user u ON u.user_id = d.assigned_by_id
+        FROM v_comment_read r
+        JOIN v_deal d ON d.deal_id = r.entity_id
+        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
         LEFT JOIN dim_stage s
                ON s.stage_id = d.stage_id AND s.category_id = d.category_id
-        LEFT JOIN fact_comment c
+        LEFT JOIN v_comment c
                ON c.entity_type = 'deal' AND c.entity_id = r.entity_id
               AND c.is_auto = 0
-        WHERE r.entity_type = 'deal'
+        WHERE r.entity_type = 'deal' AND d.is_closed = 0
         GROUP BY r.entity_id
         ORDER BY overdue_days DESC, quiet_days DESC
         """
@@ -107,20 +112,27 @@ def rows(conn):
                 (card["deal_id"],),
             )
         )
-        card["sign"] = _sign(card)
+        card["sign"] = _sign(card, late)
         out.append(card)
     return out
 
 
-def _sign(card: dict) -> str:
+def _sign(card: dict, late: set[int]) -> str:
     """Чем эта карточка интересна — одним словом.
 
     Порядок важен: просроченное обещание сильнее всего остального, ради
     него разбор и делался. Отказ идёт раньше готовности, потому что
     карточка с отказом на живой стадии — это ошибка воронки, а не работа.
+
+    Просрочку спрашиваем у work.promises() — у того же кода, из которого
+    её берут советы. Здесь была своя копия правила, и она дважды разошлась
+    с оригиналом: сперва не вычитала договорённое молчание, потом считала
+    обещанием пустую фразу с датой. Выгрузка показывала 92 против 37 в
+    сводке, и каждая починка была новым поводом разойтись снова.
+    Диагностический счёт, спорящий с рабочим, хуже, чем никакой: по нему
+    делают выводы, которых система не подтверждает.
     """
-    overdue = card["overdue_days"]
-    if card["promised_at"] and overdue is not None and overdue > 0:
+    if card["deal_id"] in late:
         return "просрочено"
     if card["promised"]:
         return "обещано"
@@ -158,6 +170,16 @@ def summary(cards: list[dict]) -> None:
 
     late = [c for c in cards if c["sign"] == "просрочено"]
     if late:
+        # Разрез по воронкам не украшение: советы смотрят только на
+        # продавцов и воронки с планом, и без этой строки разница между
+        # выгрузкой и сводкой выглядит расхождением, а не настройкой.
+        by_funnel: dict[Any, int] = {}
+        for card in late:
+            by_funnel[card["funnel"]] = by_funnel.get(card["funnel"], 0) + 1
+        parts = ", ".join(f"воронка {key}: {value}"
+                          for key, value in sorted(by_funnel.items()))
+        print(f"\n## Просрочено по воронкам\n   {parts}")
+
         print(f"\n## Просрочено по брокерам ({len(late)} карточек)")
         by_broker: dict[str, int] = {}
         for card in late:
@@ -183,9 +205,17 @@ def main() -> None:
                         help="ограничить выгрузку (0 — без ограничения)")
     args = parser.parse_args()
 
-    conn = get_connection(readonly=True)
-    cards = rows(conn)
-    conn.close()
+    # Область видимости — вся компания: выгрузку смотрит тот, кто отвечает
+    # за портфель целиком. Соединение суженное, потому что просрочку даёт
+    # work.promises(), а она читает только представления.
+    with scoped_session(Scope.everything()) as conn:
+        # Те же воронки, что у дайджеста. None здесь означало бы не «все»,
+        # а «несущие план», и продавцы выпали бы целиком.
+        funnels = [int(get_settings().sellers_category_id),
+                   *plan_category_ids()]
+        late = {int(row["deal_id"])
+                for row in overdue_promises(conn, funnels)}
+        cards = rows(conn, late)
     summary(cards)
 
     chosen = [c for c in cards if args.only in ("all", c["sign"])]
