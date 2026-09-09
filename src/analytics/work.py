@@ -186,6 +186,10 @@ def card_work(
         # Обещания лежат рядом с работой: это её же след, только
         # записанный словами, а не действием.
         "promises": promises(conn, categories, department_id=department_id),
+        # Отказ лежит рядом с обещанием: обе строки взяты из записей
+        # брокера, и обе проверяются его же словами.
+        "refusals": refused_in_work(conn, categories,
+                                    department_id=department_id),
         "pickup": _pickup(conn, department_id),
         "shared_contacts": _shared_contacts(conn, categories),
     }
@@ -622,6 +626,63 @@ def promises(
           -- данное до этой договорённости, ею же и отменено.
           AND (r.wait_until IS NULL OR r.wait_until < :today)
         ORDER BY overdue_days DESC
+        """,
+        params,
+    )
+
+
+def refused_in_work(
+    conn,
+    categories: Sequence[int] | None = None,
+    *,
+    department_id: int | None = None,
+) -> list[dict[str, Any]]:
+    """Клиент отказал, а карточка осталась числиться в работе.
+
+    Это не про брокера, а про то, чему верит отчёт. Пайплайн — главное
+    число на экране директора, и складывается оно из открытых карточек.
+    Карточка, где записано «не хочет продавать», продолжает лежать на
+    «Назначении встречи» и добавлять свою сумму в это число: воронка
+    показывает работу, которой нет, и решения принимаются по картинке,
+    которую сама же витрина и опровергает.
+
+    Пустая причина отсюда исключена намеренно. Сила такого совета в том,
+    что мы цитируем брокера, а не пересказываем модель: «клиент сказал
+    “есть свой риэлтор”, а карточка в работе третий месяц» проверяется за
+    десять секунд. Без слов остаётся «модель считает, что клиент отказал»,
+    а это не разговор, а спор о модели.
+
+    Отказ снимается сам собой: появилась новая запись — отпечаток
+    изменился, карточку прочитали заново, и если работа возобновилась,
+    поле пустое. Сверять даты записей здесь не нужно.
+    """
+    where, params = plans.category_filter("d", categories)
+    params["dept"] = department_id
+    return _rows(
+        conn,
+        f"""
+        SELECT d.deal_id, d.title, d.stage_id, d.opportunity,
+               COALESCE(s.name, d.stage_id) AS stage_name,
+               COALESCE(u.name, '') AS broker,
+               u.user_id AS user_id,
+               r.refused_why, r.ready,
+               (julianday('now') - julianday(e.entered_at)) AS days_in_stage
+        FROM v_deal d
+        JOIN v_comment_read r
+             ON r.entity_type = 'deal' AND r.entity_id = d.deal_id
+        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
+        LEFT JOIN dim_stage s
+               ON s.stage_id = d.stage_id AND s.category_id = d.category_id
+        -- Возраст на стадии — LEFT JOIN, а не обычный: карточка без записи
+        -- о входе всё равно противоречит отказу, и терять её из-за дырки в
+        -- истории стадий было бы обиднее, чем показать без срока.
+        LEFT JOIN v_stage_event e
+               ON e.entity_type = 'deal' AND e.entity_id = d.deal_id
+              AND e.stage_id = d.stage_id AND e.left_at IS NULL
+        WHERE d.is_closed = 0 AND {where}
+          AND (:dept IS NULL OR u.department_id = :dept)
+          AND r.refused = 1 AND r.refused_why <> ''
+        ORDER BY days_in_stage DESC
         """,
         params,
     )

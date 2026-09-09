@@ -23,7 +23,9 @@ from __future__ import annotations
 from typing import Any, Sequence
 
 import wording
-from advice import SLOT_ACUTE, SLOT_MONEY, SLOT_PROMISE, SLOT_WORK, Advice
+from advice import (
+    SLOT_ACUTE, SLOT_FUNNEL, SLOT_MONEY, SLOT_PROMISE, SLOT_WORK, Advice,
+)
 
 # Сколько карточек должно быть у брокера, чтобы говорить о его доле.
 # Двое из трёх — это 67% и ничего не значит.
@@ -54,6 +56,7 @@ def collect(
     events: dict[str, Any] | None = None,
     sellers_work: dict[str, Any] | None = None,
     promises: list[dict[str, Any]] | None = None,
+    refusals: list[dict[str, Any]] | None = None,
 ) -> list[Advice]:
     """Все кандидаты от всех правил. Порядок здесь ни на что не влияет."""
     out: list[Advice] = []
@@ -61,6 +64,7 @@ def collect(
     out += behind_pace(pulse)
     out += broker_cold(sellers_work or work)
     out += promise_overdue(promises)
+    out += refusal_in_funnel(refusals)
     out += went_backwards(events)
     out += left_from_late_stage(events)
     return out
@@ -333,6 +337,73 @@ def _day(stamp: str | None) -> str:
     """Дата по-человечески: 12.08 вместо 2026-08-12."""
     text = (stamp or "").strip()[:10]
     return f"{text[8:10]}.{text[5:7]}" if len(text) == 10 else text
+
+
+def refusal_in_funnel(rows: list[dict[str, Any]] | None) -> list[Advice]:
+    """Клиент отказал, а карточка числится в работе.
+
+    Совет не про брокера, а про то, чему верит отчёт. Пайплайн —
+    складывается из открытых карточек, и карточка с записью «не хочет
+    продавать» добавляет туда свою сумму. Воронка показывает работу,
+    которой нет, а решения принимаются по этой картинке.
+
+    Своё место в сводке, а не общее с холодными карточками: там вес — тоже
+    штуки, но холодных всегда в разы больше, и отказ, которых у человека
+    шесть, никогда не был бы высказан. Место — это мера, и рядом должно
+    стоять сравнимое не только по единицам, но и по порядку величин.
+
+    Группируется по человеку: закрыть карточку или объяснить, почему
+    работа продолжается, может только тот, кто её ведёт.
+    """
+    if not rows:
+        return []
+    by_user: dict[Any, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_user.setdefault(row["user_id"], []).append(row)
+
+    out = []
+    for user_id, items in by_user.items():
+        items.sort(key=lambda item: -(item["days_in_stage"] or 0))
+        oldest = items[0]
+        name = oldest["broker"] or f"id {user_id}"
+        days = int(oldest["days_in_stage"] or 0)
+        out.append(Advice(
+            rule="refused_in_work",
+            subject=f"user:{user_id}",
+            slot=SLOT_FUNNEL,
+            who=name,
+            value=len(items),
+            weight=len(items) * 100 + days,
+            # Глагол согласуется с числом: «1 карточка … числятся» —
+            # ровно та ошибка, которой в этом проекте уже посвящён
+            # отдельный модуль.
+            title=(f"{name}: {len(items)} "
+                   f"{wording.form(len(items), 'карточка', 'карточки', 'карточек')} "
+                   f"с отказом клиента "
+                   f"{wording.verb(len(items), 'числится', 'числятся')} "
+                   f"в работе"),
+            action=_refusal_action(items),
+            # Цитата, а не пересказ: «клиент сказал “есть свой риэлтор”, а
+            # карточка на этой стадии третий месяц» проверяется за десять
+            # секунд, и спорить с этим нечем.
+            proof=(f"дольше всех — {wording.name(oldest['title'], 32)}: "
+                   f"«{_text(oldest['refused_why'], 60)}», "
+                   f"а карточка на «{oldest['stage_name']}»"
+                   + (f" {days} дн" if days else "")),
+            check="Скажу, если карточка останется в работе",
+            link="/deals",
+        ))
+    return out
+
+
+def _refusal_action(items: list[dict[str, Any]]) -> str:
+    """Что сделать. Закрыть или объяснить — третьего не дано."""
+    if len(items) == 1:
+        return (f"Закройте {wording.name(items[0]['title'], 38)} "
+                "или объясните, почему работа продолжается")
+    names = ", ".join(wording.name(item["title"], 24) for item in items[:3])
+    tail = "" if len(items) <= 3 else f" и ещё {len(items) - 3}"
+    return f"Закрыть или объяснить: {names}{tail}"
 
 
 def went_backwards(events: dict[str, Any] | None) -> list[Advice]:

@@ -50,9 +50,12 @@ logger = logging.getLogger(__name__)
 # что его нет в сводке.
 SLOT_MONEY = "money"
 SLOT_PROMISE = "promise"
+SLOT_FUNNEL = "funnel"
 SLOT_WORK = "work"
 SLOT_ACUTE = "acute"
-SLOTS: tuple[str, ...] = (SLOT_MONEY, SLOT_PROMISE, SLOT_WORK, SLOT_ACUTE)
+SLOTS: tuple[str, ...] = (
+    SLOT_MONEY, SLOT_PROMISE, SLOT_FUNNEL, SLOT_WORK, SLOT_ACUTE,
+)
 
 # Сколько дней молчать об уже сказанном.
 COOLDOWN_DAYS = 7
