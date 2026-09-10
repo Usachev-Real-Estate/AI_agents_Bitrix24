@@ -79,6 +79,43 @@ def test_a_fired_rop_no_longer_owns_the_department(people):
         assert metrics.rop_by_department(conn) == {}
 
 
+def test_the_roster_decides_which_department_the_rop_owns(analytics_db):
+    """Ростер сильнее портала — здесь ровно так же, как в видимости и в плане.
+
+    Живой случай, ради которого ростер и заводился: руководитель отдела
+    продаж числится в служебном подразделении «Битрикс». По карточке выходит,
+    что «Битрикс» возглавляет РОП, а её настоящий отдел остаётся без
+    руководителя.
+
+    Цена ошибки здесь не косметическая: по этому ответу заводят учётку
+    (`manage.py adduser --rop ФАМИЛИЯ`). Учётка получила бы служебное
+    подразделение, РОП открыл бы дашборд и увидел пустой экран — и решил бы,
+    что сломан дашборд, а не его доступ.
+    """
+    with analytics_session() as conn:
+        _person(conn, 51, "Ольга Волкова", "Волкова", 900)
+        conn.execute(
+            "INSERT INTO plan_roster(period_code, user_id, department_id,"
+            " plan_role, note, updated_at)"
+            " VALUES ('*', 51, 60, 'rop', 'сидит в служебном', 'x')")
+
+    with scoped_session(Scope.everything()) as conn:
+        directory = metrics.rop_by_department(conn)
+
+    assert 60 in directory, "отдел, за который она отвечает"
+    assert 900 not in directory, "служебное подразделение ей не принадлежит"
+    assert directory[60]["name"] == "Ольга Волкова"
+
+
+def test_without_a_roster_row_the_portal_still_answers(analytics_db):
+    """Ростер — исключение, а не обязанность: без строки работает портал."""
+    with analytics_session() as conn:
+        _person(conn, 52, "Пётр Резников", "Резников", 50)
+
+    with scoped_session(Scope.everything()) as conn:
+        assert metrics.rop_by_department(conn)[50]["user_id"] == 52
+
+
 def test_the_surname_list_is_the_one_the_qc_mailing_uses():
     """Список фамилий не копируется в дашборд, а берётся из одного места."""
     assert "шпырная" in ROP_SURNAMES and "волкова" in ROP_SURNAMES
