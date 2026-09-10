@@ -164,9 +164,17 @@ def test_no_route_leaks_another_department(rop_a, tenancy_app):
 
 
 def test_own_department_is_actually_visible(rop_a, tenancy_app):
-    """Обратная сторона: ограничение не должно прятать и своё."""
-    body = rop_a.get(f"{BASE}/table{PERIOD}").text
-    assert MARK_A in body, "РОП не видит собственные сделки — ограничение слишком широкое"
+    """Обратная сторона: ограничение не должно прятать и своё.
+
+    Пробуется по всем открытым РОПу маршрутам сразу, а не по одному
+    названному: разделы закрывают и открывают, и проверка, прибитая к
+    «Таблице», после её закрытия проверяла бы отказ вместо видимости.
+    """
+    seen = [
+        path for path in _data_paths(tenancy_app)
+        if MARK_A.encode() in rop_a.get(f"{path}{PERIOD}").content
+    ]
+    assert seen, "РОП не видит собственные сделки нигде — ограничение слишком широкое"
 
 
 def test_admin_sees_both_departments(admin):
@@ -220,18 +228,28 @@ def test_crafted_query_cannot_reach_another_department(rop_a, query):
 
 
 def test_search_by_foreign_deal_id_returns_nothing(rop_a, admin):
-    """Точечный запрос по ID чужой сделки — самый прямой способ проверить."""
-    theirs = rop_a.get(f"{BASE}/api/table{PERIOD}&all_time=1&q={DEAL_B}").json()
+    """Точечный запрос по ID чужой сделки — самый прямой способ проверить.
+
+    «Таблица» РОПу закрыта целиком, и отказ здесь сильнее пустого ответа:
+    сужение можно обойти подбором параметров, отказ — нельзя. Само сужение
+    при этом проверяется на уровне витрины, а не маршрута, — им занят
+    test_rop_cannot_widen_the_table_by_department.
+    """
+    assert rop_a.get(f"{BASE}/api/table{PERIOD}&all_time=1&q={DEAL_B}").status_code == 403
     everything = admin.get(f"{BASE}/api/table{PERIOD}&all_time=1&q={DEAL_B}").json()
-    assert theirs["total"] == 0
     assert everything["total"] == 1
 
 
-def test_csv_export_is_scoped(rop_a):
-    text = rop_a.get(f"{BASE}/api/export.csv{PERIOD}&all_time=1&size=5000").content.decode(
+def test_csv_export_is_closed_for_a_rop(admin, rop_a):
+    """Выгрузка — часть «Таблицы», и закрыта вместе с ней.
+
+    Раздел, закрытый на странице и открытый файлом, не закрыт: export.csv
+    отдаёт ровно то же самое.
+    """
+    assert rop_a.get(f"{BASE}/api/export.csv{PERIOD}&all_time=1&size=5000").status_code == 403
+    text = admin.get(f"{BASE}/api/export.csv{PERIOD}&all_time=1&size=5000").content.decode(
         "utf-8-sig")
-    assert MARK_A in text
-    assert MARK_B not in text
+    assert MARK_A in text and MARK_B in text
 
 
 def test_api_numbers_are_scoped(rop_a, admin):
@@ -249,11 +267,11 @@ def test_money_is_scoped(rop_a, admin):
     assert everything["overview"]["money"]["open_amount"] == 1000000
 
 
-def test_people_list_does_not_expose_other_departments(rop_a):
-    body = rop_a.get(f"{BASE}/people{PERIOD}").text
-    assert f"Брокер {MARK_A}" in body
-    assert f"Брокер {MARK_B}" not in body
-    assert f"Отдел {MARK_B}" not in body
+def test_people_list_does_not_expose_other_departments(admin, rop_a):
+    """«Люди» РОПу закрыты, а администратор видит там всю компанию."""
+    assert rop_a.get(f"{BASE}/people{PERIOD}").status_code == 403
+    body = admin.get(f"{BASE}/people{PERIOD}").text
+    assert f"Брокер {MARK_A}" in body and f"Брокер {MARK_B}" in body
 
 
 def test_department_dropdown_offers_only_own_departments(rop_a, admin):
@@ -274,10 +292,12 @@ def test_role_change_takes_effect_without_relogin(rop_a):
     Иначе закрытие доступа вступало бы в силу только через 12 часов, когда
     истечёт сессия — а закрывают его обычно ровно тогда, когда нужно сейчас.
     """
-    assert MARK_A in rop_a.get(f"{BASE}/table{PERIOD}").text
+    own = f"{BASE}/api/funnel{PERIOD}"
+    assert rop_a.get(own).json()["funnel"]["cohort_size"] == 1
+    assert rop_a.get(f"{BASE}/table{PERIOD}").status_code == 403
 
     store.set_user_role("rop_a", "rop", [])
-    assert MARK_A not in rop_a.get(f"{BASE}/table{PERIOD}").text
+    assert rop_a.get(own).json()["funnel"]["cohort_size"] == 0
 
     store.set_user_role("rop_a", "admin")
     body = rop_a.get(f"{BASE}/table{PERIOD}").text
@@ -364,11 +384,20 @@ def test_movement_drilldown_link_carries_the_department(admin):
     assert f"department={DEPT_A}" in body[link_start:link_start + 300]
 
 
-def test_rop_cannot_widen_the_table_by_department(rop_a):
-    """РОП подставляет чужой отдел в фильтр таблицы — должно остаться своё."""
-    theirs = rop_a.get(f"{BASE}/api/table{PERIOD}&all_time=1&department={DEPT_B}").json()
-    ids = {row["id"] for row in theirs["rows"]}
-    assert DEAL_B not in ids
+def test_rop_cannot_widen_the_table_by_department(tenancy_app):
+    """Чужой отдел в фильтре таблицы не расширяет выборку.
+
+    Проверка спустилась с маршрута на витрину, когда «Таблицу» закрыли от
+    РОПа. Смысл её от этого не изменился и пропасть не должен: закрытие
+    раздела — решение о том, что показывать, а сужение — о том, что вообще
+    доступно. Первое однажды отменят, второе обязано пережить отмену.
+    """
+    import metrics
+    from scope import Scope, scoped_session
+
+    with scoped_session(Scope.departments([DEPT_A])) as conn:
+        page = metrics.entity_table(conn, entity="deal", department_id=DEPT_B)
+    assert DEAL_B not in {row["id"] for row in page["rows"]}
 
 
 def test_stuck_threshold_is_the_same_for_rop_and_admin(tenancy_app, rop_a, admin):

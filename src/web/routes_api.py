@@ -10,13 +10,14 @@ import csv
 import io
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 import metrics
 import objects
-from context import read_analytics, resolve_filters
+from context import ADMIN_ONLY_PAGES, read_analytics, resolve_filters
 from links import crm_link
+from scope import ROLE_ADMIN
 
 router = APIRouter(prefix="/api")
 
@@ -36,6 +37,20 @@ CSV_COLUMNS = [
     ("days_in_stage", "Дней на стадии"),
     ("link", "Ссылка"),
 ]
+
+
+def _admin_only(request: Request, section: str) -> None:
+    """Закрыть административный раздел так же, как закрыта его страница.
+
+    Раздел, закрытый на странице и открытый в JSON, не закрыт: адрес
+    /api/table набирается руками, а export.csv отдаёт то же самое файлом.
+    Название раздела берётся из того же множества, что и меню, — иначе
+    страница и её данные однажды разойдутся в правах.
+    """
+    assert section in ADMIN_ONLY_PAGES, section
+    user = getattr(request.state, "user", None) or {}
+    if user.get("role") != ROLE_ADMIN:
+        raise HTTPException(status_code=403, detail="Раздел доступен только администратору")
 
 
 @router.get("/overview")
@@ -82,6 +97,7 @@ async def api_leads(request: Request) -> JSONResponse:
 
 @router.get("/quality")
 async def api_quality(request: Request) -> JSONResponse:
+    _admin_only(request, "quality")
     filters = resolve_filters(request)
     with read_analytics(request) as conn:
         return JSONResponse({
@@ -139,6 +155,7 @@ def api_objects(request: Request) -> JSONResponse:
 
 @router.get("/table")
 async def api_table(request: Request) -> JSONResponse:
+    _admin_only(request, "table")
     with read_analytics(request) as conn:
         return JSONResponse(_table_from_request(request, conn))
 
@@ -150,6 +167,7 @@ async def api_export_csv(request: Request) -> StreamingResponse:
     Без потолка одна вкладка могла бы вытянуть в память всю витрину и уронить
     сервис — это и отказ в обслуживании, и выгрузка всей базы одним запросом.
     """
+    _admin_only(request, "table")
     settings = request.app.state.settings
     params = dict(request.query_params)
     requested = _int_or_none(params.get("size")) or CSV_MAX_ROWS

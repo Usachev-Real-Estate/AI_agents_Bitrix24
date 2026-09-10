@@ -16,7 +16,7 @@ import objects
 import plans
 import pulse as pulse_metrics
 import work
-from context import base_context, read_analytics
+from context import ADMIN_ONLY_PAGES, base_context, read_analytics
 
 router = APIRouter()
 
@@ -80,9 +80,6 @@ async def leads(request: Request) -> HTMLResponse:
         context.update({
             "funnel": funnel,
             "sources": metrics.lead_sources(conn, period["since"], period["until"]),
-            "first_move": metrics.lead_first_move_days(
-                conn, period["since"], period["until"],
-            ),
             "charts": {"funnel": chartdata.lead_funnel_chart(funnel)},
         })
     return _render(request, "leads.html", context)
@@ -108,9 +105,6 @@ async def deals(request: Request) -> HTMLResponse:
             "funnel": funnel,
             "durations": durations,
             "wins": metrics.win_rate(conn, category_id, period["since"], period["until"]),
-            "cycle": metrics.deal_cycle_days(
-                conn, category_id, period["since"], period["until"],
-            ),
             "money": metrics.money(conn, category_id, period["since"], period["until"]),
             "forecast": metrics.weighted_forecast(conn, category_id),
             # Разрез по источнику живёт здесь, а не на «Лидах»: лид до сделки
@@ -177,6 +171,8 @@ async def movement(request: Request) -> HTMLResponse:
 @router.get("/people", response_class=HTMLResponse)
 async def people(request: Request) -> HTMLResponse:
     context = base_context(request, active="people")
+    if _closed_for(context):
+        return _forbidden(request, context)
     period, category_id = context["period"], context["category_id"]
     with read_analytics(request) as conn:
         rows = metrics.people(conn, period["since"], period["until"], category_id)
@@ -193,6 +189,8 @@ async def people(request: Request) -> HTMLResponse:
 @router.get("/table", response_class=HTMLResponse)
 async def table(request: Request) -> HTMLResponse:
     context = base_context(request, active="table")
+    if _closed_for(context):
+        return _forbidden(request, context)
     params = request.query_params
     period = context["period"]
     entity = params.get("entity", "deal")
@@ -291,6 +289,8 @@ def objects_page(request: Request) -> HTMLResponse:
 @router.get("/quality", response_class=HTMLResponse)
 async def quality(request: Request) -> HTMLResponse:
     context = base_context(request, active="quality")
+    if _closed_for(context):
+        return _forbidden(request, context)
     with read_analytics(request) as conn:
         context.update({
             "quality": metrics.data_quality(conn, context["category_id"]),
@@ -331,6 +331,16 @@ def _quarter_choices(depth: int = 4) -> list[tuple[str, str]]:
         if quarter == 0:
             year, quarter = year - 1, 4
     return out
+
+
+def _closed_for(context: dict) -> bool:
+    """Административный ли это раздел и закрыт ли он текущему пользователю.
+
+    Список разделов один и тот же для меню и для маршрута — он лежит в
+    context.ADMIN_ONLY_PAGES. Прятать пункт меню, не закрывая маршрут, —
+    не ограничение вовсе: адрес набирается руками.
+    """
+    return context["active"] in ADMIN_ONLY_PAGES and not context["is_admin"]
 
 
 def _forbidden(request: Request, context: dict) -> HTMLResponse:
