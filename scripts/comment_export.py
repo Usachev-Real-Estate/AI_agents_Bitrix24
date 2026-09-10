@@ -101,7 +101,7 @@ def rows(conn, late: set[int]):
     out = []
     for row in found:
         card = dict(row)
-        card["notes"] = " | ".join(
+        card["note_list"] = [
             f"[{note['created_at'][:10]}] {hide(note['body'])}"
             for note in conn.execute(
                 """
@@ -111,7 +111,9 @@ def rows(conn, late: set[int]):
                 """,
                 (card["deal_id"],),
             )
-        )
+        ]
+        # Склейка — только ради CSV: в одной ячейке записи иначе не лежат.
+        card["notes"] = " | ".join(card["note_list"])
         card["sign"] = _sign(card, late)
         out.append(card)
     return out
@@ -143,6 +145,46 @@ def _sign(card: dict, late: set[int]) -> str:
     if card["ready"] or card["terms"]:
         return "есть факты"
     return "пусто"
+
+
+def show(cards: list[dict]) -> None:
+    """Выбранные карточки на экран: вынутое рядом с записями.
+
+    CSV хорош для Excel и бесполезен в терминале, а смотреть эти строки
+    приходится именно там — перед тем, как они уйдут людям. Повод завести
+    печать нашёлся сразу: на тридцати карточках модель придумала обещание
+    и срок, которых в записи не было, и увидеть это можно было только так.
+
+    Одна и та же выборка, два вида: файл для работы, экран для проверки.
+    """
+    for card in cards:
+        print("=" * 62)
+        print(f"Сделка {card['deal_id']} · {card['title']}")
+        line = f"  {card['broker'] or 'не назначен'} · «{card['stage']}»"
+        if card["overdue_days"]:
+            line += f" · просрочено {int(card['overdue_days'])} дн"
+        elif card["quiet_days"]:
+            line += f" · молчит {int(card['quiet_days'])} дн"
+        print(line)
+        print("  Записи:")
+        for note in card["note_list"]:
+            print(f"    {note}")
+        print("  Вынуто:")
+        shown = False
+        for label, value in (
+            ("обещание", card["promised"]),
+            ("срок обещания", card["promised_at"]),
+            ("ждём до", card["wait_until"]),
+            ("отказ", card["refused_why"]),
+            ("готово", card["ready"]),
+            ("условия", card["terms"]),
+        ):
+            if value:
+                print(f"    {label}: {value}")
+                shown = True
+        if not shown:
+            print("    (пусто)")
+        print()
 
 
 def summary(cards: list[dict]) -> None:
@@ -203,6 +245,9 @@ def main() -> None:
                         help="выгрузить только карточки этого вида")
     parser.add_argument("--limit", type=int, default=0,
                         help="ограничить выгрузку (0 — без ограничения)")
+    parser.add_argument("--print", dest="show", action="store_true",
+                        help="напечатать выбранные карточки на экран: "
+                             "вынутое рядом с исходными записями")
     args = parser.parse_args()
 
     # Область видимости — вся компания: выгрузку смотрит тот, кто отвечает
@@ -221,6 +266,10 @@ def main() -> None:
     chosen = [c for c in cards if args.only in ("all", c["sign"])]
     if args.limit:
         chosen = chosen[:args.limit]
+
+    if args.show:
+        print()
+        show(chosen)
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)

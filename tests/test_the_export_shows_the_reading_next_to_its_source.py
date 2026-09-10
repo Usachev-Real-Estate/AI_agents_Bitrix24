@@ -196,3 +196,32 @@ def test_a_closed_card_is_not_in_the_export(mart, export, tmp_path):
     with (tmp_path / "read_cards.csv").open(encoding="utf-8-sig") as handle:
         ids = [row["deal_id"] for row in csv.DictReader(handle)]
     assert "9" not in ids
+
+
+# ── Печать на экран ────────────────────────────────────────────────────
+def test_the_chosen_cards_can_be_read_on_screen(mart, export, tmp_path,
+                                                capsys):
+    """Проверять эти строки приходится в терминале, а CSV там нечитаем.
+
+    Повод завёлся сразу: на тридцати карточках модель придумала обещание и
+    срок, которых в записи не было. Увидеть это можно было только так —
+    вынутое рядом с записью, глазами.
+    """
+    sys.argv = ["comment_export.py", "--out", str(tmp_path),
+                "--only", "просрочено", "--print"]
+    export.main()
+
+    out = capsys.readouterr().out
+    assert "Сделка 9 · ВГ 9" in out
+    assert "Записи:" in out
+    assert "Позвонить в пятницу" in out, "исходная запись должна быть видна"
+    assert "обещание: Позвонить" in out
+    assert "просрочено 20 дн" in out
+
+
+def test_without_the_flag_nothing_is_printed(mart, export, tmp_path, capsys):
+    """По умолчанию — только сводка и файл: тысяча карточек в терминал не лезет."""
+    sys.argv = ["comment_export.py", "--out", str(tmp_path)]
+    export.main()
+
+    assert "Записи:" not in capsys.readouterr().out
