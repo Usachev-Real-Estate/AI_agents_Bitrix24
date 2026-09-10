@@ -217,6 +217,34 @@ def pipelines(conn) -> list[dict[str, Any]]:
     return _rows(conn, "SELECT category_id, name, sort FROM dim_pipeline ORDER BY sort, name")
 
 
+def yesterday_window(now: datetime | None = None) -> dict[str, Any]:
+    """Прошлый РАБОЧИЙ день по московскому календарю.
+
+    В понедельник «вчера» — это пятница: сообщение про воскресенье, в котором
+    закономерно ничего не закрыто, обесценивает всю рассылку. Выходные при
+    этом не теряются — в понедельник окно накрывает их целиком.
+
+    Живёт здесь, а не в рассылке, потому что тем же окном пользуется
+    страница «План на день». Второе определение прошлого рабочего дня
+    однажды разошлось бы с первым, и утреннее сообщение спорило бы с
+    экраном о том, что случилось.
+    """
+    now = now or datetime.now(BUSINESS_TZ)
+    end = datetime(now.year, now.month, now.day, tzinfo=BUSINESS_TZ)
+    start = end - timedelta(days=1)
+    while start.weekday() >= 5:
+        start -= timedelta(days=1)
+    label = (
+        "вчера" if (end - start).days == 1
+        else f"{start:%d.%m}–{end - timedelta(days=1):%d.%m}"
+    )
+    return {"since": _utc_iso(start), "until": _utc_iso(end), "label": label}
+
+
+def _utc_iso(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).isoformat()
+
+
 def stages(conn, category_id: int) -> list[dict[str, Any]]:
     return _rows(
         conn,

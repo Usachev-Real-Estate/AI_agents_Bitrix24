@@ -156,9 +156,9 @@ def test_public_path_whitelist(path, expected):
 # --------------------------------------------------------------------------
 
 def test_login_succeeds_and_grants_access(auth_client):
-    response = auth_client.get(f"{BASE}/", follow_redirects=False)
+    response = auth_client.get(f"{BASE}/today", follow_redirects=False)
     assert response.status_code == 200
-    assert "Обзор" in response.text
+    assert "План на день" in response.text
 
 
 def test_logout_revokes_the_session(auth_client):
@@ -229,9 +229,9 @@ def test_disabled_user_cannot_log_in(client):
 
 def test_revoked_session_stops_working(auth_client):
     """Серверные сессии нужны именно ради этого: отзыв доступа мгновенный."""
-    assert auth_client.get(f"{BASE}/").status_code == 200
+    assert auth_client.get(f"{BASE}/today").status_code == 200
     store.revoke_all_sessions(LOGIN)
-    assert auth_client.get(f"{BASE}/").status_code == 303
+    assert auth_client.get(f"{BASE}/today").status_code == 303
 
 
 def test_forged_session_cookie_is_rejected(client):

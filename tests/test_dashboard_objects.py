@@ -311,7 +311,7 @@ def test_section_is_hidden_until_afina_is_configured(app_factory):
     не понять, поломка это или так и задумано.
     """
     session = _login(app_factory(api_key=""))
-    assert "Объекты" not in session.get(f"{BASE}/").text
+    assert "Объекты" not in session.get(f"{BASE}/today").text
 
 
 def test_unconfigured_page_explains_itself_instead_of_calling_afina(
@@ -333,7 +333,7 @@ def test_unconfigured_page_explains_itself_instead_of_calling_afina(
 
 
 def test_configured_section_appears_in_navigation(client, afina_api):
-    assert "Объекты" in client.get(f"{BASE}/").text
+    assert "Объекты" in client.get(f"{BASE}/today").text
 
 
 # --- цифры и плитки ---
@@ -1075,7 +1075,7 @@ def test_rop_sees_the_section_once_the_department_is_mapped(app_factory, wide_af
     """Сопоставили отдел — раздел открылся и появился в меню."""
     session = _rop(app_factory)
     assert session.get(f"{BASE}/objects").status_code == 200
-    assert "Объекты" in session.get(f"{BASE}/").text
+    assert "Объекты" in session.get(f"{BASE}/today").text
 
 
 def test_rop_gets_only_two_chips(app_factory, wide_afina):
@@ -1160,12 +1160,12 @@ def test_an_unmapped_rop_is_refused_rather_than_shown_nothing(app_factory, wide_
                      username=LOGIN_ROP)
     assert session.get(f"{BASE}/objects").status_code == 403
     assert session.get(f"{BASE}/api/objects").status_code == 403
-    assert "Объекты" not in session.get(f"{BASE}/").text
+    assert "Объекты" not in session.get(f"{BASE}/today").text
 
 
 def test_rop_does_not_see_the_section_in_navigation(app_factory, afina_api):
     session = _login(app_factory(), username=LOGIN_ROP)
-    assert "Объекты" not in session.get(f"{BASE}/").text
+    assert "Объекты" not in session.get(f"{BASE}/today").text
 
 
 def test_anonymous_gets_nothing(app_factory, afina_api):

@@ -33,8 +33,10 @@ DEPARTMENT_AWARE_PAGES = frozenset({"movement", "table"})
 ADMIN_ONLY_PAGES = frozenset({"people", "table", "quality"})
 
 NAV = [
+    # «План на день» стоит первым: с этим вопросом дашборд и открывают.
+    # Сводные экраны отвечают на другой — «как дела», — и ждут своей очереди.
+    ("today", "План на день"),
     ("pulse", "Пульс"),
-    ("", "Обзор"),
     ("leads", "Лиды"),
     ("deals", "Сделки"),
     ("movement", "Движение"),

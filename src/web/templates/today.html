@@ -1,0 +1,265 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}План на день{% endblock %}
+
+{#
+  Первая страница дашборда: она отвечает на вопрос, с которым его открывают,
+  — что делать сегодня. Сводные экраны отвечают на другой вопрос, «как дела»,
+  и стоят следом.
+
+  Ни одного собственного правила здесь нет: советы, разбор воронки и списки
+  карточек считает тот же код, что собирает утреннее сообщение. Отличие одно
+  — под сегодняшним лежит полный список: сообщение читают на бегу, страницу
+  открывают, чтобы разобраться.
+
+  Фильтров периода нет намеренно. «Что делать сегодня» не бывает за прошлый
+  месяц, а разбор воронки ведётся по прошлому рабочему дню — тому же окну,
+  что и в утреннем сообщении.
+#}
+{% block filters %}{% endblock %}
+
+{% block content %}
+<h1 class="section-title">План на день</h1>
+<p class="card-sub">То же, что приходит утром в Битрикс. Разбор воронки — за
+  {{ window.label }}.</p>
+
+{# ------------------------------------------------------- что делать #}
+<h2 class="section-title sub mt-16">Что делать сегодня</h2>
+{% if advice and advice.advices %}
+<div class="grid grid-2">
+  {% for item in advice.advices %}
+  <div class="card">
+    <div class="card-head">
+      <div>
+        <h2>{{ item.title }}</h2>
+        {# Имя адресата уже стоит в заголовке — здесь место, объясняющее,
+           почему эти советы соревнуются между собой. #}
+        <p class="card-sub">{{ slot_label.get(item.slot, item.slot) }}</p>
+      </div>
+    </div>
+    <p><strong>{{ item.action }}</strong></p>
+    <p class="muted">Почему: {{ item.proof }}</p>
+    {% set note = repeat_note.get(reasons.get(item.key, '')) %}
+    {% if note %}<p class="delta-down">⚠️ {{ note }}</p>{% endif %}
+    <p class="muted">{{ item.check }}</p>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="card"><div class="empty">Сегодня советов нет: правила ничего не
+  нашли или обо всём найденном говорили на днях.</div></div>
+{% endif %}
+
+{% if advice and advice.resolved %}
+<div class="card mt-16">
+  <h2>Сработало</h2>
+  <ul>
+    {% for row in advice.resolved %}
+    <li>{{ row.who or row.subject }}: было {{ row.was | int_ru }},
+      стало {{ row.now | int_ru }}. Говорил {{ row.days | int_ru }}
+      {{ row.days | plural('день', 'дня', 'дней') }} назад.</li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{# ------------------------------------------------- разбор воронки #}
+<h2 class="section-title sub mt-16">Разбор воронки · {{ window.label }}</h2>
+<div class="grid grid-kpi">
+  {{ ui.tile('Сдвинулись вперёд', events.advanced.deals | int_ru,
+             hint=events.advanced.amount | money(short=True)) }}
+  {{ ui.tile('Откатились назад', events.returned.deals | int_ru,
+             hint=events.returned.amount | money(short=True)) }}
+  {{ ui.tile('Ушли из работы', events.left_work.deals | int_ru,
+             hint=events.left_work.amount | money(short=True)) }}
+  {{ ui.tile('Только что зависли', events.stalled.deals | int_ru,
+             hint='перешагнули норму своей стадии внутри окна') }}
+</div>
+
+{% set blocks = [
+  ('Откатились назад', events.returned, 'Возврат на прежнюю стадию — не движение, а отмена вчерашнего.'),
+  ('Ушли из работы', events.left_work, 'Проигрыш или отложенная продажа: сделка вышла из воронки.'),
+  ('Только что зависли', events.stalled, 'Карточка перешагнула норму своей стадии именно в этом окне — её ещё помнят.'),
+] %}
+{% for label, pack, why in blocks %}
+{% if pack.deals %}
+<div class="card mt-16">
+  <div class="card-head">
+    <div>
+      <h2>{{ label }} · {{ pack.deals | int_ru }}</h2>
+      <p class="card-sub">{{ why }}</p>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Сделка</th><th>Стадия</th><th>Ответственный</th>
+        <th class="num">Сумма</th><th></th></tr></thead>
+      <tbody>
+        {% for row in pack.top %}
+        <tr>
+          <td class="ellipsis" title="{{ row.title }}">{{ row.title }}</td>
+          <td class="nowrap">
+            {%- if row.from_name %}{{ row.from_name }} → {% endif -%}
+            {{ row.to_name or row.stage_name or '—' }}</td>
+          <td>{{ row.assignee or '—' }}</td>
+          <td class="num">{{ row.opportunity | money }}</td>
+          <td class="num nowrap">
+            <a href="{{ crm_link('deal', row.deal_id) }}" target="_blank"
+               rel="noopener">карточка ↗</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if pack.deals > pack.top | length %}
+  <p class="muted">Показаны {{ pack.top | length }} самых дорогих из
+    {{ pack.deals | int_ru }}.</p>
+  {% endif %}
+</div>
+{% endif %}
+{% endfor %}
+
+{% if events.left_work.by_stage %}
+<div class="card mt-16">
+  <h2>С каких стадий уходят</h2>
+  <p class="card-sub">Откуда ушли — важнее, чем сколько: это и есть ответ на
+    вопрос, на каком этапе не дорабатывают.</p>
+  <ul>
+    {% for stage, count in events.left_work.by_stage %}
+    <li>{{ stage }} — {{ count | int_ru }}
+      {{ count | plural('сделка', 'сделки', 'сделок') }}</li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{% if events.quality.won_without_amount or events.quality.without_assignee %}
+<div class="card mt-16">
+  <h2>Испортилось за окно</h2>
+  <p class="card-sub">Не уровень заполненности — он месяцами один и тот же, —
+    а то, что сломали только что. Чинится за минуту, пока помнят, о чём речь.</p>
+  <ul>
+    {% for row in events.quality.won_without_amount %}
+    <li><span class="delta-down">выиграна без суммы</span> ·
+      <a href="{{ crm_link('deal', row.deal_id) }}" target="_blank"
+         rel="noopener">{{ row.title }}</a>
+      {% if row.assignee %}<span class="muted"> · {{ row.assignee }}</span>{% endif %}</li>
+    {% endfor %}
+    {% for row in events.quality.without_assignee %}
+    <li><span class="delta-down">заведена без ответственного</span> ·
+      <a href="{{ crm_link('deal', row.deal_id) }}" target="_blank"
+         rel="noopener">{{ row.title }}</a></li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{% if events.silent.people %}
+<div class="card mt-16">
+  <h2>Не двигали ни одной карточки</h2>
+  <p class="card-sub">Дольше {{ events.silent.idle_days }} дней.</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Кто</th><th>Отдел</th><th class="num">Карточек</th>
+        <th class="num">Молчит</th></tr></thead>
+      <tbody>
+        {% for row in events.silent.people %}
+        <tr>
+          <td>{{ row.name }}</td>
+          <td class="muted">{{ row.department }}</td>
+          <td class="num">{{ row.deals | int_ru }}</td>
+          <td class="num delta-down">{{ row.quiet_days | days }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{# ------------------------------------------ что вынул ИИ из переписки #}
+<h2 class="section-title sub mt-16">Что вынул ИИ из переписки</h2>
+<p class="card-sub">Прочитано в комментариях карточек: что брокер пообещал,
+  где клиент сказал «нет» и где обещание дано без срока. Списки полные, а не
+  первые несколько, — утреннее сообщение показывает только верх.</p>
+
+{% set reads = [
+  ('Просроченные обещания', promises, 'overdue_days',
+   'Срок назван самим брокером, срок прошёл, новой записи нет.'),
+  ('Отказ, не отражённый в стадии', refusals, 'days_in_stage',
+   'Клиент отказался, а карточка стоит в работе и считается живым пайплайном.'),
+  ('Обещание без срока и молчание', vague, 'quiet_days',
+   'Срока брокер не называл, поэтому просрочки нет, — проверяет молчание.'),
+] %}
+{% for label, rows, day_field, why in reads %}
+<div class="card mt-16">
+  <div class="card-head">
+    <div>
+      <h2>{{ label }} · {{ rows | length | int_ru }}</h2>
+      <p class="card-sub">{{ why }}</p>
+    </div>
+  </div>
+  {% if rows %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Сделка</th><th>Стадия</th><th>Брокер</th>
+        <th>Что прочитано</th><th class="num">Дней</th><th></th></tr></thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td class="ellipsis" title="{{ row.title }}">{{ row.title }}</td>
+          <td>{{ row.stage_name }}</td>
+          <td>{{ row.broker or '—' }}</td>
+          <td class="ellipsis"
+              title="{{ row.promised or row.refused_why or '' }}">
+            {{ row.promised or row.refused_why or '—' }}</td>
+          <td class="num delta-down">{{ row[day_field] | days }}</td>
+          <td class="num nowrap">
+            <a href="{{ crm_link('deal', row.deal_id) }}" target="_blank"
+               rel="noopener">карточка ↗</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty">Ничего не нашлось</div>
+  {% endif %}
+</div>
+{% endfor %}
+
+{# --------------------------------------------------- полный список #}
+<h2 class="section-title sub mt-16">Все находки правил</h2>
+<p class="card-sub">Полный список кандидатов. В сообщение уходит по одному на
+  место — остальные лежат здесь, и видно, почему сегодня они молчат.</p>
+
+{% set groups = [
+  ('Придержаны: об этом говорили на днях', held,
+   'Пауза бережёт внимание. Совет, повторённый каждое утро, перестают читать вместе со всей сводкой.'),
+  ('Место занято советом тяжелее', outweighed,
+   'Место — единица сравнения: в нём лежат соизмеримые веса, и второй по тяжести молчит не потому, что неверен.'),
+] %}
+{% for label, items, why in groups %}
+{% if items %}
+<div class="card mt-16">
+  <div class="card-head">
+    <div>
+      <h2>{{ label }} · {{ items | length | int_ru }}</h2>
+      <p class="card-sub">{{ why }}</p>
+    </div>
+  </div>
+  <ul>
+    {% for item in items %}
+    <li><strong>{{ item.title }}</strong>
+      <span class="muted"> · {{ slot_label.get(item.slot, item.slot) }}</span><br>
+      <span class="muted">{{ item.action }}</span></li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+{% endfor %}
+
+{% if not held and not outweighed and not (advice and advice.advices) %}
+<div class="card"><div class="empty">Правила сегодня не нашли ничего.</div></div>
+{% endif %}
+{% endblock %}

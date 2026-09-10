@@ -8,11 +8,12 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 import chartdata
 import metrics
 import objects
+import plan_day
 import plans
 import pulse as pulse_metrics
 import work
@@ -34,21 +35,19 @@ def _default_category(context: dict) -> int | None:
 
 
 @router.get("/", response_class=HTMLResponse)
-async def overview(request: Request) -> HTMLResponse:
-    context = base_context(request, active="")
-    period, category_id = context["period"], context["category_id"]
-    grain = _grain_for(period)
-    with read_analytics(request) as conn:
-        series = metrics.timeseries(
-            conn, period["since"], period["until"], category_id, grain=grain,
-        )
-        context.update({
-            "overview": metrics.overview(conn, period, category_id),
-            "pipeline_counts": metrics.counts_by_pipeline(conn),
-            "leads": metrics.lead_funnel(conn, period["since"], period["until"]),
-            "charts": {"timeseries": chartdata.timeseries_chart(series, grain)},
-        })
-    return _render(request, "overview.html", context)
+async def home(request: Request) -> RedirectResponse:
+    """Корень ведёт на «План на день».
+
+    Раздел «Обзор» убран решением агентства от 10.09: он отвечал на вопрос
+    «как дела вообще», а тот же ответ по частям и точнее дают «Пульс»,
+    «Лиды» и «Сделки». Корень при этом обязан вести куда-то — по адресу
+    дашборда приходят из закладок и из ссылок в сводках, — и ведёт он на
+    первый пункт меню.
+    """
+    query = request.url.query
+    target = f"{request.app.state.config.base_path}/today"
+    return RedirectResponse(f"{target}?{query}" if query else target,
+                            status_code=307)
 
 
 @router.get("/pulse", response_class=HTMLResponse)
@@ -69,6 +68,35 @@ async def pulse(request: Request) -> HTMLResponse:
             "quarters": _quarter_choices(),
         })
     return _render(request, "pulse.html", context)
+
+
+@router.get("/today", response_class=HTMLResponse)
+async def today(request: Request) -> HTMLResponse:
+    """«План на день» — то же, что приходит утром в Битрикс, но на экране.
+
+    Первая страница дашборда: она отвечает на вопрос, с которым его и
+    открывают, — что делать сегодня. Сводные экраны отвечают на другой
+    вопрос, «как дела», и стоят следом.
+
+    Правила здесь не свои: и советы, и разбор воронки, и списки карточек
+    считает тот же код, что собирает утреннее сообщение. Отличие одно —
+    под сегодняшними советами лежит полный список кандидатов, включая
+    придержанные памятью: сообщение читают на бегу, страницу открывают,
+    когда хотят разобраться.
+    """
+    context = base_context(request, active="today")
+    settings = request.app.state.settings
+    period_code = _quarter_code(request.query_params.get("period_code"))
+    with read_analytics(request) as conn:
+        context.update(plan_day.gather(
+            conn, settings,
+            period_code=period_code,
+            window=metrics.yesterday_window(),
+        ))
+    context["period_code"] = period_code
+    context["repeat_note"] = plan_day.REPEAT
+    context["slot_label"] = plan_day.SLOT_LABEL
+    return _render(request, "today.html", context)
 
 
 @router.get("/leads", response_class=HTMLResponse)
