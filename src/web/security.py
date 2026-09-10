@@ -191,11 +191,20 @@ def set_csrf_cookie(response: Response, token: str, config: SecurityConfig) -> N
 
 
 def check_csrf(request: Request, form_token: str | None) -> bool:
-    """Двойная отправка: значение из куки должно совпасть со значением формы."""
+    """Двойная отправка: значение из куки должно совпасть со значением формы.
+
+    Сравниваются БАЙТЫ, а не строки. hmac.compare_digest на строках
+    отказывается работать, если в них есть что-то кроме ASCII, и падает
+    TypeError — то есть подставленный в поле кириллический мусор давал не
+    отказ, а пятисотую. Форма входа публична, так что уронить обработчик
+    мог кто угодно, не имея учётки. Постоянное время сравнения на байтах
+    сохраняется.
+    """
     cookie_token = request.cookies.get(COOKIE_CSRF) or ""
     if not cookie_token or not form_token:
         return False
-    return hmac.compare_digest(cookie_token, form_token)
+    return hmac.compare_digest(cookie_token.encode("utf-8"),
+                               form_token.encode("utf-8"))
 
 
 # --------------------------------------------------------------------------

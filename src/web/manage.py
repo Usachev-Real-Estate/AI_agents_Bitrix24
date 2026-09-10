@@ -28,7 +28,8 @@ if __package__ in (None, ""):
 
 import store  # noqa: E402
 
-MIN_PASSWORD_LEN = 10
+# Длина пароля названа в store: её проверяет и веб-форма, и эта команда.
+MIN_PASSWORD_LEN = store.MIN_PASSWORD_LEN
 
 
 def _read_password(confirm: bool = True) -> str:
@@ -153,10 +154,12 @@ def _scope_text(role: str, departments: list[int]) -> str:
 
 def cmd_passwd(args: argparse.Namespace) -> int:
     store.init_store()
-    existing = {u["username"] for u in store.list_users()}
-    if args.username.strip().lower() not in existing:
+    # set_password, а не create_user: вторая на существующем логине
+    # переписывает строку целиком, и «смени пароль» разжаловало бы
+    # администратора в РОПа без отделов — молча, потому что учётка остаётся
+    # на месте и вход работает.
+    if not store.set_password(args.username, _read_password()):
         raise SystemExit(f"Нет такого пользователя: {args.username}")
-    store.create_user(args.username, _read_password())
     revoked = store.revoke_all_sessions(args.username)
     # Смена пароля обязана выкидывать старые сессии: иначе тот, ради кого
     # пароль меняли, продолжит сидеть в дашборде по своей куке.
