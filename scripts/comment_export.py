@@ -81,13 +81,20 @@ def rows(conn, late: set[int]):
                COALESCE(s.name, d.stage_id) AS stage,
                r.promised, r.promised_at, r.wait_until, r.refused,
                r.refused_why, r.ready, r.terms, r.prompt_version, r.read_at,
-               ROUND(julianday('now')
-                     - julianday(MAX(c.created_at))) AS quiet_days,
-               ROUND(julianday('now')
-                     - julianday(r.promised_at)) AS overdue_days
+               -- Отсчёт от полуночи, а не от текущей секунды. julianday('now')
+               -- даёт дробную часть суток, и после полудня ROUND добавлял
+               -- лишний день: одна и та же карточка до обеда «просрочена на
+               -- 20 дн», после — на 21, а обещание на послезавтра к вечеру
+               -- становилось «срок через 1 дн». Число, меняющееся в течение
+               -- дня само по себе, нельзя ни проверить, ни сверить с утренней
+               -- сводкой, которая считает по дате.
+               ROUND(julianday(date('now'))
+                     - julianday(date(MAX(c.created_at)))) AS quiet_days,
+               ROUND(julianday(date('now'))
+                     - julianday(date(r.promised_at))) AS overdue_days
         FROM v_comment_read r
         JOIN v_deal d ON d.deal_id = r.entity_id
-        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
+        LEFT JOIN v_user_all u ON u.user_id = d.assigned_by_id
         LEFT JOIN dim_stage s
                ON s.stage_id = d.stage_id AND s.category_id = d.category_id
         LEFT JOIN v_comment c

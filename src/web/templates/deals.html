@@ -14,8 +14,6 @@
   {{ ui.tile('Выиграно', wins.won | int_ru) }}
   {{ ui.tile('Доля выигранных', wins.win_rate | pct,
              hint='из ' ~ (wins.closed | int_ru) ~ ' закрытых за период') }}
-  {{ ui.tile('Цикл сделки', cycle.median | days,
-             hint='медиана; p75 ' ~ (cycle.p75 | days)) }}
   {% if with_money %}
   {{ ui.tile('Выиграно денег', wins.won_amount | money(short=True)) }}
   {{ ui.tile('Средний чек', wins.avg_check | money(short=True),
@@ -272,7 +270,6 @@
         <tr>
           <td>{{ row.name or '—' }}<span class="muted"> · {{ row.department }}</span>
             {% if row.service %}<span class="badge">общая линия</span>
-            {% elif not row.is_active %}<span class="badge">не работает</span>
             {% elif not row.sells %}<span class="badge">не в продажах</span>{% endif %}</td>
           <td class="num">{{ row.incoming | int_ru }}</td>
           <td class="num">{{ row.missed | int_ru }}</td>

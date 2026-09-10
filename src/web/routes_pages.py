@@ -8,15 +8,16 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 import chartdata
 import metrics
 import objects
+import plan_day
 import plans
 import pulse as pulse_metrics
 import work
-from context import base_context, read_analytics
+from context import ADMIN_ONLY_PAGES, base_context, read_analytics
 
 router = APIRouter()
 
@@ -34,21 +35,19 @@ def _default_category(context: dict) -> int | None:
 
 
 @router.get("/", response_class=HTMLResponse)
-async def overview(request: Request) -> HTMLResponse:
-    context = base_context(request, active="")
-    period, category_id = context["period"], context["category_id"]
-    grain = _grain_for(period)
-    with read_analytics(request) as conn:
-        series = metrics.timeseries(
-            conn, period["since"], period["until"], category_id, grain=grain,
-        )
-        context.update({
-            "overview": metrics.overview(conn, period, category_id),
-            "pipeline_counts": metrics.counts_by_pipeline(conn),
-            "leads": metrics.lead_funnel(conn, period["since"], period["until"]),
-            "charts": {"timeseries": chartdata.timeseries_chart(series, grain)},
-        })
-    return _render(request, "overview.html", context)
+async def home(request: Request) -> RedirectResponse:
+    """Корень ведёт на «План на день».
+
+    Раздел «Обзор» убран решением агентства от 10.09: он отвечал на вопрос
+    «как дела вообще», а тот же ответ по частям и точнее дают «Пульс»,
+    «Лиды» и «Сделки». Корень при этом обязан вести куда-то — по адресу
+    дашборда приходят из закладок и из ссылок в сводках, — и ведёт он на
+    первый пункт меню.
+    """
+    query = request.url.query
+    target = f"{request.app.state.config.base_path}/today"
+    return RedirectResponse(f"{target}?{query}" if query else target,
+                            status_code=307)
 
 
 @router.get("/pulse", response_class=HTMLResponse)
@@ -71,6 +70,35 @@ async def pulse(request: Request) -> HTMLResponse:
     return _render(request, "pulse.html", context)
 
 
+@router.get("/today", response_class=HTMLResponse)
+async def today(request: Request) -> HTMLResponse:
+    """«План на день» — то же, что приходит утром в Битрикс, но на экране.
+
+    Первая страница дашборда: она отвечает на вопрос, с которым его и
+    открывают, — что делать сегодня. Сводные экраны отвечают на другой
+    вопрос, «как дела», и стоят следом.
+
+    Правила здесь не свои: и советы, и разбор воронки, и списки карточек
+    считает тот же код, что собирает утреннее сообщение. Отличие одно —
+    под сегодняшними советами лежит полный список кандидатов, включая
+    придержанные памятью: сообщение читают на бегу, страницу открывают,
+    когда хотят разобраться.
+    """
+    context = base_context(request, active="today")
+    settings = request.app.state.settings
+    period_code = _quarter_code(request.query_params.get("period_code"))
+    with read_analytics(request) as conn:
+        context.update(plan_day.gather(
+            conn, settings,
+            period_code=period_code,
+            window=metrics.yesterday_window(),
+        ))
+    context["period_code"] = period_code
+    context["repeat_note"] = plan_day.REPEAT
+    context["slot_label"] = plan_day.SLOT_LABEL
+    return _render(request, "today.html", context)
+
+
 @router.get("/leads", response_class=HTMLResponse)
 async def leads(request: Request) -> HTMLResponse:
     context = base_context(request, active="leads")
@@ -80,9 +108,6 @@ async def leads(request: Request) -> HTMLResponse:
         context.update({
             "funnel": funnel,
             "sources": metrics.lead_sources(conn, period["since"], period["until"]),
-            "first_move": metrics.lead_first_move_days(
-                conn, period["since"], period["until"],
-            ),
             "charts": {"funnel": chartdata.lead_funnel_chart(funnel)},
         })
     return _render(request, "leads.html", context)
@@ -108,9 +133,6 @@ async def deals(request: Request) -> HTMLResponse:
             "funnel": funnel,
             "durations": durations,
             "wins": metrics.win_rate(conn, category_id, period["since"], period["until"]),
-            "cycle": metrics.deal_cycle_days(
-                conn, category_id, period["since"], period["until"],
-            ),
             "money": metrics.money(conn, category_id, period["since"], period["until"]),
             "forecast": metrics.weighted_forecast(conn, category_id),
             # Разрез по источнику живёт здесь, а не на «Лидах»: лид до сделки
@@ -147,7 +169,7 @@ async def movement(request: Request) -> HTMLResponse:
         if category_id is None:
             context.update({
                 "movement": [], "transitions": None, "stuck": [],
-                "charts": {}, "matrix": None,
+                "moves": None, "charts": {}, "matrix": None,
             })
             return _render(request, "movement.html", context)
         department_id = context["department_id"]
@@ -161,6 +183,12 @@ async def movement(request: Request) -> HTMLResponse:
             "movement": movement_rows,
             "transitions": transitions,
             "stuck": metrics.stuck_deals(conn, category_id, department_id=department_id),
+            # Поимённо: кто, куда и что после этого написал. Сводные числа
+            # выше говорят, что движение есть; здесь видно, было ли за ним
+            # что-нибудь, кроме клика.
+            "moves": metrics.stage_moves(
+                conn, category_id, period["since"], period["until"], department_id,
+            ),
             # Сравнение отделов рядом — вопрос, который фильтром «один отдел»
             # не задать: где именно каждый теряет клиентов и где тормозит.
             "by_department": metrics.funnel_by_department(
@@ -177,6 +205,8 @@ async def movement(request: Request) -> HTMLResponse:
 @router.get("/people", response_class=HTMLResponse)
 async def people(request: Request) -> HTMLResponse:
     context = base_context(request, active="people")
+    if _closed_for(context):
+        return _forbidden(request, context)
     period, category_id = context["period"], context["category_id"]
     with read_analytics(request) as conn:
         rows = metrics.people(conn, period["since"], period["until"], category_id)
@@ -193,6 +223,8 @@ async def people(request: Request) -> HTMLResponse:
 @router.get("/table", response_class=HTMLResponse)
 async def table(request: Request) -> HTMLResponse:
     context = base_context(request, active="table")
+    if _closed_for(context):
+        return _forbidden(request, context)
     params = request.query_params
     period = context["period"]
     entity = params.get("entity", "deal")
@@ -291,6 +323,8 @@ def objects_page(request: Request) -> HTMLResponse:
 @router.get("/quality", response_class=HTMLResponse)
 async def quality(request: Request) -> HTMLResponse:
     context = base_context(request, active="quality")
+    if _closed_for(context):
+        return _forbidden(request, context)
     with read_analytics(request) as conn:
         context.update({
             "quality": metrics.data_quality(conn, context["category_id"]),
@@ -331,6 +365,16 @@ def _quarter_choices(depth: int = 4) -> list[tuple[str, str]]:
         if quarter == 0:
             year, quarter = year - 1, 4
     return out
+
+
+def _closed_for(context: dict) -> bool:
+    """Административный ли это раздел и закрыт ли он текущему пользователю.
+
+    Список разделов один и тот же для меню и для маршрута — он лежит в
+    context.ADMIN_ONLY_PAGES. Прятать пункт меню, не закрывая маршрут, —
+    не ограничение вовсе: адрес набирается руками.
+    """
+    return context["active"] in ADMIN_ONLY_PAGES and not context["is_admin"]
 
 
 def _forbidden(request: Request, context: dict) -> HTMLResponse:

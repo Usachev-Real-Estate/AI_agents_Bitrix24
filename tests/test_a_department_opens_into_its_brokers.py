@@ -6,9 +6,13 @@
 
 Главное требование к этой таблице — она обязана сходиться со своим же
 итогом. Строки, не дающие в сумме факт отдела, проверят один раз и
-перестанут верить обеим цифрам. Поэтому в список попадают и те, кого в
-плановом составе уже нет: уволенный в середине квартала оставил отделу
-настоящие деньги.
+перестанут верить обеим цифрам. Поэтому деньги тех, кого в плановом составе
+уже нет, из таблицы не вычитаются: уволенный в середине квартала оставил
+отделу настоящие деньги.
+
+Фамилии его там при этом нет. Ушедшие сложены в одну строку «Уволенные»:
+итог сходится, а строки, которую нельзя ни выполнить, ни обсудить, в
+разговоре о людях не заводится.
 """
 
 import pytest
@@ -108,13 +112,21 @@ def test_a_broker_without_a_norm_has_no_percent(department):
     assert people[4]["fact"] == 700_000
 
 
-def test_the_departed_broker_is_listed_and_marked(department):
-    """Уволенного нет в составе, но его деньги в отделе — значит, он в списке."""
-    _, people = _brokers()
+def test_the_departed_broker_is_counted_but_not_named(department):
+    """Деньги ушедшего в отделе остались, фамилия из таблицы ушла.
 
-    assert people[9]["fact"] == 600_000
-    assert people[9]["in_roster"] is False, "строка обязана объяснить, кто это"
-    assert people[9]["name"] == "Ушедший Брокер"
+    Проверяется и то и другое сразу: убрать строку целиком значило бы
+    развалить итог, а оставить фамилию — предложить спросить с человека,
+    которого в агентстве нет.
+    """
+    row, people = _brokers()
+
+    assert "Ушедший" not in " ".join(man["name"] for man in row["brokers"])
+    gone = people[0]
+    assert gone["gone"] is True
+    assert gone["name"] == "Уволенные · 1 человек"
+    assert gone["fact"] == 600_000
+    assert gone["deals"] == 1
 
 
 def test_the_rop_is_listed_as_a_rop(department):
@@ -132,7 +144,7 @@ def test_those_who_promised_come_first(department):
     order = [man["user_id"] for man in row["brokers"]]
 
     assert order[:2] == [2, 3], "с нормой — сверху вниз по выполнению"
-    assert set(order[2:]) == {1, 4, 9}
+    assert set(order[2:]) == {1, 4, 0}, "0 — сводная строка ушедших"
     rest = [man["fact"] for man in row["brokers"][2:]]
     assert rest == sorted(rest, reverse=True), "остальные — по деньгам"
 

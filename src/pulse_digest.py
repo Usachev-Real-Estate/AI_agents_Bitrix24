@@ -33,7 +33,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +44,10 @@ for extra in (_SRC, _SRC / "analytics", _SRC / "web"):
 
 import events as funnel  # noqa: E402
 import metrics  # noqa: E402
+# «Вчера» живёт в metrics, а не здесь: то же окно нужно странице «План
+# на день», а два определения прошлого рабочего дня однажды разошлись бы
+# — и сообщение с экраном стали бы спорить о том, что случилось.
+from metrics import yesterday_window  # noqa: E402
 import plans  # noqa: E402
 import pulse as pulse_metrics  # noqa: E402
 import advice  # noqa: E402
@@ -758,31 +762,6 @@ def _tail(data: dict[str, Any], url: str) -> list[str]:
 # --------------------------------------------------------------------------
 # сбор и доставка
 # --------------------------------------------------------------------------
-
-def yesterday_window(now: datetime | None = None) -> dict[str, Any]:
-    """Прошлый РАБОЧИЙ день по московскому календарю.
-
-    В понедельник «вчера» — это пятница: сообщение про воскресенье, в котором
-    закономерно ничего не закрыто, обесценивает всю рассылку. Выходные при
-    этом не теряются — в понедельник окно накрывает их целиком.
-    """
-    now = now or datetime.now(metrics.BUSINESS_TZ)
-    end = datetime(now.year, now.month, now.day, tzinfo=metrics.BUSINESS_TZ)
-    start = end - timedelta(days=1)
-    while start.weekday() >= 5:
-        start -= timedelta(days=1)
-    label = (
-        "вчера" if (end - start).days == 1
-        else f"{start:%d.%m}–{end - timedelta(days=1):%d.%m}"
-    )
-    return {"since": _iso(start), "until": _iso(end), "label": label}
-
-
-def _iso(moment: datetime) -> str:
-    from datetime import timezone
-
-    return moment.astimezone(timezone.utc).isoformat()
-
 
 def closed_in(conn, window: dict[str, Any]) -> dict[str, Any]:
     """Сколько закрыто за окно. Область видимости приходит соединением.

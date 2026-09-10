@@ -115,8 +115,8 @@ PERIOD = "?start=2026-08-01&end=2026-08-31&category=18"
 
 
 @pytest.mark.parametrize("path", [
-    "/", "/pulse", "/leads", "/deals", "/movement", "/people", "/objects",
-    "/table", "/quality",
+    "/today", "/pulse", "/leads", "/deals", "/movement", "/people",
+    "/objects", "/table", "/quality",
 ])
 def test_every_page_renders(client, path):
     response = client.get(f"{BASE}{path}{PERIOD}")
@@ -125,10 +125,33 @@ def test_every_page_renders(client, path):
     assert response.headers["content-type"].startswith("text/html")
 
 
+def test_the_root_leads_to_the_plan_for_the_day(client):
+    """Раздел «Обзор» убран, но по корню продолжают приходить.
+
+    Адрес дашборда лежит в закладках и в ссылках утренних сводок. Корень,
+    отвечающий пустотой или отказом, читается как «дашборд сломался», а не
+    как «раздел переехал».
+    """
+    response = client.get(f"{BASE}/{PERIOD}", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"].startswith(f"{BASE}/today")
+    # Фильтры переезжают вместе с человеком: иначе он попадёт на страницу с
+    # другим периодом и увидит другие числа, чем те, по которым кликнул.
+    assert "start=2026-08-01" in response.headers["location"]
+
+    assert client.get(f"{BASE}/{PERIOD}", follow_redirects=True).status_code == 200
+
+
+def test_the_overview_section_is_gone_from_the_menu(client):
+    body = client.get(f"{BASE}/today").text
+    assert ">Обзор<" not in body
+    assert ">План на день<" in body
+
+
 def test_pulse_names_the_funnel_it_counted(client):
     """Число, посчитанное по одной воронке, обязано назвать её на экране.
 
-    Рядом на «Обзоре» лежит факт по всем воронкам сразу. Два разных числа
+    Рядом на «Сделках» лежит факт по выбранной воронке. Два разных числа
     без подписи читаются как ошибка одного из них, и разбираться пойдут не
     в настройку, а в доверие к отчёту.
     """
@@ -145,9 +168,14 @@ def test_pulse_opens_a_department_into_its_brokers(client):
     assert 'href="#dept-' in body, "имя отдела в таблице — ссылка на его блок"
 
 
-def test_overview_shows_money_with_coverage(client):
-    """Сумма без покрытия вводит в заблуждение — покрытие обязано быть на странице."""
-    body = client.get(f"{BASE}/{PERIOD}").text
+def test_money_is_shown_with_its_coverage(client):
+    """Сумма без покрытия вводит в заблуждение — покрытие обязано быть рядом.
+
+    Проверялось на «Обзоре», пока он был. Раздел убран, а требование
+    осталось и переехало туда, где деньги теперь и живут: сумма без доли
+    заполненных карточек — это не приблизительное число, а неверное.
+    """
+    body = client.get(f"{BASE}/deals{PERIOD}").text
     assert "заполнено" in body
     # Открытая сделка одна, и сумма у неё пустая.
     assert "0 из 1" in body or "0%" in body
@@ -217,11 +245,11 @@ def test_empty_warehouse_explains_itself_instead_of_crashing(analytics_db, monke
         "username": LOGIN, "password": PASSWORD,
         "csrf_token": session.cookies.get("dash_csrf"), "next": "",
     })
-    for path in ("/", "/pulse", "/deals", "/movement", "/leads", "/quality",
-                 "/table", "/objects"):
+    for path in ("/today", "/pulse", "/deals", "/movement", "/leads",
+                 "/quality", "/table", "/objects"):
         response = session.get(f"{BASE}{path}")
         assert response.status_code == 200, f"{path}: {response.text[:400]}"
-    assert "ETL ещё ни разу не отработал" in session.get(f"{BASE}/").text
+    assert "ETL ещё ни разу не отработал" in session.get(f"{BASE}/today").text
 
 
 def test_movement_page_offers_a_department_filter(client):

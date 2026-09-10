@@ -217,6 +217,34 @@ def pipelines(conn) -> list[dict[str, Any]]:
     return _rows(conn, "SELECT category_id, name, sort FROM dim_pipeline ORDER BY sort, name")
 
 
+def yesterday_window(now: datetime | None = None) -> dict[str, Any]:
+    """Прошлый РАБОЧИЙ день по московскому календарю.
+
+    В понедельник «вчера» — это пятница: сообщение про воскресенье, в котором
+    закономерно ничего не закрыто, обесценивает всю рассылку. Выходные при
+    этом не теряются — в понедельник окно накрывает их целиком.
+
+    Живёт здесь, а не в рассылке, потому что тем же окном пользуется
+    страница «План на день». Второе определение прошлого рабочего дня
+    однажды разошлось бы с первым, и утреннее сообщение спорило бы с
+    экраном о том, что случилось.
+    """
+    now = now or datetime.now(BUSINESS_TZ)
+    end = datetime(now.year, now.month, now.day, tzinfo=BUSINESS_TZ)
+    start = end - timedelta(days=1)
+    while start.weekday() >= 5:
+        start -= timedelta(days=1)
+    label = (
+        "вчера" if (end - start).days == 1
+        else f"{start:%d.%m}–{end - timedelta(days=1):%d.%m}"
+    )
+    return {"since": _utc_iso(start), "until": _utc_iso(end), "label": label}
+
+
+def _utc_iso(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).isoformat()
+
+
 def stages(conn, category_id: int) -> list[dict[str, Any]]:
     return _rows(
         conn,
@@ -243,7 +271,7 @@ def _department_filter(event_alias: str = "e") -> str:
     return f"""
           AND (:dept IS NULL OR EXISTS (
                 SELECT 1 FROM v_deal fd
-                JOIN v_user du ON du.user_id = fd.assigned_by_id
+                JOIN v_user_all du ON du.user_id = fd.assigned_by_id
                 WHERE fd.deal_id = {event_alias}.entity_id
                   AND du.department_id = :dept))
     """
@@ -283,7 +311,7 @@ def rop_by_department(conn) -> dict[int, dict[str, Any]]:
     for row in _rows(
         conn,
         "SELECT user_id, name, last_name, department_id FROM v_user "
-        "WHERE is_active = 1 AND department_id IS NOT NULL AND last_name <> ''",
+        "WHERE department_id IS NOT NULL AND last_name <> ''",
     ):
         surname = str(row["last_name"]).strip().lower()
         if surname in ROP_SURNAMES:
@@ -400,7 +428,7 @@ def funnel_by_department(
         row["department_id"]: row["name"]
         for row in _rows(
             conn,
-            "SELECT DISTINCT department_id, department_name AS name FROM v_user "
+            "SELECT DISTINCT department_id, department_name AS name FROM v_user_all "
             "WHERE department_id IS NOT NULL AND department_name IS NOT NULL",
         )
     }
@@ -677,6 +705,104 @@ def stage_transitions(
     }
 
 
+# Сколько переходов показывать поимённо. Больше двухсот строк никто не
+# читает, а страница на живом месяце их набирает под тысячу.
+MOVES_SHOWN = 200
+
+
+def stage_moves(
+    conn,
+    category_id: int,
+    since: str,
+    until: str,
+    department_id: int | None = None,
+    limit: int = MOVES_SHOWN,
+) -> dict[str, Any]:
+    """Переходы карточек поимённо: куда сдвинули и что после этого сделали.
+
+    stage_transitions() отвечает на тот же вопрос счётчиками — сколько раз
+    из «Подбора» ушли в «Показ». Здесь нужны сами карточки: сводное число
+    говорит, что движение есть, но не даёт задать ни одного вопроса
+    конкретному человеку.
+
+    Главное здесь — последняя колонка. Перевод карточки на следующую стадию
+    сам по себе не работа: в Битриксе это один клик, и стадию двигают, когда
+    просят «подтянуть воронку». Работа — то, что после клика: запись о
+    разговоре или поставленное дело. Переход без того и другого — ровно та
+    строка, ради которой блок и заводится, и она подсвечена.
+
+    «Что написал» ищется НЕ «после перехода вообще», а внутри стояния на
+    новой стадии: от входа до выхода (left_at). Иначе запись, сделанная
+    через три стадии и два месяца, оправдывала бы давно забытый переход, и
+    красных строк на экране не осталось бы вовсе.
+
+    Кто двинул — вопрос, на который витрина честно ответить не может:
+    crm.stagehistory.list автора перехода не отдаёт, его нет и в самом
+    Битриксе. Поэтому здесь ТЕКУЩИЙ ответственный за карточку, и страница
+    называет колонку его именем, а не «кто двинул». Автор записи при этом
+    настоящий — у комментария автор есть.
+    """
+    rows = _rows(
+        conn,
+        """
+        SELECT d.deal_id, d.title, d.opportunity, d.currency_id,
+               e2.entered_at AS moved_at,
+               COALESCE(sf.name, e1.stage_id) AS from_name,
+               COALESCE(st.name, e2.stage_id) AS to_name,
+               COALESCE(sf.sort, 0) AS from_sort,
+               COALESCE(st.sort, 0) AS to_sort,
+               d.assigned_by_id AS user_id,
+               COALESCE(u.name, '') AS assignee,
+               COALESCE(u.department_name, '') AS department,
+               (SELECT c.body FROM v_comment c
+                 WHERE c.entity_id = d.deal_id AND c.is_auto = 0
+                   AND c.created_at >= e2.entered_at
+                   AND (e2.left_at IS NULL OR c.created_at < e2.left_at)
+                 ORDER BY c.created_at LIMIT 1) AS note,
+               (SELECT COALESCE(au.name, '') FROM v_comment c
+                  LEFT JOIN v_user_all au ON au.user_id = c.author_id
+                 WHERE c.entity_id = d.deal_id AND c.is_auto = 0
+                   AND c.created_at >= e2.entered_at
+                   AND (e2.left_at IS NULL OR c.created_at < e2.left_at)
+                 ORDER BY c.created_at LIMIT 1) AS note_author,
+               (SELECT a.subject FROM v_activity a
+                 WHERE ((a.owner_type_id = 2 AND a.owner_id = d.deal_id)
+                        OR (a.owner_type_id = 3 AND d.contact_id IS NOT NULL
+                            AND d.contact_id > 0 AND a.owner_id = d.contact_id))
+                   AND a.created_at >= e2.entered_at
+                   AND (e2.left_at IS NULL OR a.created_at < e2.left_at)
+                 ORDER BY a.created_at LIMIT 1) AS task
+        FROM v_stage_event e1
+        JOIN v_stage_event e2
+          ON e2.entity_type = e1.entity_type AND e2.entity_id = e1.entity_id
+         AND e2.seq = e1.seq + 1
+        JOIN v_deal d ON d.deal_id = e1.entity_id
+        LEFT JOIN dim_stage sf ON sf.stage_id = e1.stage_id AND sf.category_id = :cat
+        LEFT JOIN dim_stage st ON st.stage_id = e2.stage_id AND st.category_id = :cat
+        LEFT JOIN v_user_all u ON u.user_id = d.assigned_by_id
+        WHERE e1.entity_type = 'deal' AND d.category_id = :cat
+          AND e2.entered_at >= :since AND e2.entered_at < :until
+          AND (:dept IS NULL OR u.department_id = :dept)
+        """,
+        {"cat": category_id, "since": since, "until": until, "dept": department_id},
+    )
+    for row in rows:
+        row["note"] = (row["note"] or "").strip()
+        row["task"] = (row["task"] or "").strip()
+        row["backwards"] = row["to_sort"] < row["from_sort"]
+        # Ни записи, ни дела: клик был, работы не видно.
+        row["silent"] = not row["note"] and not row["task"]
+    # Молчаливые наверх, внутри — по деньгам: разговор начинают с самого
+    # дорогого следа, который никто не оставил.
+    rows.sort(key=lambda row: (not row["silent"], -(row["opportunity"] or 0)))
+    return {
+        "rows": rows[:limit],
+        "total": len(rows),
+        "silent": sum(1 for row in rows if row["silent"]),
+        "shown": min(len(rows), limit),
+    }
+
+
 def stage_durations(conn, category_id: int, since: str, until: str) -> list[dict[str, Any]]:
     """Сколько времени сделки проводят на каждой стадии.
 
@@ -897,7 +1023,7 @@ def _stuck_rows(
                       WHERE last.entity_type = 'deal' AND last.entity_id = d.deal_id
                         AND last.stage_id = d.stage_id AND last.left_at IS NULL)
         LEFT JOIN dim_stage s ON s.stage_id = d.stage_id AND s.category_id = d.category_id
-        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
+        LEFT JOIN v_user_all u ON u.user_id = d.assigned_by_id
         WHERE d.category_id = :cat AND d.is_closed = 0
           AND (:dept IS NULL OR u.department_id = :dept)
         ORDER BY days_in_stage DESC
@@ -1355,7 +1481,7 @@ def people(conn, since: str, until: str, category_id: int | None = None) -> list
     """Срез по ответственным: нагрузка когорты и закрытые за период деньги.
 
     «Выиграно» и «Выиграно денег» считаются ровно тем же определением, что на
-    «Обзоре» и «Сделках»: закрытые в периоде, по дате закрытия. Раньше здесь
+    «Сделках»: закрытые в периоде, по дате закрытия. Раньше здесь
     брались сделки, СОЗДАННЫЕ в периоде, и без требования быть закрытой —
     достаточно было стоять на успешной стадии. Одна и та же подпись давала на
     двух страницах разные числа, и сумма по людям не сходилась с итогом
@@ -1388,8 +1514,18 @@ def people(conn, since: str, until: str, category_id: int | None = None) -> list
                                   AND {money_ok}
                                  THEN d.opportunity ELSE 0 END), 0) AS won_amount
         FROM v_deal d
-        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
-        WHERE (:cat IS NULL OR d.category_id = :cat)
+        LEFT JOIN v_user_all u ON u.user_id = d.assigned_by_id
+        -- Справочник полный, а лишнее убирает условие, и разница тут
+        -- смысловая. Строк без человека две: сделка без ответственного и
+        -- сделка на чужом id, которого в портале уже нет. Обе — находка, и
+        -- страница их называет, а не прячет за пустой ячейкой. Обычное
+        -- соединение убрало бы вместе с уволенным и эти две.
+        --
+        -- COALESCE(..., 1): нет строки в справочнике — значит и увольнять
+        -- было некого, карточка остаётся. Есть строка и в ней 0 — человек
+        -- ушёл, и отчитываться о нём отдельной строкой не о чем.
+        WHERE COALESCE(u.is_active, 1) = 1
+          AND (:cat IS NULL OR d.category_id = :cat)
           AND ((d.date_create >= :since AND d.date_create < :until)
                OR (d.is_closed = 1
                    AND d.closedate >= :since AND d.closedate < :until))
@@ -1595,7 +1731,7 @@ def entity_table(
         base = """
         FROM v_deal d
         LEFT JOIN dim_stage s ON s.stage_id = d.stage_id AND s.category_id = d.category_id
-        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
+        LEFT JOIN v_user_all u ON u.user_id = d.assigned_by_id
         LEFT JOIN dim_source src ON src.source_id = d.source_id
         LEFT JOIN v_stage_event e
                ON e.entity_type = 'deal' AND e.entity_id = d.deal_id AND e.left_at IS NULL
@@ -1648,7 +1784,7 @@ def entity_table(
         base = """
         FROM v_lead l
         LEFT JOIN dim_lead_status st ON st.status_id = l.status_id
-        LEFT JOIN v_user u ON u.user_id = l.assigned_by_id
+        LEFT JOIN v_user_all u ON u.user_id = l.assigned_by_id
         LEFT JOIN dim_source src ON src.source_id = l.source_id
         LEFT JOIN v_stage_event e
                ON e.entity_type = 'lead' AND e.entity_id = l.lead_id AND e.left_at IS NULL

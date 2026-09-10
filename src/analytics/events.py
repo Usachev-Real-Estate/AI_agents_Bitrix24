@@ -121,7 +121,7 @@ def _moves(
           ON sf.stage_id = e1.stage_id AND sf.category_id = d.category_id
         LEFT JOIN dim_stage st
           ON st.stage_id = e2.stage_id AND st.category_id = d.category_id
-        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
+        LEFT JOIN v_user_all u ON u.user_id = d.assigned_by_id
         WHERE e1.entity_type = 'deal' AND d.is_closed = 0 AND {where}
           AND COALESCE(st.semantic, '') <> 'lost'
           AND e2.entered_at >= :since AND e2.entered_at < :until
@@ -167,7 +167,7 @@ def _left_work(
          AND st.semantic = 'lost'
         LEFT JOIN dim_stage sf
           ON sf.stage_id = e1.stage_id AND sf.category_id = d.category_id
-        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
+        LEFT JOIN v_user_all u ON u.user_id = d.assigned_by_id
         WHERE e1.entity_type = 'deal' AND {where}
           AND e2.entered_at >= :since AND e2.entered_at < :until
         ORDER BY d.opportunity DESC
@@ -254,7 +254,7 @@ def _quality(
         f"""
         SELECT d.deal_id, d.title, COALESCE(u.name, '') AS assignee
         FROM v_deal d
-        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
+        LEFT JOIN v_user_all u ON u.user_id = d.assigned_by_id
         WHERE d.is_won = 1 AND (d.opportunity IS NULL OR d.opportunity <= 0)
           AND d.closedate >= :since AND d.closedate < :until AND {where}
         ORDER BY d.deal_id

@@ -55,6 +55,27 @@ def no_bitrix_network(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tools, "_bx_get_all_sync", _blocked)
 
 
+@pytest.fixture(autouse=True)
+def agent_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Изолированная база агента на тест.
+
+    ``db.DB_PATH`` — константа модуля, а не настройка, и указывает она на
+    боевой data/violations.db. Без подмены прогон в рабочем каталоге читал
+    бы настоящую память советов и настоящие нарушения: тест то проходил бы,
+    то нет, в зависимости от того, что вчера сказала рассылка. Хуже того,
+    любой тест, дошедший до init_db(), писал бы в неё.
+
+    Тесты, которым нужна своя база в известном месте, подменяют DB_PATH
+    сами — их подмена накладывается поверх этой.
+    """
+    import db
+
+    path = tmp_path / "agent" / "violations.db"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(db, "DB_PATH", path)
+    return path
+
+
 @pytest.fixture
 def analytics_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """Изолированный файл витрины на тест.

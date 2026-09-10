@@ -374,8 +374,18 @@ def test_a_robot_is_not_a_person_who_does_not_answer(agency):
     assert row["person"] is False
 
 
-def test_a_departed_employee_is_not_called_out_daily(agency):
-    """На уволенного всё ещё звонят — это находка, но не ежедневная."""
+def test_a_departed_employee_is_not_in_the_rating(agency):
+    """Уволенного в рейтинге звонков нет: спрашивать не с кого.
+
+    Раньше он стоял здесь строкой с пометкой «не работает» — как находка:
+    на человека, которого нет, всё ещё идут звонки. Решение агентства от
+    10.09: уволенных на дашборде не показывать вовсе, и рейтинг брокеров
+    — первое место, где строка про ушедшего только занимала место.
+
+    Сами звонки при этом не исчезли: они остаются в числах портала, и
+    вопрос «куда уходят входящие уволенного» — вопрос к настройке линии,
+    а не к рейтингу тех, кто трубку берёт.
+    """
     with analytics_session() as conn:
         conn.execute(
             "INSERT INTO dim_user(user_id, name, department_id, department_name,"
@@ -386,9 +396,7 @@ def test_a_departed_employee_is_not_called_out_daily(agency):
         for i in range(35):
             _act(conn, 800 + i, 3, 9999, direction=1, completed=0, user=91)
 
-    row = next(r for r in _work()["pickup"] if r["user_id"] == 91)
-    assert row["missed"] == 35
-    assert row["person"] is False, "поговорить с ним сегодня нельзя"
+    assert 91 not in {row["user_id"] for row in _work()["pickup"]}
 
 
 def test_the_back_office_is_not_judged_by_a_brokers_measure(agency):
