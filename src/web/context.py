@@ -30,7 +30,7 @@ DEPARTMENT_AWARE_PAGES = frozenset({"movement", "table"})
 # адрес набирается руками. Закрыть маршрут, но оставить пункт, — приглашение
 # на отказ. Два списка однажды разойдутся, и разойдутся молча; проверяется
 # это тестом, перебирающим маршруты.
-ADMIN_ONLY_PAGES = frozenset({"people", "table", "quality"})
+ADMIN_ONLY_PAGES = frozenset({"people", "table", "quality", "users"})
 
 NAV = [
     # «План на день» стоит первым: с этим вопросом дашборд и открывают.
@@ -44,6 +44,7 @@ NAV = [
     (objects.SLUG, "Объекты"),
     ("table", "Таблица"),
     ("quality", "Качество данных"),
+    ("users", "Доступы"),
 ]
 
 

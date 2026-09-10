@@ -13,6 +13,7 @@ from fastapi.templating import Jinja2Templates
 import auth
 import routes_api
 import routes_pages
+import routes_users
 import store
 from config import get_settings
 from context import query_string
@@ -65,6 +66,7 @@ def create_app(settings=None) -> FastAPI:
     app.include_router(auth.router, prefix=config.base_path)
     app.include_router(routes_api.router, prefix=config.base_path)
     app.include_router(routes_pages.router, prefix=config.base_path)
+    app.include_router(routes_users.router, prefix=config.base_path)
 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:

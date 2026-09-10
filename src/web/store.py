@@ -146,6 +146,10 @@ ROLE_ADMIN = "admin"
 ROLE_ROP = "rop"
 ROLES = (ROLE_ADMIN, ROLE_ROP)
 
+# Минимальная длина пароля. Живёт здесь, а не в CLI: проверка обязана
+# сработать и когда пароль пришёл из веб-формы, а не из терминала.
+MIN_PASSWORD_LEN = 10
+
 
 def create_user(
     username: str,
@@ -161,12 +165,19 @@ def create_user(
     РОПа без отделов (который не видит ничего), а не администратора: ошибка
     в сторону меньшего доступа исправляется одной командой, ошибка в другую
     сторону обнаруживается по утёкшим данным.
+
+    ВНИМАНИЕ: на существующем логине это ПОЛНАЯ ПЕРЕЗАПИСЬ, а не правка.
+    Роль, отделы и отображаемое имя берутся из аргументов, то есть
+    несказанное сбрасывается в умолчание. Так и задумано для «завести
+    заново», но для смены одного лишь пароля эта функция не годится: она
+    молча разжаловала бы администратора в РОПа без отделов. Пароль меняет
+    set_password().
     """
     username = username.strip().lower()
     if not username:
         raise ValueError("Пустой логин")
-    if len(password) < 10:
-        raise ValueError("Пароль короче 10 символов")
+    if len(password) < MIN_PASSWORD_LEN:
+        raise ValueError(f"Пароль короче {MIN_PASSWORD_LEN} символов")
     if role not in ROLES:
         raise ValueError(f"Неизвестная роль: {role!r}. Допустимо: {', '.join(ROLES)}")
     with store_session() as conn:
@@ -193,6 +204,31 @@ def _replace_departments(
             "INSERT INTO dash_user_department(username, department_id) VALUES (?, ?)",
             [(username, d) for d in rows],
         )
+
+
+def set_password(username: str, password: str) -> bool:
+    """Сменить ТОЛЬКО пароль. False — если такого логина нет.
+
+    Отдельная функция, а не create_user() с одним аргументом: та на
+    существующем логине переписывает строку целиком, и «смени пароль»
+    оборачивалось бы сменой роли и потерей отделов. Проверить это по
+    экрану нельзя — учётка остаётся, вход работает, просто человек
+    перестаёт что-либо видеть, а администратор перестаёт быть
+    администратором.
+
+    Сессии здесь НЕ отзываются: это решение вызывающего. Смена пароля
+    руками старые сессии выкидывает (иначе тот, ради кого пароль меняли,
+    продолжит сидеть по своей куке), и за этим следит manage.py.
+    """
+    username = username.strip().lower()
+    if len(password) < MIN_PASSWORD_LEN:
+        raise ValueError(f"Пароль короче {MIN_PASSWORD_LEN} символов")
+    with store_session() as conn:
+        cursor = conn.execute(
+            "UPDATE dash_user SET password_hash = ? WHERE username = ?",
+            (_HASHER.hash(password), username),
+        )
+        return cursor.rowcount > 0
 
 
 def set_user_role(username: str, role: str, department_ids: Iterable[int] = ()) -> bool:

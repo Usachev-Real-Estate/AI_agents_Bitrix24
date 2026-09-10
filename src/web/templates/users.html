@@ -1,0 +1,175 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}Доступы{% endblock %}
+
+{#
+  Пароль придумывает браузер, а не сервер: кнопка «Сгенерировать» заполняет
+  поле, администратор копирует значение и только потом отправляет форму.
+  Поэтому в ответе сервера пароля нет вовсе — его нечего показывать, нечего
+  потерять при обновлении страницы и нечего оставить в истории. Поле
+  обычное: без скрипта пароль просто вводится руками.
+#}
+{% block filters %}{% endblock %}
+
+{% block content %}
+<h1 class="section-title">Доступы</h1>
+<p class="card-sub">Кто заходит в дашборд и что видит. Изменения действуют
+  сразу — перезаходить никому не нужно.</p>
+
+{% if done %}
+<div class="notice"><span>✓</span><span>{{ done }}</span></div>
+{% endif %}
+{% if failed %}
+<div class="notice notice-bad"><span>⚠</span><span>{{ failed }}</span></div>
+{% endif %}
+
+{# ------------------------------------------------------------ список #}
+<div class="card mt-16">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Кто</th><th>Видит</th><th>Пароль</th><th>Доступ</th></tr>
+      </thead>
+      <tbody>
+        {% for row in users %}
+        <tr {%- if not row.is_active %} class="row-silent"{% endif %}>
+          <td>
+            <strong>{{ row.display_name or row.username }}</strong>
+            <span class="muted"> · {{ row.username }}</span>
+            {% if row.username == me %}<span class="badge">это вы</span>{% endif %}
+            <br>
+            <span class="muted">
+              {% if row.last_login_at %}заходил {{ row.last_login_at | datetime_ru }}
+              {% else %}ни разу не заходил{% endif %}</span>
+          </td>
+
+          {# роль и отделы — одной формой: они меняются вместе #}
+          <td>
+            {% if row.username == me %}
+              <span class="muted">{{ 'вся компания' if row.role == role_admin
+                else 'отделы ' ~ (row.department_ids | join(', ')) }}</span><br>
+              <span class="muted">свою учётку здесь менять нельзя</span>
+            {% else %}
+            <form method="post" action="{{ base_path }}/users/role">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="username" value="{{ row.username }}">
+              <select name="role">
+                {% for value in roles %}
+                <option value="{{ value }}" {{ 'selected' if value == row.role }}>
+                  {{ 'администратор — вся компания' if value == role_admin
+                     else 'РОП — только свои отделы' }}</option>
+                {% endfor %}
+              </select>
+              <div class="dept-list">
+                {% for dept in departments %}
+                <label><input type="checkbox" name="department"
+                    value="{{ dept.department_id }}"
+                    {{ 'checked' if dept.department_id in row.department_ids }}>
+                  {{ dept.name }}</label>
+                {% endfor %}
+              </div>
+              <button type="submit" class="btn">Сохранить</button>
+            </form>
+            {% endif %}
+          </td>
+
+          <td>
+            <form method="post" action="{{ base_path }}/users/password">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="username" value="{{ row.username }}">
+              <input type="text" name="password" autocomplete="off"
+                     minlength="{{ min_password }}" required
+                     placeholder="новый пароль" data-password-field>
+              <button type="button" class="btn" data-generate-password>Сгенерировать</button>
+              <button type="submit" class="btn">Сменить</button>
+              <span class="muted">Скопируйте пароль до отправки — на экране
+                он больше не появится.</span>
+            </form>
+          </td>
+
+          <td class="nowrap">
+            {% if row.username == me %}
+              <span class="muted">—</span>
+            {% else %}
+            <form method="post" action="{{ base_path }}/users/active">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="username" value="{{ row.username }}">
+              <input type="hidden" name="enabled" value="{{ '0' if row.is_active else '1' }}">
+              <button type="submit" class="btn">{{ 'Закрыть' if row.is_active else 'Открыть' }}</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {{ ui.definition('Смена пароля закрывает прежние сессии человека, закрытие
+    доступа — тоже: иначе тот, у кого доступ отобрали, продолжил бы сидеть в
+    дашборде по своей куке до конца суток. Права читаются на каждый запрос,
+    поэтому и открытие, и закрытие действуют в ту же секунду.') }}
+</div>
+
+{# ------------------------------------------------------------ завести #}
+<h2 class="section-title sub mt-16">Завести человека</h2>
+<div class="card">
+  <form method="post" action="{{ base_path }}/users/create" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Логин
+      <input type="text" name="username" required autocomplete="off"
+             placeholder="ivanov" pattern="[A-Za-z0-9._-]+"></label>
+    <label>Имя и фамилия
+      <input type="text" name="display_name" autocomplete="off"
+             placeholder="Иван Иванов"></label>
+    <label>Роль
+      <select name="role">
+        <option value="rop">РОП — только свои отделы</option>
+        <option value="admin">администратор — вся компания</option>
+      </select></label>
+    <fieldset>
+      <legend>Отделы <span class="muted">(у администратора не используются)</span></legend>
+      <div class="dept-list">
+        {% for dept in departments %}
+        <label><input type="checkbox" name="department" value="{{ dept.department_id }}">
+          {{ dept.name }} <span class="muted">· {{ dept.deals | int_ru }}</span></label>
+        {% endfor %}
+      </div>
+    </fieldset>
+    <label>Пароль
+      <input type="text" name="password" required autocomplete="off"
+             minlength="{{ min_password }}" data-password-field
+             placeholder="от {{ min_password }} символов"></label>
+    <div>
+      <button type="button" class="btn" data-generate-password>Сгенерировать</button>
+      <button type="submit" class="btn btn-primary">Завести</button>
+    </div>
+    <p class="muted">Пароль виден только сейчас и только вам: сервер хранит
+      не его, а хеш, и показать его повторно не сможет. Скопируйте перед
+      отправкой.</p>
+  </form>
+</div>
+
+{# ------------------------------------------------------------- сессии #}
+{% if sessions %}
+<h2 class="section-title sub mt-16">Кто сейчас в дашборде</h2>
+<div class="card">
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Логин</th><th>Вошёл</th><th>Активность</th>
+        <th>Адрес</th><th>Статус</th></tr></thead>
+      <tbody>
+        {% for row in sessions %}
+        <tr>
+          <td>{{ row.username }}</td>
+          <td class="nowrap muted">{{ row.created_at | datetime_ru }}</td>
+          <td class="nowrap muted">{{ row.last_seen_at | datetime_ru }}</td>
+          <td class="muted">{{ row.ip or '—' }}</td>
+          <td>{{ 'отозвана' if row.revoked_at else 'активна' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

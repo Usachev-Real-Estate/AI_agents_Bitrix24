@@ -88,8 +88,54 @@
     if (node && node.tagName === 'DETAILS') node.open = true;
   }
 
+  /**
+   * Кнопка «Сгенерировать» рядом с полем пароля.
+   *
+   * Пароль придумывает браузер, а не сервер, и это не каприз: сгенерируй
+   * его сервер — пришлось бы показать результат в ответе, а обновление
+   * страницы выдало бы уже другой пароль, и только что розданный перестал
+   * бы работать. Здесь администратор видит значение до отправки, копирует
+   * и отправляет; в ответе сервера пароля нет вовсе.
+   *
+   * crypto.getRandomValues, а не Math.random: второй предсказуем, и пароли
+   * из него подбираются, зная примерное время создания.
+   *
+   * Без скрипта поле остаётся обычным — пароль вводится руками.
+   */
+  var ALPHABET = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  var PASSWORD_LEN = 16;
+
+  function makePassword() {
+    var bytes = new Uint32Array(PASSWORD_LEN);
+    window.crypto.getRandomValues(bytes);
+    var out = '';
+    for (var i = 0; i < PASSWORD_LEN; i++) {
+      out += ALPHABET[bytes[i] % ALPHABET.length];
+    }
+    return out;
+  }
+
+  function wirePasswordButtons() {
+    if (!window.crypto || !window.crypto.getRandomValues) return;
+    var buttons = document.querySelectorAll('[data-generate-password]');
+    for (var i = 0; i < buttons.length; i++) {
+      (function (button) {
+        button.addEventListener('click', function () {
+          var form = button.closest('form');
+          if (!form) return;
+          var field = form.querySelector('[data-password-field]');
+          if (!field) return;
+          field.value = makePassword();
+          field.focus();
+          field.select();
+        });
+      })(buttons[i]);
+    }
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     applyCoverageWidths();
+    wirePasswordButtons();
     applyPaceWidths();
     openTargetDetails();
     window.addEventListener('hashchange', openTargetDetails);

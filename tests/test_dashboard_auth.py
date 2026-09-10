@@ -227,6 +227,24 @@ def test_disabled_user_cannot_log_in(client):
     assert response.status_code == 401
 
 
+def test_a_non_ascii_csrf_token_is_refused_not_a_crash(client):
+    """Кириллица в поле токена — отказ, а не пятисотая.
+
+    hmac.compare_digest на строках отказывается работать, если в них есть
+    что-то кроме ASCII, и падает TypeError. Форма входа публична: уронить
+    обработчик мог кто угодно, не имея учётки, — достаточно было отправить
+    в скрытое поле русское слово.
+    """
+    client.get(f"{BASE}/login")
+    response = client.post(f"{BASE}/login", data={
+        "username": LOGIN, "password": PASSWORD,
+        "csrf_token": "подделка", "next": "",
+    })
+
+    assert response.status_code == 400
+    assert "Сессия формы истекла" in response.text
+
+
 def test_revoked_session_stops_working(auth_client):
     """Серверные сессии нужны именно ради этого: отзыв доступа мгновенный."""
     assert auth_client.get(f"{BASE}/today").status_code == 200
