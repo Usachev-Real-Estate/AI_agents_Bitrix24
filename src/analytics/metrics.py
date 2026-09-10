@@ -304,14 +304,27 @@ def rop_by_department(conn) -> dict[int, dict[str, Any]]:
     Однофамильцев не разрешаем догадкой, как и рассылка: если под фамилию
     подходят двое, не берётся ни один, и отдел остаётся без РОПа. Пустой
     ответ честнее неверного.
+
+    Отдел берётся из user_home, то есть с учётом ростера, — тем же ответом,
+    которым сужается видимость и считается план. По карточке портала РОП
+    сплошь и рядом числится не там, где работает: руководитель отдела продаж
+    сидит в служебном подразделении «Битрикс». Спросив карточку, эта функция
+    сказала бы, что «Битрикс» возглавляет РОП, а её настоящий отдел остался
+    без руководителя.
+
+    Косметикой это не является: по этому ответу заводят учётку
+    (`manage.py adduser --rop ФАМИЛИЯ`). Учётка получила бы служебное
+    подразделение, РОП открыл бы дашборд и увидел пустой экран — и решил бы,
+    что сломан дашборд, а не его доступ.
     """
     from qc_delivery import ROP_SURNAMES
 
     by_surname: dict[str, list[dict[str, Any]]] = {}
     for row in _rows(
         conn,
-        "SELECT user_id, name, last_name, department_id FROM v_user "
-        "WHERE department_id IS NOT NULL AND last_name <> ''",
+        "SELECT u.user_id, u.name, u.last_name, h.department_id "
+        "FROM v_user u JOIN user_home h ON h.user_id = u.user_id "
+        "WHERE h.department_id IS NOT NULL AND u.last_name <> ''",
     ):
         surname = str(row["last_name"]).strip().lower()
         if surname in ROP_SURNAMES:
