@@ -272,7 +272,6 @@
         <tr>
           <td>{{ row.name or '—' }}<span class="muted"> · {{ row.department }}</span>
             {% if row.service %}<span class="badge">общая линия</span>
-            {% elif not row.is_active %}<span class="badge">не работает</span>
             {% elif not row.sells %}<span class="badge">не в продажах</span>{% endif %}</td>
           <td class="num">{{ row.incoming | int_ru }}</td>
           <td class="num">{{ row.missed | int_ru }}</td>

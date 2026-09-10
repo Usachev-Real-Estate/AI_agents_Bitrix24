@@ -347,7 +347,7 @@ def headcount(
     for user in _rows(
         conn,
         "SELECT user_id, name, last_name, department_id, department_name "
-        "FROM v_user WHERE is_active = 1",
+        "FROM v_user",
     ):
         override = overrides.get(user["user_id"], {})
         dept_id = override.get("department_id") or user["department_id"]

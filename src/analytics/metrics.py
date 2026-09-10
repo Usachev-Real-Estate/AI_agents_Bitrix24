@@ -243,7 +243,7 @@ def _department_filter(event_alias: str = "e") -> str:
     return f"""
           AND (:dept IS NULL OR EXISTS (
                 SELECT 1 FROM v_deal fd
-                JOIN v_user du ON du.user_id = fd.assigned_by_id
+                JOIN v_user_all du ON du.user_id = fd.assigned_by_id
                 WHERE fd.deal_id = {event_alias}.entity_id
                   AND du.department_id = :dept))
     """
@@ -283,7 +283,7 @@ def rop_by_department(conn) -> dict[int, dict[str, Any]]:
     for row in _rows(
         conn,
         "SELECT user_id, name, last_name, department_id FROM v_user "
-        "WHERE is_active = 1 AND department_id IS NOT NULL AND last_name <> ''",
+        "WHERE department_id IS NOT NULL AND last_name <> ''",
     ):
         surname = str(row["last_name"]).strip().lower()
         if surname in ROP_SURNAMES:
@@ -400,7 +400,7 @@ def funnel_by_department(
         row["department_id"]: row["name"]
         for row in _rows(
             conn,
-            "SELECT DISTINCT department_id, department_name AS name FROM v_user "
+            "SELECT DISTINCT department_id, department_name AS name FROM v_user_all "
             "WHERE department_id IS NOT NULL AND department_name IS NOT NULL",
         )
     }
@@ -897,7 +897,7 @@ def _stuck_rows(
                       WHERE last.entity_type = 'deal' AND last.entity_id = d.deal_id
                         AND last.stage_id = d.stage_id AND last.left_at IS NULL)
         LEFT JOIN dim_stage s ON s.stage_id = d.stage_id AND s.category_id = d.category_id
-        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
+        LEFT JOIN v_user_all u ON u.user_id = d.assigned_by_id
         WHERE d.category_id = :cat AND d.is_closed = 0
           AND (:dept IS NULL OR u.department_id = :dept)
         ORDER BY days_in_stage DESC
@@ -1388,8 +1388,18 @@ def people(conn, since: str, until: str, category_id: int | None = None) -> list
                                   AND {money_ok}
                                  THEN d.opportunity ELSE 0 END), 0) AS won_amount
         FROM v_deal d
-        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
-        WHERE (:cat IS NULL OR d.category_id = :cat)
+        LEFT JOIN v_user_all u ON u.user_id = d.assigned_by_id
+        -- Справочник полный, а лишнее убирает условие, и разница тут
+        -- смысловая. Строк без человека две: сделка без ответственного и
+        -- сделка на чужом id, которого в портале уже нет. Обе — находка, и
+        -- страница их называет, а не прячет за пустой ячейкой. Обычное
+        -- соединение убрало бы вместе с уволенным и эти две.
+        --
+        -- COALESCE(..., 1): нет строки в справочнике — значит и увольнять
+        -- было некого, карточка остаётся. Есть строка и в ней 0 — человек
+        -- ушёл, и отчитываться о нём отдельной строкой не о чем.
+        WHERE COALESCE(u.is_active, 1) = 1
+          AND (:cat IS NULL OR d.category_id = :cat)
           AND ((d.date_create >= :since AND d.date_create < :until)
                OR (d.is_closed = 1
                    AND d.closedate >= :since AND d.closedate < :until))
@@ -1595,7 +1605,7 @@ def entity_table(
         base = """
         FROM v_deal d
         LEFT JOIN dim_stage s ON s.stage_id = d.stage_id AND s.category_id = d.category_id
-        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
+        LEFT JOIN v_user_all u ON u.user_id = d.assigned_by_id
         LEFT JOIN dim_source src ON src.source_id = d.source_id
         LEFT JOIN v_stage_event e
                ON e.entity_type = 'deal' AND e.entity_id = d.deal_id AND e.left_at IS NULL
@@ -1648,7 +1658,7 @@ def entity_table(
         base = """
         FROM v_lead l
         LEFT JOIN dim_lead_status st ON st.status_id = l.status_id
-        LEFT JOIN v_user u ON u.user_id = l.assigned_by_id
+        LEFT JOIN v_user_all u ON u.user_id = l.assigned_by_id
         LEFT JOIN dim_source src ON src.source_id = l.source_id
         LEFT JOIN v_stage_event e
                ON e.entity_type = 'lead' AND e.entity_id = l.lead_id AND e.left_at IS NULL

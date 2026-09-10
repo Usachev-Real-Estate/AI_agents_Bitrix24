@@ -288,7 +288,8 @@
           <tr>
             <td>
               {{ man.name }}
-              {% if man.role == 'rop' %}<span class="badge">РОП</span>
+              {% if man.gone %}
+              {% elif man.role == 'rop' %}<span class="badge">РОП</span>
               {% elif man.role == 'excluded' %}<span class="badge">вне плана</span>
               {% elif not man.in_roster %}<span class="badge">вне состава</span>
               {% endif %}

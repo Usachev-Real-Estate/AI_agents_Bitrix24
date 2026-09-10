@@ -28,6 +28,7 @@ from typing import Any
 
 import metrics
 import plans
+import wording
 from metrics import _money_of, _one, _rows, _share, base_currency
 
 # Сколько рабочих дней должно пройти, чтобы линейный прогноз что-то
@@ -226,9 +227,10 @@ def _facts(
     сумму не входят — курса у витрины нет, и сложить их с рублями значит
     напечатать неверное число, а не приблизительное.
 
-    Имя берётся здесь же: строки по брокерам должны показать и того, кого в
-    плановом составе уже нет — уволенного в середине квартала, — иначе они
-    не сложатся в факт отдела.
+    Справочник здесь полный (v_user_all), а не состав: уволенный в середине
+    квартала оставил отделу настоящие деньги, и без него факт отдела вышел
+    бы меньше, чем есть. Фамилию его таблица не покажет — за это отвечает
+    _brokers, — но сумму обязана сохранить.
     """
     where, params = plans.category_filter("d", categories)
     return _rows(
@@ -242,7 +244,7 @@ def _facts(
                COALESCE(SUM(CASE WHEN {_money_of('d')} THEN d.opportunity ELSE 0 END), 0)
                    AS amount
         FROM v_deal d
-        JOIN v_user u ON u.user_id = d.assigned_by_id
+        JOIN v_user_all u ON u.user_id = d.assigned_by_id
         WHERE d.is_won = 1 AND d.closedate IS NOT NULL
           AND d.closedate >= :since AND d.closedate < :until
           AND {where}
@@ -260,10 +262,15 @@ def _brokers(
 ) -> list[dict[str, Any]]:
     """Выполнение плана по людям отдела.
 
-    В список входят и те, кого в плановом составе нет: уволенный в середине
-    квартала оставил отделу настоящие деньги, и без него строки не сложились
-    бы в факт отдела. Таблица, не сходящаяся со своим же итогом, хуже
-    отсутствующей — её один раз проверят и перестанут верить обеим.
+    Деньги уволенного остаются в отделе, а его фамилия из таблицы уходит.
+    Это не противоречие, а два разных вопроса. «Сколько отдел заработал» —
+    вопрос про деньги, и вычесть из них закрытые ушедшим сделки значит
+    напечатать неверную сумму: таблица, не сходящаяся со своим же итогом,
+    хуже отсутствующей — её один раз проверят и перестанут верить обеим.
+    «С кого спросить» — вопрос про людей, и уволенный на него не отвечает.
+
+    Поэтому ушедшие складываются в одну строку «Уволенные»: итог сходится,
+    а строки, которую нельзя ни выполнить, ни обсудить, в таблице нет.
 
     Порядок: сначала те, кто несёт норму, по выполнению сверху вниз; за ними
     остальные по деньгам. Так первым читается тот, о ком и ставился вопрос.
@@ -277,13 +284,28 @@ def _brokers(
         )
         for member in row["members"]
     ]
+    left = [fact for fact in by_user.values() if fact.get("is_active")]
+    gone = [fact for fact in by_user.values() if not fact.get("is_active")]
     rows.extend(
         _broker_row(
             fact["user_id"], fact.get("name") or f"ID {fact['user_id']}",
             None, None, fact, elapsed, total_days,
         )
-        for fact in by_user.values()
+        for fact in left
     )
+    if gone:
+        summed = _broker_row(
+            0, f"Уволенные · {len(gone)} {_people_word(len(gone))}",
+            None, None,
+            {"deals": sum(int(fact["deals"]) for fact in gone),
+             "amount": sum(float(fact["amount"]) for fact in gone)},
+            elapsed, total_days,
+        )
+        # Не «вне состава»: это не человек, которого забыли вписать, а сумма
+        # тех, кого уже нет. Метка нужна, чтобы таблица не предлагала
+        # спросить с этой строки.
+        summed["gone"] = True
+        rows.append(summed)
     with_norm = sorted(
         (item for item in rows if item["plan"] is not None),
         key=lambda item: -(item["plan_share"] or 0),
@@ -293,6 +315,11 @@ def _brokers(
         key=lambda item: -item["fact"],
     )
     return with_norm + rest
+
+
+def _people_word(count: int) -> str:
+    """«человек / человека / человек» — форма под число."""
+    return wording.form(count, "человек", "человека", "человек")
 
 
 def _broker_row(

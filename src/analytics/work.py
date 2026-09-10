@@ -212,7 +212,7 @@ def _cards(conn, categories, department_id) -> list[dict[str, Any]]:
                COALESCE(u.department_name, '') AS department,
                (julianday('now') - julianday(d.date_create)) AS age_days
         FROM v_deal d
-        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
+        LEFT JOIN v_user_all u ON u.user_id = d.assigned_by_id
         LEFT JOIN dim_stage s
                ON s.stage_id = d.stage_id AND s.category_id = d.category_id
         WHERE d.is_closed = 0 AND {where}
@@ -238,7 +238,7 @@ def _acts(conn, categories, department_id) -> list[dict[str, Any]]:
         SELECT d.deal_id, a.provider_type_id, a.direction, a.completed,
                a.subject, a.created_at, a.start_time
         FROM v_deal d
-        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
+        LEFT JOIN v_user_all u ON u.user_id = d.assigned_by_id
         JOIN v_activity a
              ON ((a.owner_type_id = 2 AND a.owner_id = d.deal_id)
                  OR (a.owner_type_id = 3 AND d.contact_id IS NOT NULL
@@ -264,7 +264,7 @@ def _comments(conn, categories, department_id) -> list[dict[str, Any]]:
         f"""
         SELECT d.deal_id, c.body, c.is_auto, c.created_at, c.author_id
         FROM v_deal d
-        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
+        LEFT JOIN v_user_all u ON u.user_id = d.assigned_by_id
         JOIN v_comment c ON c.entity_id = d.deal_id
         WHERE d.is_closed = 0 AND {where}
           AND (:dept IS NULL OR u.department_id = :dept)
@@ -553,12 +553,16 @@ def _pickup(conn, department_id: int | None) -> list[dict[str, Any]]:
                COALESCE(u.name, '') AS name,
                COALESCE(u.department_name, '') AS department,
                u.department_id AS department_id,
-               COALESCE(u.is_active, 0) AS is_active,
                SUM(CASE WHEN a.direction = 1 THEN 1 ELSE 0 END) AS incoming,
                SUM(CASE WHEN a.direction = 1 AND a.completed = 0
                         THEN 1 ELSE 0 END) AS missed
         FROM v_activity a
-        LEFT JOIN v_user u ON u.user_id = a.responsible_id
+        -- Соединение обычное, а не внешнее: строка здесь — это человек, с
+        -- которым разговаривают о его звонках. Уволенный в v_user не
+        -- попадает, и «не берёт трубку» про него сказать уже некому;
+        -- неизвестный портала — тем более. Внешнее соединение оставило бы
+        -- их безымянными строками в рейтинге.
+        JOIN v_user u ON u.user_id = a.responsible_id
         WHERE a.provider_type_id = :call
           AND (:dept IS NULL OR u.department_id = :dept)
         GROUP BY a.responsible_id
@@ -575,11 +579,10 @@ def _pickup(conn, department_id: int | None) -> list[dict[str, Any]]:
         # маршрутизация, а не клиент, выбравший своего брокера. Судить его
         # мерой брокера значит спорить не с тем человеком.
         row["sells"] = not sales or row["department_id"] in sales
-        # Тот, с кем можно поговорить об этом сегодня. Уволенный, робот и
-        # непродающий в ежедневное сообщение не идут: там нужно действие, а
-        # не история и не чужая зона ответственности.
-        row["person"] = (bool(row["is_active"]) and not row["service"]
-                         and row["sells"])
+        # Тот, с кем можно поговорить об этом сегодня. Робот и непродающий в
+        # ежедневное сообщение не идут: там нужно действие, а не чужая зона
+        # ответственности. Уволенного отсеяло уже представление.
+        row["person"] = not row["service"] and row["sells"]
         people.append(row)
     return sorted(people, key=lambda row: -row["missed_share"])
 
@@ -619,7 +622,7 @@ def promises(
                (julianday(:today) - julianday(r.promised_at)) AS overdue_days
         FROM v_deal d
         JOIN v_comment_read r ON r.entity_id = d.deal_id
-        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
+        LEFT JOIN v_user_all u ON u.user_id = d.assigned_by_id
         LEFT JOIN dim_stage s
                ON s.stage_id = d.stage_id AND s.category_id = d.category_id
         WHERE d.is_closed = 0 AND {where}
@@ -680,7 +683,7 @@ def promises_without_date(
         JOIN v_comment c
              ON c.entity_type = 'deal' AND c.entity_id = d.deal_id
             AND c.is_auto = 0
-        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
+        LEFT JOIN v_user_all u ON u.user_id = d.assigned_by_id
         LEFT JOIN dim_stage s
                ON s.stage_id = d.stage_id AND s.category_id = d.category_id
         WHERE d.is_closed = 0 AND {where}
@@ -735,7 +738,7 @@ def refused_in_work(
         FROM v_deal d
         JOIN v_comment_read r
              ON r.entity_type = 'deal' AND r.entity_id = d.deal_id
-        LEFT JOIN v_user u ON u.user_id = d.assigned_by_id
+        LEFT JOIN v_user_all u ON u.user_id = d.assigned_by_id
         LEFT JOIN dim_stage s
                ON s.stage_id = d.stage_id AND s.category_id = d.category_id
         -- Возраст на стадии — LEFT JOIN, а не обычный: карточка без записи
