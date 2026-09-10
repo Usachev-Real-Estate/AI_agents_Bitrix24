@@ -161,8 +161,14 @@ def show(cards: list[dict]) -> None:
         print("=" * 62)
         print(f"Сделка {card['deal_id']} · {card['title']}")
         line = f"  {card['broker'] or 'не назначен'} · «{card['stage']}»"
-        if card["overdue_days"]:
+        # Срок решает признак, а не знак числа. overdue_days у обещания на
+        # будущее отрицателен, и проверка «если не ноль» печатала
+        # «просрочено −81 дн» — то есть ровно наоборот: карточку, где до
+        # срока ещё три месяца, объявляла нарушенной.
+        if card["sign"] == "просрочено" and card["overdue_days"]:
             line += f" · просрочено {int(card['overdue_days'])} дн"
+        elif card["promised_at"] and (card["overdue_days"] or 0) < 0:
+            line += f" · срок через {abs(int(card['overdue_days']))} дн"
         elif card["quiet_days"]:
             line += f" · молчит {int(card['quiet_days'])} дн"
         print(line)

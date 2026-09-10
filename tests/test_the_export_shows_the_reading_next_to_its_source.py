@@ -225,3 +225,20 @@ def test_without_the_flag_nothing_is_printed(mart, export, tmp_path, capsys):
     export.main()
 
     assert "Записи:" not in capsys.readouterr().out
+
+
+def test_a_promise_due_later_is_not_called_overdue(mart, export, tmp_path,
+                                                   capsys):
+    """«Просрочено −81 дн» — это карточка, до срока которой три месяца.
+
+    Знак числа сроком не распоряжается: у обещания на будущее overdue_days
+    отрицателен, и проверка «если не ноль» объявляла нарушенным то, что
+    ещё не наступило. Решает признак — тот же, по которому судят советы.
+    """
+    sys.argv = ["comment_export.py", "--out", str(tmp_path),
+                "--only", "обещано", "--print"]
+    export.main()
+
+    out = capsys.readouterr().out
+    assert "просрочено -" not in out
+    assert "срок через 5 дн" in out
