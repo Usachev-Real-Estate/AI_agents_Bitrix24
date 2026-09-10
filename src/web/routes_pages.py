@@ -141,7 +141,7 @@ async def movement(request: Request) -> HTMLResponse:
         if category_id is None:
             context.update({
                 "movement": [], "transitions": None, "stuck": [],
-                "charts": {}, "matrix": None,
+                "moves": None, "charts": {}, "matrix": None,
             })
             return _render(request, "movement.html", context)
         department_id = context["department_id"]
@@ -155,6 +155,12 @@ async def movement(request: Request) -> HTMLResponse:
             "movement": movement_rows,
             "transitions": transitions,
             "stuck": metrics.stuck_deals(conn, category_id, department_id=department_id),
+            # Поимённо: кто, куда и что после этого написал. Сводные числа
+            # выше говорят, что движение есть; здесь видно, было ли за ним
+            # что-нибудь, кроме клика.
+            "moves": metrics.stage_moves(
+                conn, category_id, period["since"], period["until"], department_id,
+            ),
             # Сравнение отделов рядом — вопрос, который фильтром «один отдел»
             # не задать: где именно каждый теряет клиентов и где тормозит.
             "by_department": metrics.funnel_by_department(

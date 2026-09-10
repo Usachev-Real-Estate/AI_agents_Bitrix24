@@ -677,6 +677,104 @@ def stage_transitions(
     }
 
 
+# Сколько переходов показывать поимённо. Больше двухсот строк никто не
+# читает, а страница на живом месяце их набирает под тысячу.
+MOVES_SHOWN = 200
+
+
+def stage_moves(
+    conn,
+    category_id: int,
+    since: str,
+    until: str,
+    department_id: int | None = None,
+    limit: int = MOVES_SHOWN,
+) -> dict[str, Any]:
+    """Переходы карточек поимённо: куда сдвинули и что после этого сделали.
+
+    stage_transitions() отвечает на тот же вопрос счётчиками — сколько раз
+    из «Подбора» ушли в «Показ». Здесь нужны сами карточки: сводное число
+    говорит, что движение есть, но не даёт задать ни одного вопроса
+    конкретному человеку.
+
+    Главное здесь — последняя колонка. Перевод карточки на следующую стадию
+    сам по себе не работа: в Битриксе это один клик, и стадию двигают, когда
+    просят «подтянуть воронку». Работа — то, что после клика: запись о
+    разговоре или поставленное дело. Переход без того и другого — ровно та
+    строка, ради которой блок и заводится, и она подсвечена.
+
+    «Что написал» ищется НЕ «после перехода вообще», а внутри стояния на
+    новой стадии: от входа до выхода (left_at). Иначе запись, сделанная
+    через три стадии и два месяца, оправдывала бы давно забытый переход, и
+    красных строк на экране не осталось бы вовсе.
+
+    Кто двинул — вопрос, на который витрина честно ответить не может:
+    crm.stagehistory.list автора перехода не отдаёт, его нет и в самом
+    Битриксе. Поэтому здесь ТЕКУЩИЙ ответственный за карточку, и страница
+    называет колонку его именем, а не «кто двинул». Автор записи при этом
+    настоящий — у комментария автор есть.
+    """
+    rows = _rows(
+        conn,
+        """
+        SELECT d.deal_id, d.title, d.opportunity, d.currency_id,
+               e2.entered_at AS moved_at,
+               COALESCE(sf.name, e1.stage_id) AS from_name,
+               COALESCE(st.name, e2.stage_id) AS to_name,
+               COALESCE(sf.sort, 0) AS from_sort,
+               COALESCE(st.sort, 0) AS to_sort,
+               d.assigned_by_id AS user_id,
+               COALESCE(u.name, '') AS assignee,
+               COALESCE(u.department_name, '') AS department,
+               (SELECT c.body FROM v_comment c
+                 WHERE c.entity_id = d.deal_id AND c.is_auto = 0
+                   AND c.created_at >= e2.entered_at
+                   AND (e2.left_at IS NULL OR c.created_at < e2.left_at)
+                 ORDER BY c.created_at LIMIT 1) AS note,
+               (SELECT COALESCE(au.name, '') FROM v_comment c
+                  LEFT JOIN v_user_all au ON au.user_id = c.author_id
+                 WHERE c.entity_id = d.deal_id AND c.is_auto = 0
+                   AND c.created_at >= e2.entered_at
+                   AND (e2.left_at IS NULL OR c.created_at < e2.left_at)
+                 ORDER BY c.created_at LIMIT 1) AS note_author,
+               (SELECT a.subject FROM v_activity a
+                 WHERE ((a.owner_type_id = 2 AND a.owner_id = d.deal_id)
+                        OR (a.owner_type_id = 3 AND d.contact_id IS NOT NULL
+                            AND d.contact_id > 0 AND a.owner_id = d.contact_id))
+                   AND a.created_at >= e2.entered_at
+                   AND (e2.left_at IS NULL OR a.created_at < e2.left_at)
+                 ORDER BY a.created_at LIMIT 1) AS task
+        FROM v_stage_event e1
+        JOIN v_stage_event e2
+          ON e2.entity_type = e1.entity_type AND e2.entity_id = e1.entity_id
+         AND e2.seq = e1.seq + 1
+        JOIN v_deal d ON d.deal_id = e1.entity_id
+        LEFT JOIN dim_stage sf ON sf.stage_id = e1.stage_id AND sf.category_id = :cat
+        LEFT JOIN dim_stage st ON st.stage_id = e2.stage_id AND st.category_id = :cat
+        LEFT JOIN v_user_all u ON u.user_id = d.assigned_by_id
+        WHERE e1.entity_type = 'deal' AND d.category_id = :cat
+          AND e2.entered_at >= :since AND e2.entered_at < :until
+          AND (:dept IS NULL OR u.department_id = :dept)
+        """,
+        {"cat": category_id, "since": since, "until": until, "dept": department_id},
+    )
+    for row in rows:
+        row["note"] = (row["note"] or "").strip()
+        row["task"] = (row["task"] or "").strip()
+        row["backwards"] = row["to_sort"] < row["from_sort"]
+        # Ни записи, ни дела: клик был, работы не видно.
+        row["silent"] = not row["note"] and not row["task"]
+    # Молчаливые наверх, внутри — по деньгам: разговор начинают с самого
+    # дорогого следа, который никто не оставил.
+    rows.sort(key=lambda row: (not row["silent"], -(row["opportunity"] or 0)))
+    return {
+        "rows": rows[:limit],
+        "total": len(rows),
+        "silent": sum(1 for row in rows if row["silent"]),
+        "shown": min(len(rows), limit),
+    }
+
+
 def stage_durations(conn, category_id: int, since: str, until: str) -> list[dict[str, Any]]:
     """Сколько времени сделки проводят на каждой стадии.
 

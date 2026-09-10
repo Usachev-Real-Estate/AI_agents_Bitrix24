@@ -457,6 +457,13 @@ td {
 tbody tr:hover td { background: var(--surface-2); }
 tbody tr:last-child td { border-bottom: none; }
 
+/* Строка перехода, за которым не последовало ни записи, ни дела.
+   Цвет несёт полоса слева, а не текст: красный текст на восьми ячейках
+   читается как ошибка страницы, а не как находка в данных. */
+tbody tr.row-silent td { background: var(--surface-critical, rgba(208, 59, 59, .06)); }
+tbody tr.row-silent td:first-child { box-shadow: inset 3px 0 0 var(--status-critical); }
+tbody tr.row-silent:hover td { background: rgba(208, 59, 59, .1); }
+
 .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .muted { color: var(--text-muted); }
 .nowrap { white-space: nowrap; }

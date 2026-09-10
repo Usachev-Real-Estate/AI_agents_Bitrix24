@@ -93,7 +93,24 @@ def fmt_datetime(value: Any) -> str:
     return (moment.astimezone(timezone(timedelta(hours=3)))).strftime("%d.%m.%Y %H:%M")
 
 
+def fmt_plural(count: Any, one: str, few: str, many: str) -> str:
+    """Форма существительного под число: «1 переход», «2 перехода», «5 переходов».
+
+    Правило берётся из wording — того же модуля, которым согласуется утреннее
+    сообщение. Второй набор окончаний в шаблонах однажды разошёлся бы с
+    первым, и разошёлся бы там, где это видит клиент.
+    """
+    import wording
+
+    try:
+        number = int(count)
+    except (TypeError, ValueError):
+        return many
+    return wording.form(number, one, few, many)
+
+
 FILTERS = {
+    "plural": fmt_plural,
     "int_ru": fmt_int,
     "money": fmt_money,
     "pct": fmt_pct,

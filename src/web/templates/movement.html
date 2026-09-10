@@ -112,6 +112,74 @@
   </div>
 </div>
 
+{% if moves and moves.total %}
+<h2 class="section-title">Кто куда двинул · {{ moves.total | int_ru }}
+  {{ moves.total | plural('переход', 'перехода', 'переходов') }}</h2>
+
+{% if moves.silent %}
+<div class="notice notice-bad">
+  <span>⚠</span>
+  <span>Подсвечено <strong>{{ moves.silent | int_ru }}</strong> из
+    {{ moves.total | int_ru }}: карточку перевели, но пока она стояла на новой
+    стадии, в неё не написали ни строки и не поставили ни одного дела. Перевод
+    стадии — один клик; работа — то, что после него.</span>
+</div>
+{% endif %}
+
+{% if moves.total > moves.shown %}
+<div class="notice">
+  <span>ℹ</span>
+  <span>Показаны {{ moves.shown | int_ru }} из {{ moves.total | int_ru }}:
+    сначала переходы без следа, дальше по сумме сделки.</span>
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Сделка</th><th>Куда двинули</th><th>Ответственный</th>
+          <th>Когда</th><th>Что написали после перехода</th>
+          <th class="num">Сумма</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for row in moves.rows %}
+        <tr {%- if row.silent %} class="row-silent"{% endif %}>
+          <td class="ellipsis" title="{{ row.title }}">{{ row.title }}</td>
+          <td class="nowrap">{{ row.from_name }} → <strong>{{ row.to_name }}</strong>
+            {% if row.backwards %}<span class="badge badge-lost">назад</span>{% endif %}</td>
+          <td>{{ row.assignee or '—' }}</td>
+          <td class="nowrap muted">{{ row.moved_at | datetime_ru }}</td>
+          <td>
+            {% if row.note %}
+              <span class="ellipsis" title="{{ row.note }}">{{ row.note }}</span>
+              {% if row.note_author %}<span class="muted"> · {{ row.note_author }}</span>{% endif %}
+            {% elif row.task %}
+              <span class="muted">записи нет, поставлено дело:</span>
+              <span class="ellipsis" title="{{ row.task }}">{{ row.task }}</span>
+            {% else %}
+              <span class="delta-down">ни записи, ни дела</span>
+            {% endif %}
+          </td>
+          <td class="num">{{ row.opportunity | money }}</td>
+          <td class="num nowrap">
+            <a href="{{ crm_link('deal', row.deal_id) }}" target="_blank" rel="noopener">
+              карточка ↗</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {{ ui.definition('Записи и дела ищутся не «после перехода вообще», а внутри
+    стояния на новой стадии — от входа до выхода. Иначе комментарий, сделанный
+    через две стадии и месяц, оправдывал бы давно забытый переход, и красных
+    строк не осталось бы вовсе. Кто именно перевёл карточку, портал не хранит:
+    crm.stagehistory.list автора не отдаёт. Поэтому в колонке — текущий
+    ответственный за сделку, а не тот, кто нажал; автор записи настоящий.') }}
+</div>
+{% endif %}
+
 {% if matrix and matrix.stages %}
 <h2 class="section-title">Переходы между стадиями</h2>
 <div class="card">
