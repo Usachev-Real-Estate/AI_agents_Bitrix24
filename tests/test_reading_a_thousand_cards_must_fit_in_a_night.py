@@ -377,3 +377,32 @@ def test_a_drained_queue_says_nothing(mart, monkeypatch, caplog):
         assert comment_reader.main() == 0
 
     assert "В очереди осталось" not in caplog.text
+
+
+# ── Прочитанное не пропадает ───────────────────────────────────────────
+def test_each_card_is_saved_where_it_was_read(mart):
+    """Прогон идёт полчаса по чужой сети, и обрыв не должен стоить партии.
+
+    Транзакция открыта на весь сеанс: пока карточки писались одним
+    коммитом, обрыв на тысячной откатывал всю тысячу — тысяча оплаченных
+    ответов исчезала, потому что тысяча первый не состоялся. Заодно
+    блокировка записи держалась все тридцать две минуты прогона, и ETL,
+    тикнувший в середине, упал с «database is locked».
+    """
+    class _Model:
+        def invoke(self, messages):
+            return _Answer()
+
+    with analytics_session() as conn:
+        assert comment_reader.read_cards(
+            conn, _Model(), today=date(2026, 9, 9), workers=1,
+        ) == 4
+        # Откат после чтения: записанное переживёт его, если коммит был на
+        # месте, и исчезнет, если партию держали одной транзакцией.
+        conn.rollback()
+
+    with analytics_session(readonly=True) as conn:
+        saved = conn.execute(
+            "SELECT COUNT(*) FROM fact_comment_read"
+        ).fetchone()[0]
+    assert saved == 4, "прочитанное откатилось вместе с сеансом"
