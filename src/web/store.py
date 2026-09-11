@@ -74,8 +74,29 @@ _DDL = (
         at        TEXT NOT NULL
     );
     """,
+    # След посещений: кто какой раздел открывал и когда.
+    #
+    # Отвечает на вопрос, который иначе не проверить, — пользуются ли
+    # дашбордом вообще. Сессия говорит «заходил», но не говорит, дошёл ли
+    # человек дальше первого экрана; а РОП, ни разу не открывший «План на
+    # день», — это не поломка дашборда, это разговор с человеком.
+    #
+    # Хранится РАЗДЕЛ, а не полный адрес. Фильтры и строка поиска в него не
+    # попадают: вопрос стоит «чем пользуются», а не «что искали», и второй
+    # ответ дороже первого, не будучи никому нужным.
+    """
+    CREATE TABLE IF NOT EXISTS dash_visit (
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL,
+        section  TEXT NOT NULL,
+        at       TEXT NOT NULL,
+        ip       TEXT NOT NULL DEFAULT ''
+    );
+    """,
     "CREATE INDEX IF NOT EXISTS idx_login_attempt ON dash_login_attempt(at);",
     "CREATE INDEX IF NOT EXISTS idx_session_user ON dash_session(username, expires_at);",
+    "CREATE INDEX IF NOT EXISTS idx_visit_user ON dash_visit(username, at);",
+    "CREATE INDEX IF NOT EXISTS idx_visit_at ON dash_visit(at);",
 )
 
 
@@ -277,6 +298,81 @@ def list_users() -> list[dict[str, Any]]:
         for row in rows:
             row["department_ids"] = user_departments(conn, row["username"])
         return rows
+
+
+# Сколько держать след посещений. Тот же срок, что у попыток входа:
+# вопрос «пользуется ли человек дашбордом» живёт неделями, а не годами, и
+# хранить дольше — собирать данные, которые никто не спросит.
+VISIT_KEEP_DAYS = 90
+
+
+def record_visit(username: str, section: str, ip: str = "") -> None:
+    """Записать открытие раздела. Ошибка записи страницу не роняет.
+
+    След посещений — вспомогательная вещь: ради него нельзя отдать
+    пятисотую человеку, открывшему отчёт. Поэтому любая ошибка здесь
+    остаётся строкой в журнале, а страница отдаётся как ни в чём не бывало.
+    """
+    username = (username or "").strip().lower()
+    section = (section or "").strip()[:120]
+    if not username or not section:
+        return
+    try:
+        with store_session() as conn:
+            conn.execute(
+                "INSERT INTO dash_visit(username, section, at, ip)"
+                " VALUES (?, ?, ?, ?)",
+                (username, section, _iso(_now()), (ip or "")[:64]),
+            )
+    except Exception as error:  # pragma: no cover — база занята или нет места
+        logger.warning("След посещения не записан (%s): %s", section, error)
+
+
+def visit_summary(days: int = 7) -> dict[str, dict[str, Any]]:
+    """Логин → чем пользовался за последние дни.
+
+    Возвращает счётчик открытий, дату последнего и разделы по убыванию.
+    Пустая запись — тоже ответ, и самый интересный: человек, которого здесь
+    нет, дашборд не открывал ни разу за окно.
+    """
+    since = _iso(_now() - timedelta(days=days))
+    with store_session() as conn:
+        rows = conn.execute(
+            "SELECT username, section, COUNT(*) AS visits, MAX(at) AS last_at"
+            " FROM dash_visit WHERE at >= ?"
+            " GROUP BY username, section",
+            (since,),
+        ).fetchall()
+    summary: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        entry = summary.setdefault(row["username"], {
+            "visits": 0, "last_at": "", "sections": [],
+        })
+        entry["visits"] += int(row["visits"])
+        entry["last_at"] = max(entry["last_at"], row["last_at"] or "")
+        entry["sections"].append({"section": row["section"],
+                                  "visits": int(row["visits"])})
+    for entry in summary.values():
+        entry["sections"].sort(key=lambda item: -item["visits"])
+    return summary
+
+
+def recent_visits(limit: int = 50) -> list[dict[str, Any]]:
+    """Последние открытия разделов, кто бы их ни делал."""
+    with store_session() as conn:
+        return [dict(row) for row in conn.execute(
+            "SELECT username, section, at, ip FROM dash_visit"
+            " ORDER BY at DESC LIMIT ?", (max(1, int(limit)),),
+        )]
+
+
+def purge_old_visits(days: int = VISIT_KEEP_DAYS) -> int:
+    """Убрать след старше срока хранения."""
+    cutoff = _iso(_now() - timedelta(days=days))
+    with store_session() as conn:
+        return conn.execute(
+            "DELETE FROM dash_visit WHERE at < ?", (cutoff,),
+        ).rowcount
 
 
 def verify_password(username: str, password: str) -> dict[str, Any] | None:

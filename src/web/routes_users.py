@@ -64,6 +64,39 @@ FAILED = {
 }
 
 
+# Окна следа. Неделя — «пользуется ли сейчас», месяц и квартал — «когда
+# заходил в последний раз»; у бросившего заходить ответы расходятся.
+VISIT_WINDOWS: tuple[tuple[int, str], ...] = (
+    (7, "неделя"), (30, "месяц"), (90, "квартал"),
+)
+
+# Человеческие названия разделов. В следе лежит адрес — он короткий и
+# устойчивый, — а на экране нужно слово, которое стоит в меню.
+SECTION_LABEL: dict[str, str] = {
+    "today": "План на день",
+    "pulse": "Пульс",
+    "leads": "Лиды",
+    "deals": "Сделки",
+    "movement": "Движение",
+    "people": "Люди",
+    "objects": "Объекты",
+    "table": "Таблица",
+    "quality": "Качество данных",
+    "users": "Доступы",
+    "api/export.csv": "Выгрузка CSV",
+}
+
+
+def _visit_days(requested: str | None) -> int:
+    """Окно следа из адреса. Мусор молча падает в неделю."""
+    allowed = {days for days, _ in VISIT_WINDOWS}
+    try:
+        value = int(requested or 0)
+    except ValueError:
+        return VISIT_WINDOWS[0][0]
+    return value if value in allowed else VISIT_WINDOWS[0][0]
+
+
 def _back(request: Request, *, done: str = "", failed: str = "") -> RedirectResponse:
     """Вернуться на страницу, сказав, чем кончилось.
 
@@ -109,8 +142,17 @@ async def users_page(request: Request) -> HTMLResponse:
     context = base_context(request, active=SLUG)
     token = new_csrf_token()
     params = request.query_params
+    # Окно следа выбирается чипом. Неделя отвечает на «пользуется ли
+    # сейчас», месяц — на «пользовался ли вообще»: вопросы разные, и
+    # ответы на них расходятся ровно у того, кто бросил заходить.
+    days = _visit_days(params.get("days"))
     context.update({
         "users": store.list_users(),
+        "visits": store.visit_summary(days),
+        "visit_days": days,
+        "visit_windows": VISIT_WINDOWS,
+        "recent": store.recent_visits(40),
+        "sections": SECTION_LABEL,
         "sessions": store.list_sessions(None),
         "departments": _departments(request),
         "roles": store.ROLES,

@@ -211,6 +211,25 @@ def check_csrf(request: Request, form_token: str | None) -> bool:
 # middleware
 # --------------------------------------------------------------------------
 
+def section_of(path: str, base_path: str) -> str:
+    """Раздел, который человек открыл, из адреса запроса.
+
+    Хранится раздел, а не полный адрес: фильтры и строка поиска в след не
+    попадают. Вопрос стоит «чем пользуются», а не «что искали», и второй
+    ответ дороже первого, не будучи никому нужным.
+
+    Корень отдаётся как redirect на «План на день», и он же потом
+    записывается своей строкой — поэтому здесь корень даёт пустоту, а не
+    вторую запись о том же открытии.
+    """
+    tail = path[len(base_path):] if path.startswith(base_path) else path
+    tail = tail.strip("/")
+    if not tail:
+        return ""
+    parts = [part for part in tail.split("/") if part][:2]
+    return "/".join(parts)[:120]
+
+
 class RequireAuthMiddleware(BaseHTTPMiddleware):
     """Запрет по умолчанию: всё, что не в белом списке, требует сессии."""
 
@@ -237,7 +256,28 @@ class RequireAuthMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         # Кнопка «назад» после выхода не должна показывать данные из кеша.
         response.headers["Cache-Control"] = "no-store, max-age=0"
+        self._remember(request, user, response)
         return response
+
+    def _remember(self, request: Request, user: dict, response: Response) -> None:
+        """Записать, что человек открыл раздел.
+
+        Здесь, а не в обработчиках: через это место проходит КАЖДЫЙ запрос
+        к данным, и новый раздел попадёт в след сам. Расставь запись по
+        страницам — и первый же добавленный экран окажется невидимым, а
+        понять это по журналу нельзя: отсутствие строк выглядит точно так
+        же, как «человек туда не заходил».
+
+        Записываются только успешные GET: POST в разделе «Доступы» и так
+        пишет свою строку в журнал, отказ разделом не пользование, а
+        статика и проверка живости к делу не относятся.
+        """
+        if request.method != "GET" or response.status_code != 200:
+            return
+        section = section_of(request.url.path, self.config.base_path)
+        if not section:
+            return
+        store.record_visit(user.get("username", ""), section, client_ip(request))
 
     def _deny(self, request: Request) -> Response:
         path = request.url.path

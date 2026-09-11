@@ -232,7 +232,9 @@ def cmd_purge(_: argparse.Namespace) -> int:
     store.init_store()
     store.purge_expired_sessions()
     store.purge_old_attempts()
-    print("Протухшие сессии и старые попытки входа удалены")
+    visits = store.purge_old_visits()
+    print(f"Протухшие сессии и старые попытки входа удалены; "
+          f"след посещений старше {store.VISIT_KEEP_DAYS} дн: {visits}")
     return 0
 
 
