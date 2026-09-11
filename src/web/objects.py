@@ -109,7 +109,7 @@ ROP_FILTERS = ("in_ad", "published")
 # которых снимок и события сходятся, плюс произвольные даты.
 PERIOD_PRESETS: dict[str, str] = {
     key: metrics.PERIOD_PRESETS[key]
-    for key in ("today", "7d", "30d", "quarter")
+    for key in ("yesterday", "today", "7d", "30d", "quarter")
 }
 DEFAULT_PERIOD = "30d"
 

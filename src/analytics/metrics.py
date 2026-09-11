@@ -28,6 +28,12 @@ ENTITY_LEAD = "lead"
 
 # Пресеты периода. Значение — сколько дней назад начинается период.
 PERIOD_PRESETS: dict[str, str] = {
+    # «Вчера» — прошлый РАБОЧИЙ день, тот же, которым ведётся утренняя
+    # рассылка и «План на день». Второе определение вчерашнего дня на
+    # экране означало бы, что сводка и дашборд спорят о том, что случилось.
+    # В понедельник окно накрывает выходные целиком, и подпись говорит об
+    # этом датами, а не молчит.
+    "yesterday": "Вчера",
     "today": "Сегодня",
     "7d": "7 дней",
     "30d": "30 дней",
@@ -86,6 +92,27 @@ def resolve_period(
 
     preset = preset if preset in PERIOD_PRESETS else DEFAULT_PERIOD
     until = _day_start(today) + timedelta(days=1)
+
+    if preset == "yesterday":
+        window = yesterday_window()
+        # Границы окна хранятся в UTC, а поля «с» и «по» — московские
+        # календарные дни. Взять из строки первые десять символов значит
+        # ошибиться на сутки: в UTC вчерашний день начинается позавчера в
+        # 21:00, и форма показала бы дату на день раньше выбранной.
+        since_day = datetime.fromisoformat(window["since"]).astimezone(
+            BUSINESS_TZ).date()
+        until_day = datetime.fromisoformat(window["until"]).astimezone(
+            BUSINESS_TZ).date()
+        return {
+            "since": window["since"], "until": window["until"],
+            # Подпись честная: в понедельник это не «вчера», а три дня, и
+            # молчать об этом нельзя — по такому числу сверяют выручку.
+            "label": ("Вчера" if window["label"] == "вчера"
+                      else f"Вчера · {window['label']}"),
+            "preset": preset,
+            "start": since_day.isoformat(),
+            "end": (until_day - timedelta(days=1)).isoformat(),
+        }
 
     if preset == "today":
         since = _day_start(today)
@@ -261,6 +288,25 @@ def users(conn) -> list[dict[str, Any]]:
     )
 
 
+def department_clause(assignee: str) -> str:
+    """«Карточка принадлежит выбранному отделу» — одним ответом на весь проект.
+
+    Отдел берётся из user_home, то есть с учётом ростера, а не из карточки
+    портала. Иначе фильтр спорит с областью видимости на одном экране:
+    «Все отделы» показывают карточку человека, перенесённого ростером, а
+    выбранный отдел того же человека — уже нет. Строка не исчезает с шумом,
+    она просто перестаёт попадать в выборку, и объяснить это нельзя.
+
+    Вынесено в функцию, а не повторено одиннадцать раз: одиннадцать копий
+    условия однажды разойдутся, и разойдутся молча.
+
+    Условие без параметра — «все отделы»: :dept IS NULL пропускает всё, в
+    том числе карточки без ответственного, которых нет ни в одном отделе.
+    """
+    return (f"(:dept IS NULL OR {assignee} IN "
+            f"(SELECT user_id FROM user_home WHERE department_id = :dept))")
+
+
 # Отдел берётся у ТЕКУЩЕГО ответственного за сделку: истории назначений
 # Bitrix через crm.stagehistory.list не отдаёт, и хранить её нам негде.
 # Значит сделка, переданная в другой отдел, приносит туда всю свою историю
@@ -271,9 +317,9 @@ def _department_filter(event_alias: str = "e") -> str:
     return f"""
           AND (:dept IS NULL OR EXISTS (
                 SELECT 1 FROM v_deal fd
-                JOIN v_user_all du ON du.user_id = fd.assigned_by_id
                 WHERE fd.deal_id = {event_alias}.entity_id
-                  AND du.department_id = :dept))
+                  AND fd.assigned_by_id IN
+                      (SELECT user_id FROM user_home WHERE department_id = :dept)))
     """
 
 
@@ -795,7 +841,8 @@ def stage_moves(
         LEFT JOIN v_user_all u ON u.user_id = d.assigned_by_id
         WHERE e1.entity_type = 'deal' AND d.category_id = :cat
           AND e2.entered_at >= :since AND e2.entered_at < :until
-          AND (:dept IS NULL OR u.department_id = :dept)
+          AND (:dept IS NULL OR d.assigned_by_id IN
+               (SELECT user_id FROM user_home WHERE department_id = :dept))
         """,
         {"cat": category_id, "since": since, "until": until, "dept": department_id},
     )
@@ -1038,7 +1085,8 @@ def _stuck_rows(
         LEFT JOIN dim_stage s ON s.stage_id = d.stage_id AND s.category_id = d.category_id
         LEFT JOIN v_user_all u ON u.user_id = d.assigned_by_id
         WHERE d.category_id = :cat AND d.is_closed = 0
-          AND (:dept IS NULL OR u.department_id = :dept)
+          AND (:dept IS NULL OR d.assigned_by_id IN
+               (SELECT user_id FROM user_home WHERE department_id = :dept))
         ORDER BY days_in_stage DESC
         """,
         {"cat": category_id, "dept": department_id},
@@ -1771,7 +1819,7 @@ def entity_table(
             conditions.append("d.category_id = :cat")
             params["cat"] = category_id
         if department_id is not None:
-            conditions.append("u.department_id = :dept")
+            conditions.append(department_clause("d.assigned_by_id"))
             params["dept"] = department_id
         if stage_id:
             conditions.append("d.stage_id = :stage")
@@ -1818,7 +1866,7 @@ def entity_table(
                (julianday('now') - julianday(e.entered_at)) AS days_in_stage
         """
         if department_id is not None:
-            conditions.append("u.department_id = :dept")
+            conditions.append(department_clause("l.assigned_by_id"))
             params["dept"] = department_id
         if stage_id:
             conditions.append("l.status_id = :stage")

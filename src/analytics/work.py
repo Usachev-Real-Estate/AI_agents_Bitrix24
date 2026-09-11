@@ -76,7 +76,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import plans
-from metrics import _rows, _share
+from metrics import _rows, _share, department_clause
 
 # Запись разговора. MEETING в портале почти не используют — встречу заводят
 # делом, — но там, где он есть, это встреча.
@@ -105,6 +105,13 @@ TOP = 5
 # пятью входящими и двумя пропущенными выходит 40%, и он возглавил бы
 # таблицу, ничего при этом не значив.
 MIN_INCOMING = 30
+
+
+# «Карточка принадлежит выбранному отделу» и «звонок принадлежит человеку
+# выбранного отдела». Оба ответа берутся из metrics.department_clause, то
+# есть из ростера: фильтр обязан отвечать так же, как область видимости.
+_DEPT_OF_CARD = department_clause("d.assigned_by_id")
+_DEPT_OF_CALLER = department_clause("a.responsible_id")
 
 
 def _meetings_tracked(categories: Sequence[int] | None) -> bool:
@@ -140,6 +147,8 @@ def card_work(
     *,
     silent_days: int = SILENT_DAYS,
     department_id: int | None = None,
+    since: str | None = None,
+    until: str | None = None,
 ) -> dict[str, Any]:
     """Что происходило по открытым карточкам воронки.
 
@@ -194,7 +203,12 @@ def card_work(
         # брокера, и обе проверяются его же словами.
         "refusals": refused_in_work(conn, categories,
                                     department_id=department_id),
-        "pickup": _pickup(conn, department_id),
+        # Окно передаётся только звонкам: остальные разрезы отвечают на
+        # вопрос «по чему не работают вообще», и он не суточный —
+        # карточка, до которой не дошли руки полгода, за вчера ничем себя
+        # не проявила.
+        "pickup": _pickup(conn, department_id, since, until),
+        "pickup_window": bool(since or until),
         "shared_contacts": _shared_contacts(conn, categories),
     }
 
@@ -216,7 +230,7 @@ def _cards(conn, categories, department_id) -> list[dict[str, Any]]:
         LEFT JOIN dim_stage s
                ON s.stage_id = d.stage_id AND s.category_id = d.category_id
         WHERE d.is_closed = 0 AND {where}
-          AND (:dept IS NULL OR u.department_id = :dept)
+          AND {_DEPT_OF_CARD}
         """,
         params,
     )
@@ -244,7 +258,7 @@ def _acts(conn, categories, department_id) -> list[dict[str, Any]]:
                  OR (a.owner_type_id = 3 AND d.contact_id IS NOT NULL
                      AND d.contact_id > 0 AND a.owner_id = d.contact_id))
         WHERE d.is_closed = 0 AND {where}
-          AND (:dept IS NULL OR u.department_id = :dept)
+          AND {_DEPT_OF_CARD}
           AND a.provider_type_id IN (:call, :meet, :mark)
         """,
         {**params, "call": CALL, "meet": MEETING, "mark": MARK},
@@ -267,7 +281,7 @@ def _comments(conn, categories, department_id) -> list[dict[str, Any]]:
         LEFT JOIN v_user_all u ON u.user_id = d.assigned_by_id
         JOIN v_comment c ON c.entity_id = d.deal_id
         WHERE d.is_closed = 0 AND {where}
-          AND (:dept IS NULL OR u.department_id = :dept)
+          AND {_DEPT_OF_CARD}
         """,
         params,
     )
@@ -521,8 +535,19 @@ def _service_names() -> set[str]:
         return {"агентство недвижимости", "asterisk1 1"}
 
 
-def _pickup(conn, department_id: int | None) -> list[dict[str, Any]]:
+def _pickup(
+    conn,
+    department_id: int | None,
+    since: str | None = None,
+    until: str | None = None,
+) -> list[dict[str, Any]]:
     """Кто не берёт трубку. Считается по всем звонкам, а не по карточкам.
+
+    Окно необязательное, и умолчание — «за всё время». Утренняя сводка
+    спрашивает именно так: доля непринятых за один день скачет от случайных
+    трёх звонков, а порог MIN_INCOMING рассчитан на длинное окно. Экран же
+    обязан отвечать за выбранный период, иначе на странице с фильтром «7
+    дней» стоит таблица за всю историю — и понять это по ней нельзя.
 
     По открытым карточкам пропущенных всего 63 при 5 169 по порталу:
     подавляющее большинство непринятых не привязано ни к одной открытой
@@ -548,7 +573,7 @@ def _pickup(conn, department_id: int | None) -> list[dict[str, Any]]:
     sales = _sales_departments()
     rows = _rows(
         conn,
-        """
+        f"""
         SELECT a.responsible_id AS user_id,
                COALESCE(u.name, '') AS name,
                COALESCE(u.department_name, '') AS department,
@@ -564,10 +589,12 @@ def _pickup(conn, department_id: int | None) -> list[dict[str, Any]]:
         -- их безымянными строками в рейтинге.
         JOIN v_user u ON u.user_id = a.responsible_id
         WHERE a.provider_type_id = :call
-          AND (:dept IS NULL OR u.department_id = :dept)
+          AND {_DEPT_OF_CALLER}
+          AND (:since IS NULL OR a.created_at >= :since)
+          AND (:until IS NULL OR a.created_at < :until)
         GROUP BY a.responsible_id
         """,
-        {"call": CALL, "dept": department_id},
+        {"call": CALL, "dept": department_id, "since": since, "until": until},
     )
     people = []
     for row in rows:
@@ -626,7 +653,7 @@ def promises(
         LEFT JOIN dim_stage s
                ON s.stage_id = d.stage_id AND s.category_id = d.category_id
         WHERE d.is_closed = 0 AND {where}
-          AND (:dept IS NULL OR u.department_id = :dept)
+          AND {_DEPT_OF_CARD}
           AND r.promised_at IS NOT NULL AND r.promised_at < :today
           AND r.promised <> ''
           -- Договорились ждать — значит молчание законно, и обещание,
@@ -687,7 +714,7 @@ def promises_without_date(
         LEFT JOIN dim_stage s
                ON s.stage_id = d.stage_id AND s.category_id = d.category_id
         WHERE d.is_closed = 0 AND {where}
-          AND (:dept IS NULL OR u.department_id = :dept)
+          AND {_DEPT_OF_CARD}
           AND r.promised <> '' AND r.promised_at IS NULL
           -- Договорились ждать — молчание законно и здесь.
           AND (r.wait_until IS NULL OR r.wait_until < :today)
@@ -748,7 +775,7 @@ def refused_in_work(
                ON e.entity_type = 'deal' AND e.entity_id = d.deal_id
               AND e.stage_id = d.stage_id AND e.left_at IS NULL
         WHERE d.is_closed = 0 AND {where}
-          AND (:dept IS NULL OR u.department_id = :dept)
+          AND {_DEPT_OF_CARD}
           AND r.refused = 1 AND r.refused_why <> ''
         ORDER BY days_in_stage DESC
         """,
