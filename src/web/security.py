@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import logging
 import secrets
 from dataclasses import dataclass
@@ -105,15 +106,39 @@ def safe_next(target: str | None, base_path: str) -> str:
     return target
 
 
-def client_ip(request: Request) -> str:
-    """Адрес клиента с учётом обратного прокси.
+def _is_own_proxy(peer: str) -> bool:
+    """Можно ли верить этому соседу на слово про адрес клиента.
 
-    X-Forwarded-For принимается только когда непосредственный клиент —
-    localhost, то есть наш же nginx. Иначе любой желающий подделал бы адрес
-    заголовком и обошёл счётчик неудачных попыток.
+    Проверка началась с одного localhost — и была верна, пока дашборд
+    запускался прямо на хосте. В контейнере сосед другой: nginx стучится
+    через docker-мост, и запрос приходит с адреса шлюза вроде 172.20.0.1.
+    Заголовкам не верили, и КАЖДЫЙ клиент получал один и тот же адрес.
+
+    Это ломало не только колонку на экране. Блокировка перебора считает
+    неудачи по логину ИЛИ по адресу, и с одним адресом на всех пятеро
+    человек, промахнувшихся мимо пароля, запирали дашборд всем сразу —
+    включая директора. А защита от подбора по списку логинов, ради которой
+    счёт по адресу и заведён, не работала вовсе: различать было нечего.
+
+    Почему частный адрес здесь безопасен. Порт контейнера опубликован
+    только на петле хоста (127.0.0.1:8080 в docker-compose), наружу его
+    выставляет nginx. Достучаться до дашборда, минуя nginx, неоткуда, и
+    значит сосед с частного адреса — это он и есть. С публичного адреса
+    заголовки по-прежнему игнорируются: иначе подделать адрес и обойти
+    счётчик смог бы кто угодно.
     """
-    peer = request.client.host if request.client else ""
     if peer in ("127.0.0.1", "::1", "localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(peer).is_private
+    except ValueError:
+        return False
+
+
+def client_ip(request: Request) -> str:
+    """Адрес клиента с учётом обратного прокси."""
+    peer = request.client.host if request.client else ""
+    if _is_own_proxy(peer):
         forwarded = request.headers.get("x-forwarded-for", "")
         if forwarded:
             return forwarded.split(",")[0].strip()[:64]
