@@ -150,6 +150,10 @@ async def deals(request: Request) -> HTMLResponse:
             # стадии и у того, кто по нему звонит, и у того, кто забыл.
             "work": work.card_work(
                 conn, [category_id], department_id=context["department_id"],
+                # Звонки считаются за выбранный период: таблица за всю
+                # историю на странице с фильтром «7 дней» читается как
+                # число за эти семь дней, и заметить подмену нельзя.
+                since=period["since"], until=period["until"],
             ),
             "charts": {
                 "funnel": chartdata.funnel_chart(funnel),

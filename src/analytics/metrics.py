@@ -28,6 +28,12 @@ ENTITY_LEAD = "lead"
 
 # Пресеты периода. Значение — сколько дней назад начинается период.
 PERIOD_PRESETS: dict[str, str] = {
+    # «Вчера» — прошлый РАБОЧИЙ день, тот же, которым ведётся утренняя
+    # рассылка и «План на день». Второе определение вчерашнего дня на
+    # экране означало бы, что сводка и дашборд спорят о том, что случилось.
+    # В понедельник окно накрывает выходные целиком, и подпись говорит об
+    # этом датами, а не молчит.
+    "yesterday": "Вчера",
     "today": "Сегодня",
     "7d": "7 дней",
     "30d": "30 дней",
@@ -86,6 +92,27 @@ def resolve_period(
 
     preset = preset if preset in PERIOD_PRESETS else DEFAULT_PERIOD
     until = _day_start(today) + timedelta(days=1)
+
+    if preset == "yesterday":
+        window = yesterday_window()
+        # Границы окна хранятся в UTC, а поля «с» и «по» — московские
+        # календарные дни. Взять из строки первые десять символов значит
+        # ошибиться на сутки: в UTC вчерашний день начинается позавчера в
+        # 21:00, и форма показала бы дату на день раньше выбранной.
+        since_day = datetime.fromisoformat(window["since"]).astimezone(
+            BUSINESS_TZ).date()
+        until_day = datetime.fromisoformat(window["until"]).astimezone(
+            BUSINESS_TZ).date()
+        return {
+            "since": window["since"], "until": window["until"],
+            # Подпись честная: в понедельник это не «вчера», а три дня, и
+            # молчать об этом нельзя — по такому числу сверяют выручку.
+            "label": ("Вчера" if window["label"] == "вчера"
+                      else f"Вчера · {window['label']}"),
+            "preset": preset,
+            "start": since_day.isoformat(),
+            "end": (until_day - timedelta(days=1)).isoformat(),
+        }
 
     if preset == "today":
         since = _day_start(today)

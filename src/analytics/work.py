@@ -147,6 +147,8 @@ def card_work(
     *,
     silent_days: int = SILENT_DAYS,
     department_id: int | None = None,
+    since: str | None = None,
+    until: str | None = None,
 ) -> dict[str, Any]:
     """Что происходило по открытым карточкам воронки.
 
@@ -201,7 +203,12 @@ def card_work(
         # брокера, и обе проверяются его же словами.
         "refusals": refused_in_work(conn, categories,
                                     department_id=department_id),
-        "pickup": _pickup(conn, department_id),
+        # Окно передаётся только звонкам: остальные разрезы отвечают на
+        # вопрос «по чему не работают вообще», и он не суточный —
+        # карточка, до которой не дошли руки полгода, за вчера ничем себя
+        # не проявила.
+        "pickup": _pickup(conn, department_id, since, until),
+        "pickup_window": bool(since or until),
         "shared_contacts": _shared_contacts(conn, categories),
     }
 
@@ -528,8 +535,19 @@ def _service_names() -> set[str]:
         return {"агентство недвижимости", "asterisk1 1"}
 
 
-def _pickup(conn, department_id: int | None) -> list[dict[str, Any]]:
+def _pickup(
+    conn,
+    department_id: int | None,
+    since: str | None = None,
+    until: str | None = None,
+) -> list[dict[str, Any]]:
     """Кто не берёт трубку. Считается по всем звонкам, а не по карточкам.
+
+    Окно необязательное, и умолчание — «за всё время». Утренняя сводка
+    спрашивает именно так: доля непринятых за один день скачет от случайных
+    трёх звонков, а порог MIN_INCOMING рассчитан на длинное окно. Экран же
+    обязан отвечать за выбранный период, иначе на странице с фильтром «7
+    дней» стоит таблица за всю историю — и понять это по ней нельзя.
 
     По открытым карточкам пропущенных всего 63 при 5 169 по порталу:
     подавляющее большинство непринятых не привязано ни к одной открытой
@@ -572,9 +590,11 @@ def _pickup(conn, department_id: int | None) -> list[dict[str, Any]]:
         JOIN v_user u ON u.user_id = a.responsible_id
         WHERE a.provider_type_id = :call
           AND {_DEPT_OF_CALLER}
+          AND (:since IS NULL OR a.created_at >= :since)
+          AND (:until IS NULL OR a.created_at < :until)
         GROUP BY a.responsible_id
         """,
-        {"call": CALL, "dept": department_id},
+        {"call": CALL, "dept": department_id, "since": since, "until": until},
     )
     people = []
     for row in rows:

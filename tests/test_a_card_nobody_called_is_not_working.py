@@ -453,3 +453,43 @@ def test_an_unreadable_department_list_does_not_silence_everyone(agency, monkeyp
 
     row = next(r for r in _work()["pickup"] if r["user_id"] == 21)
     assert row["person"] is True
+
+
+# ── Окно звонков ───────────────────────────────────────────────────────
+def test_calls_outside_the_window_are_not_counted(agency):
+    """Таблица звонков обязана отвечать за выбранный период.
+
+    Раньше она считалась за всю историю независимо от фильтра: на странице
+    с чипом «7 дней» стояли числа за год, и понять это по ней было нельзя.
+    Остальные блоки страницы к периоду не привязаны сознательно — «по чему
+    не работают» вопрос не суточный, — но звонки за период спрашивают, и
+    ответ должен быть про период.
+    """
+    with analytics_session() as conn:
+        _deal(conn, 1, contact=CONTACT)
+        for i in range(40):
+            _act(conn, 900 + i, 3, 9999, direction=1, completed=0, user=11,
+                 created="2026-08-15T10:00:00+00:00")
+
+    inside = _work(
+        since="2026-08-01T00:00:00+00:00", until="2026-09-01T00:00:00+00:00")
+    outside = _work(
+        since="2026-09-01T00:00:00+00:00", until="2026-10-01T00:00:00+00:00")
+
+    assert any(row["user_id"] == 11 for row in inside["pickup"])
+    assert outside["pickup"] == []
+
+
+def test_without_a_window_it_still_counts_everything(agency):
+    """Умолчание — «за всё время»: утренняя сводка спрашивает именно так.
+
+    Доля непринятых за один день скачет от случайных трёх звонков, а порог
+    в 30 входящих рассчитан на длинное окно.
+    """
+    with analytics_session() as conn:
+        _deal(conn, 1, contact=CONTACT)
+        for i in range(40):
+            _act(conn, 900 + i, 3, 9999, direction=1, completed=0, user=11,
+                 created="2026-08-15T10:00:00+00:00")
+
+    assert any(row["user_id"] == 11 for row in _work()["pickup"])
