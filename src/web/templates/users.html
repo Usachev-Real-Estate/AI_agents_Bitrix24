@@ -16,6 +16,14 @@
 <p class="card-sub">Кто заходит в дашборд и что видит. Изменения действуют
   сразу — перезаходить никому не нужно.</p>
 
+<div class="chips mt-16">
+  {% for days, label in visit_windows %}
+    <a class="chip {{ 'active' if days == visit_days else '' }}"
+       href="?days={{ days }}">{{ label }}</a>
+  {% endfor %}
+  <span class="muted">окно, за которое считается «пользуется»</span>
+</div>
+
 {% if done %}
 <div class="notice"><span>✓</span><span>{{ done }}</span></div>
 {% endif %}
@@ -28,7 +36,8 @@
   <div class="table-wrap">
     <table>
       <thead>
-        <tr><th>Кто</th><th>Видит</th><th>Пароль</th><th>Доступ</th></tr>
+        <tr><th>Кто</th><th>Пользуется</th><th>Видит</th>
+          <th>Пароль</th><th>Доступ</th></tr>
       </thead>
       <tbody>
         {% for row in users %}
@@ -41,6 +50,24 @@
             <span class="muted">
               {% if row.last_login_at %}заходил {{ row.last_login_at | datetime_ru }}
               {% else %}ни разу не заходил{% endif %}</span>
+          </td>
+
+          {# Главный столбец этого экрана: открывал ли человек дашборд
+             вообще. Пустая клетка — это ответ, а не отсутствие данных. #}
+          <td>
+            {% set seen = visits.get(row.username) %}
+            {% if seen %}
+              <strong>{{ seen.visits | int_ru }}</strong>
+              {{ seen.visits | plural('открытие', 'открытия', 'открытий') }}<br>
+              <span class="muted">последнее {{ seen.last_at | datetime_ru }}</span><br>
+              <span class="muted">{% for item in seen.sections[:3] %}{{
+                sections.get(item.section, item.section) }}&nbsp;{{ item.visits
+                }}{{ ', ' if not loop.last }}{% endfor %}</span>
+            {% else %}
+              <span class="delta-down">не заходил</span>
+              <span class="muted"> за {{ visit_days }}
+                {{ visit_days | plural('день', 'дня', 'дней') }}</span>
+            {% endif %}
           </td>
 
           {# роль и отделы — одной формой: они меняются вместе #}
@@ -148,6 +175,32 @@
       отправкой.</p>
   </form>
 </div>
+
+{# --------------------------------------------------------------- след #}
+{% if recent %}
+<h2 class="section-title sub mt-16">Последние открытия</h2>
+<div class="card">
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Когда</th><th>Кто</th><th>Раздел</th><th>Адрес</th></tr></thead>
+      <tbody>
+        {% for row in recent %}
+        <tr>
+          <td class="nowrap muted">{{ row.at | datetime_ru }}</td>
+          <td>{{ row.username }}</td>
+          <td>{{ sections.get(row.section, row.section) }}</td>
+          <td class="muted">{{ row.ip or '—' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {{ ui.definition('Пишется раздел, а не полный адрес: фильтры и строка поиска
+    в след не попадают. Вопрос стоит «чем пользуются», а не «что искали».
+    Запись идёт на каждый успешный переход, поэтому новый раздел появляется
+    здесь сам — забыть его нельзя. След хранится 90 дней.') }}
+</div>
+{% endif %}
 
 {# ------------------------------------------------------------- сессии #}
 {% if sessions %}
