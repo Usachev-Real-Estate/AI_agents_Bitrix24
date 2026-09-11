@@ -76,7 +76,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import plans
-from metrics import _rows, _share
+from metrics import _rows, _share, department_clause
 
 # Запись разговора. MEETING в портале почти не используют — встречу заводят
 # делом, — но там, где он есть, это встреча.
@@ -105,6 +105,13 @@ TOP = 5
 # пятью входящими и двумя пропущенными выходит 40%, и он возглавил бы
 # таблицу, ничего при этом не значив.
 MIN_INCOMING = 30
+
+
+# «Карточка принадлежит выбранному отделу» и «звонок принадлежит человеку
+# выбранного отдела». Оба ответа берутся из metrics.department_clause, то
+# есть из ростера: фильтр обязан отвечать так же, как область видимости.
+_DEPT_OF_CARD = department_clause("d.assigned_by_id")
+_DEPT_OF_CALLER = department_clause("a.responsible_id")
 
 
 def _meetings_tracked(categories: Sequence[int] | None) -> bool:
@@ -216,7 +223,7 @@ def _cards(conn, categories, department_id) -> list[dict[str, Any]]:
         LEFT JOIN dim_stage s
                ON s.stage_id = d.stage_id AND s.category_id = d.category_id
         WHERE d.is_closed = 0 AND {where}
-          AND (:dept IS NULL OR u.department_id = :dept)
+          AND {_DEPT_OF_CARD}
         """,
         params,
     )
@@ -244,7 +251,7 @@ def _acts(conn, categories, department_id) -> list[dict[str, Any]]:
                  OR (a.owner_type_id = 3 AND d.contact_id IS NOT NULL
                      AND d.contact_id > 0 AND a.owner_id = d.contact_id))
         WHERE d.is_closed = 0 AND {where}
-          AND (:dept IS NULL OR u.department_id = :dept)
+          AND {_DEPT_OF_CARD}
           AND a.provider_type_id IN (:call, :meet, :mark)
         """,
         {**params, "call": CALL, "meet": MEETING, "mark": MARK},
@@ -267,7 +274,7 @@ def _comments(conn, categories, department_id) -> list[dict[str, Any]]:
         LEFT JOIN v_user_all u ON u.user_id = d.assigned_by_id
         JOIN v_comment c ON c.entity_id = d.deal_id
         WHERE d.is_closed = 0 AND {where}
-          AND (:dept IS NULL OR u.department_id = :dept)
+          AND {_DEPT_OF_CARD}
         """,
         params,
     )
@@ -548,7 +555,7 @@ def _pickup(conn, department_id: int | None) -> list[dict[str, Any]]:
     sales = _sales_departments()
     rows = _rows(
         conn,
-        """
+        f"""
         SELECT a.responsible_id AS user_id,
                COALESCE(u.name, '') AS name,
                COALESCE(u.department_name, '') AS department,
@@ -564,7 +571,7 @@ def _pickup(conn, department_id: int | None) -> list[dict[str, Any]]:
         -- их безымянными строками в рейтинге.
         JOIN v_user u ON u.user_id = a.responsible_id
         WHERE a.provider_type_id = :call
-          AND (:dept IS NULL OR u.department_id = :dept)
+          AND {_DEPT_OF_CALLER}
         GROUP BY a.responsible_id
         """,
         {"call": CALL, "dept": department_id},
@@ -626,7 +633,7 @@ def promises(
         LEFT JOIN dim_stage s
                ON s.stage_id = d.stage_id AND s.category_id = d.category_id
         WHERE d.is_closed = 0 AND {where}
-          AND (:dept IS NULL OR u.department_id = :dept)
+          AND {_DEPT_OF_CARD}
           AND r.promised_at IS NOT NULL AND r.promised_at < :today
           AND r.promised <> ''
           -- Договорились ждать — значит молчание законно, и обещание,
@@ -687,7 +694,7 @@ def promises_without_date(
         LEFT JOIN dim_stage s
                ON s.stage_id = d.stage_id AND s.category_id = d.category_id
         WHERE d.is_closed = 0 AND {where}
-          AND (:dept IS NULL OR u.department_id = :dept)
+          AND {_DEPT_OF_CARD}
           AND r.promised <> '' AND r.promised_at IS NULL
           -- Договорились ждать — молчание законно и здесь.
           AND (r.wait_until IS NULL OR r.wait_until < :today)
@@ -748,7 +755,7 @@ def refused_in_work(
                ON e.entity_type = 'deal' AND e.entity_id = d.deal_id
               AND e.stage_id = d.stage_id AND e.left_at IS NULL
         WHERE d.is_closed = 0 AND {where}
-          AND (:dept IS NULL OR u.department_id = :dept)
+          AND {_DEPT_OF_CARD}
           AND r.refused = 1 AND r.refused_why <> ''
         ORDER BY days_in_stage DESC
         """,
