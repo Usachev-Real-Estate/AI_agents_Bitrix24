@@ -193,6 +193,66 @@ def test_the_section_is_open_to_a_rop(rop):
     assert "План на день" in rop.get(f"{BASE}/today").text
 
 
+# ── Хвалить может только тот, кто говорил ──────────────────────────────
+def _remember(rule, subject, label, value, days_ago=1):
+    """Строка памяти, какую пишет РАССЫЛКА — по всей компании."""
+    from datetime import datetime, timezone
+
+    from db import db_session, init_db
+
+    stamp = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
+    init_db()
+    with db_session() as conn:
+        conn.execute(
+            "INSERT INTO advice_log(rule, subject, first_sent_at, last_sent_at,"
+            " sent_count, first_value, last_value, label, closed_at)"
+            " VALUES (?, ?, ?, ?, 1, ?, ?, ?, NULL)",
+            (rule, subject, stamp, stamp, value, value, label),
+        )
+
+
+def test_the_page_does_not_praise_for_what_it_cannot_see(rop, agent_db):
+    """«Сработало» на странице РОПа — чужие имена и чужие деньги.
+
+    Память пишет РАССЫЛКА, и пишет по всей компании. Страница же считает
+    кандидатов на СУЖЕННОМ соединении: совета про чужой отдел она увидеть
+    не может — и принимала это за «проблема решена, стало ноль».
+
+    Дальше хуже: имя для похвалы берётся из памяти, когда кандидата нет.
+    То есть РОП читал «Отдел Кретов: было 35 400 250, стало 0» — чужой
+    отдел, чужие деньги, и всё это ещё и неправда.
+
+    Правило простое: хвалить может только тот, кто говорил. Рассылка
+    сказала — рассылка и судит, сработало ли. Экран читает память, чтобы
+    знать, о чём уже говорили, и ничего больше.
+    """
+    _remember("dept_behind_pace", "dept:99", "Отдел Кретов", 35_400_250)
+    _remember("breakeven_gap", "company", "Квартал", 8_858_953)
+    _remember("promise_overdue", "user:777", "Чужой Брокер", 29)
+
+    body = rop.get(f"{BASE}/today").text
+
+    assert "Сработало" not in body
+    assert "Отдел Кретов" not in body
+    assert "Чужой Брокер" not in body
+    assert "35 400 250" not in body and "35400250" not in body
+
+
+def test_what_was_already_said_is_still_remembered(rop, agent_db):
+    """Память не выключается целиком: пауза на повтор обязана работать.
+
+    Совет, сказанный вчера, сегодня молчит — это и есть смысл памяти.
+    Выключив её вместе с похвалой, экран начал бы каждый день повторять
+    одно и то же.
+    """
+    body_before = _advice_block(rop)
+    assert "Марат Абзалилов" in body_before
+
+    _remember("promise_overdue", f"user:{BROKER}", "Марат Абзалилов", 2)
+
+    assert "Марат Абзалилов" not in _advice_block(rop)
+
+
 # ── Страница ничего не запоминает ──────────────────────────────────────
 def test_opening_the_page_does_not_spend_the_advice(admin, agent_db):
     """Открытая вкладка не должна лишать утреннее сообщение совета.

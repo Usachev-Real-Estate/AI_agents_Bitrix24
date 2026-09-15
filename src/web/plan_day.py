@@ -156,7 +156,12 @@ def _select(candidates, *, now=None):
     except Exception as error:
         logger.warning("Память советов недоступна, отбор пропущен: %s", error)
         return None
-    return advice.select(candidates, memory, now=now)
+    # praise=False: хвалить может только тот, кто говорил. «Сработало»
+    # сравнивает память с сегодняшними кандидатами, а память пишет
+    # рассылка — по всей компании. Экран РОПа считает на суженном
+    # соединении и чужого совета не видит; принимая это за «стало ноль»,
+    # он печатал чужой отдел с чужими деньгами.
+    return advice.select(candidates, memory, now=now, praise=False)
 
 
 # Как называется место на экране. В коде места — короткие ключи, потому что
