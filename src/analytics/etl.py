@@ -440,17 +440,19 @@ def sync_deals(
 
 ACTIVITY_SELECT = [
     "ID", "OWNER_TYPE_ID", "OWNER_ID", "PROVIDER_TYPE_ID", "DIRECTION",
-    "SUBJECT", "RESPONSIBLE_ID", "CREATED", "START_TIME", "END_TIME", "COMPLETED",
+    "SUBJECT", "DESCRIPTION", "RESPONSIBLE_ID", "CREATED", "START_TIME",
+    "END_TIME", "COMPLETED",
 ]
 
 _ACTIVITY_UPSERT = """
 INSERT INTO fact_activity(
     activity_id, owner_type_id, owner_id, provider_type_id, direction,
-    subject, responsible_id, created_at, start_time, end_time, completed, synced_at
+    subject, description, responsible_id, created_at, start_time, end_time,
+    completed, synced_at
 ) VALUES (
     :activity_id, :owner_type_id, :owner_id, :provider_type_id, :direction,
-    :subject, :responsible_id, :created_at, :start_time, :end_time, :completed,
-    :synced_at
+    :subject, :description, :responsible_id, :created_at, :start_time,
+    :end_time, :completed, :synced_at
 )
 ON CONFLICT(activity_id) DO UPDATE SET
     owner_type_id = excluded.owner_type_id,
@@ -458,6 +460,7 @@ ON CONFLICT(activity_id) DO UPDATE SET
     provider_type_id = excluded.provider_type_id,
     direction = excluded.direction,
     subject = excluded.subject,
+    description = excluded.description,
     responsible_id = excluded.responsible_id,
     created_at = excluded.created_at,
     start_time = excluded.start_time,
@@ -478,6 +481,9 @@ def _activity_row(raw: dict[str, Any], now: str) -> dict[str, Any]:
         "provider_type_id": _str(raw.get("PROVIDER_TYPE_ID")),
         "direction": _int(raw.get("DIRECTION")) or None,
         "subject": _str(raw.get("SUBJECT")),
+        # Через ту же чистку, что и комментарий: портал отдаёт описание с
+        # BB-кодами и переносами, а в таблицу оно идёт одной строкой.
+        "description": _comment_text(raw.get("DESCRIPTION")),
         "responsible_id": _int(raw.get("RESPONSIBLE_ID")) or None,
         "created_at": to_utc_iso(raw.get("CREATED")),
         "start_time": to_utc_iso(raw.get("START_TIME")),

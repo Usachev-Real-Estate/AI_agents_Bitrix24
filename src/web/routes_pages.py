@@ -193,11 +193,6 @@ async def movement(request: Request) -> HTMLResponse:
             "moves": metrics.stage_moves(
                 conn, category_id, period["since"], period["until"], department_id,
             ),
-            # Сравнение отделов рядом — вопрос, который фильтром «один отдел»
-            # не задать: где именно каждый теряет клиентов и где тормозит.
-            "by_department": metrics.funnel_by_department(
-                conn, category_id, period["since"], period["until"],
-            ),
             "charts": {"netflow": chartdata.net_flow_chart(movement_rows)},
             "matrix": chartdata.transitions_matrix(
                 transitions, metrics.stages(conn, category_id),

@@ -6,9 +6,18 @@
 ни того ни другого, и есть строка, ради которой блок заводился.
 
 След ищется НЕ «после перехода вообще», а внутри стояния на новой стадии:
-от входа до выхода. Иначе комментарий, написанный через две стадии и
-месяц, оправдывал бы давно забытый переход — и красных строк на экране не
-осталось бы вовсе, а блок выглядел бы работающим.
+от НАЧАЛА ТОГО ЖЕ ДНЯ до выхода. Правая граница держит блок честным:
+комментарий, написанный через две стадии и месяц, оправдывал бы давно
+забытый переход — и красных строк на экране не осталось бы вовсе. Левая
+взята по дню, а не по минуте перехода, потому что порядок в работе
+обратный: брокер сначала созванивается и пишет, что узнал, и только потом
+двигает карточку. По «строго после» такая работа не засчитывалась, и
+строка краснела на ровном месте.
+
+Дело засчитывается не любое, а живое. Просроченное дело — не след работы,
+а её отсутствие с отметкой в календаре: обещал перезвонить, срок прошёл,
+не перезвонил. У дела без срока просрочки нет вовсе — спрашивать по нему
+нечего.
 
 Кто именно перевёл карточку, портал не хранит: crm.stagehistory.list
 автора не отдаёт. Поэтому колонка называет ТЕКУЩЕГО ответственного, и
@@ -18,6 +27,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -38,6 +48,14 @@ SINCE, UNTIL = "2026-08-01T00:00:00+00:00", "2026-09-01T00:00:00+00:00"
 
 ENTERED = "2026-08-10T09:00:00+00:00"
 LEFT = "2026-08-20T09:00:00+00:00"
+
+# Срок дела сравнивается с «сейчас», поэтому в фикстуре он и должен считаться
+# от «сейчас». Записанная строкой дата однажды станет прошлым, и тест,
+# проверяющий живое дело, начнёт проверять просроченное — молча и не в тот
+# день, когда его писали.
+_NOW = datetime.now(timezone.utc)
+DUE_SOON = (_NOW + timedelta(days=3)).isoformat()
+DUE_PAST = (_NOW - timedelta(days=3)).isoformat()
 
 
 def _stage(conn, stage_id, name, sort):
@@ -81,14 +99,16 @@ def _note(conn, deal_id, at, body="Созвонились, ждёт подбор
         (deal_id * 1000 + hash(at) % 900, deal_id, author, body, auto, at))
 
 
-def _task(conn, deal_id, at, *, owner_type=2, owner=None):
+def _task(conn, deal_id, at, *, owner_type=2, owner=None, due=None, done=0,
+          subject="Перезвонить", text="", activity_id=None):
     conn.execute(
         "INSERT INTO fact_activity(activity_id, owner_type_id, owner_id,"
-        " provider_type_id, direction, subject, responsible_id, created_at,"
-        " start_time, end_time, completed, synced_at)"
-        " VALUES (?, ?, ?, 'CALL', 2, 'Перезвонить', ?, ?, ?, ?, 0, 'x')",
-        (deal_id * 100 + 1, owner_type, owner if owner is not None else deal_id,
-         BROKER, at, at, at))
+        " provider_type_id, direction, subject, description, responsible_id,"
+        " created_at, start_time, end_time, completed, synced_at)"
+        " VALUES (?, ?, ?, 'CALL', 2, ?, ?, ?, ?, ?, ?, ?, 'x')",
+        (activity_id if activity_id is not None else deal_id * 100 + 1,
+         owner_type, owner if owner is not None else deal_id,
+         subject, text, BROKER, at, due, due, done))
 
 
 @pytest.fixture
@@ -135,23 +155,155 @@ def test_a_note_after_the_move_clears_it(mart):
     assert row["note_author"] == "Анна Брокер"
 
 
-def test_a_task_alone_also_clears_it(mart):
+def test_a_live_task_alone_also_clears_it(mart):
     """Поставленное дело — тоже работа, даже если ничего не написали."""
     with analytics_session() as conn:
         _deal(conn, 1)
-        _task(conn, 1, "2026-08-12T10:00:00+00:00")
+        _task(conn, 1, "2026-08-12T10:00:00+00:00", due=DUE_SOON)
 
     row = _moves()["rows"][0]
     assert row["silent"] is False
     assert row["note"] == "" and row["task"] == "Перезвонить"
 
 
+def test_a_note_written_the_same_day_before_the_move_counts(mart):
+    """То, из-за чего строки краснели на ровном месте.
+
+    Порядок в работе обратный экранному: брокер созванивается, пишет, что
+    узнал, и после этого двигает карточку. По правилу «строго после
+    перехода» эта запись не засчитывалась, и переход, у которого след был,
+    попадал в красные.
+    """
+    with analytics_session() as conn:
+        _deal(conn, 1)
+        _note(conn, 1, "2026-08-10T04:00:00+00:00")  # 07:00 МСК, переход в 12:00
+
+    row = _moves()["rows"][0]
+    assert row["silent"] is False
+    assert row["note"] == "Созвонились, ждёт подборку"
+
+
+def test_the_day_is_counted_by_the_moscow_calendar(mart):
+    """Полночь у отдела московская, а не гринвичская.
+
+    Запись в 01:00 МСК сделана в тот же рабочий день, что и переход в 12:00
+    того же дня, — по UTC это разные сутки.
+    """
+    with analytics_session() as conn:
+        _deal(conn, 1)
+        _note(conn, 1, "2026-08-09T22:00:00+00:00")  # 10 августа, 01:00 МСК
+
+    assert _moves()["rows"][0]["silent"] is False
+
+
+def test_a_task_set_the_same_day_before_the_move_counts(mart):
+    with analytics_session() as conn:
+        _deal(conn, 1)
+        _task(conn, 1, "2026-08-10T05:00:00+00:00", due=DUE_SOON)
+
+    assert _moves()["rows"][0]["silent"] is False
+
+
+# ── Дело живое и дело просроченное ─────────────────────────────────────
+def test_an_overdue_task_does_not_clear_the_move(mart):
+    """Просроченное дело — не след работы, а её отсутствие с отметкой.
+
+    Обещал перезвонить, срок прошёл, не перезвонил и не перенёс: ровно тот
+    случай, ради которого строку и красят.
+    """
+    with analytics_session() as conn:
+        _deal(conn, 1)
+        _task(conn, 1, "2026-08-12T10:00:00+00:00", due=DUE_PAST)
+
+    row = _moves()["rows"][0]
+    assert row["silent"] is True
+    assert row["task"] == "Перезвонить", "дело всё равно показывают"
+    assert row["task_live"] is False
+
+
+def test_a_finished_task_is_never_overdue(mart):
+    """Срок прошёл, но дело выполнено — спрашивать не о чем."""
+    with analytics_session() as conn:
+        _deal(conn, 1)
+        _task(conn, 1, "2026-08-12T10:00:00+00:00", due=DUE_PAST, done=1)
+
+    assert _moves()["rows"][0]["silent"] is False
+
+
+def test_a_task_without_a_deadline_is_not_overdue(mart):
+    """Дня нет — значит и просрочки нет, и брокер прав, если возразит."""
+    with analytics_session() as conn:
+        _deal(conn, 1)
+        _task(conn, 1, "2026-08-12T10:00:00+00:00", due=None)
+
+    assert _moves()["rows"][0]["silent"] is False
+
+
+def test_a_live_task_outweighs_an_overdue_one(mart):
+    """Последнее слово за живым делом — и в подсветке, и в колонке.
+
+    Иначе экран противоречил бы сам себе: строка красная, а рядом в ней
+    дело на послезавтра.
+    """
+    with analytics_session() as conn:
+        _deal(conn, 1)
+        _task(conn, 1, "2026-08-12T10:00:00+00:00", due=DUE_PAST,
+              subject="Перезвонить", activity_id=901)
+        _task(conn, 1, "2026-08-13T10:00:00+00:00", due=DUE_SOON,
+              subject="Показ в субботу", activity_id=902)
+
+    row = _moves()["rows"][0]
+    assert row["silent"] is False
+    assert row["task"] == "Показ в субботу"
+
+
+# ── Что написали и о чём договорились ──────────────────────────────────
+def test_the_text_under_the_task_is_shown_too(mart):
+    """«Перезвонить» не отличить от «Перезвонить после 18:00 и на другой номер»."""
+    with analytics_session() as conn:
+        _deal(conn, 1)
+        _task(conn, 1, "2026-08-12T10:00:00+00:00", due=DUE_SOON,
+              subject="Перезвонить",
+              text="Клиент просил после 18:00 и с другого номера")
+
+    row = _moves()["rows"][0]
+    assert row["task"] == "Перезвонить"
+    assert row["task_text"] == "Клиент просил после 18:00 и с другого номера"
+
+
+def test_a_note_and_a_task_are_both_shown(mart):
+    """Раньше запись прятала дело: колонка показывала что-то одно."""
+    with analytics_session() as conn:
+        _deal(conn, 1)
+        _note(conn, 1, "2026-08-11T10:00:00+00:00", body="Клиент думает")
+        _task(conn, 1, "2026-08-12T10:00:00+00:00", due=DUE_SOON,
+              subject="Перезвонить", text="В пятницу до обеда")
+
+    row = _moves()["rows"][0]
+    assert row["note"] == "Клиент думает"
+    assert row["task"] == "Перезвонить"
+    assert row["task_text"] == "В пятницу до обеда"
+
+
 # ── Что следом не считается ────────────────────────────────────────────
-def test_a_note_written_before_the_move_does_not_count(mart):
-    """Запись до перевода объясняет прошлую стадию, а не эту."""
+def test_a_note_written_on_an_earlier_day_does_not_count(mart):
+    """Запись прошлых дней объясняет прошлую стадию, а не эту.
+
+    День перехода засчитывается целиком, но только он: иначе оправданием
+    сошла бы любая старая строчка в карточке.
+    """
     with analytics_session() as conn:
         _deal(conn, 1)
         _note(conn, 1, "2026-08-05T10:00:00+00:00")
+
+    assert _moves()["rows"][0]["silent"] is True
+
+
+def test_a_note_from_the_evening_before_does_not_count(mart):
+    """Граница дня проверяется с той стороны, с которой её можно потерять."""
+    with analytics_session() as conn:
+        _deal(conn, 1)
+        _note(conn, 1, "2026-08-09T20:00:00+00:00")  # 23:00 МСК девятого
 
     assert _moves()["rows"][0]["silent"] is True
 
@@ -269,3 +421,76 @@ def test_the_page_actually_paints_the_row_red(mart, monkeypatch):
     assert 'class="row-silent"' in body, "строка без следа не подсвечена"
     assert "Подбор → <strong>Показ</strong>" in body
     assert "ни записи, ни дела" in body
+
+
+def test_the_page_shows_the_note_the_task_and_what_was_agreed(mart, monkeypatch):
+    """Три вещи в одной ячейке, а раньше показывалась одна.
+
+    Дело без описания руководителю бесполезно: «Перезвонить» не отличить от
+    «Перезвонить, клиент просил после 18:00». А запись пряталась за делом —
+    шаблон показывал что-то одно.
+    """
+    from fastapi.testclient import TestClient
+
+    import store
+    from app import create_app
+    from config import get_settings
+
+    monkeypatch.setenv("DASHBOARD_SECRET_KEY", "t" * 48)
+    monkeypatch.setenv("DASHBOARD_COOKIE_SECURE", "false")
+    get_settings.cache_clear()
+    with analytics_session() as conn:
+        _deal(conn, 1)
+        _note(conn, 1, "2026-08-11T10:00:00+00:00", body="Клиент думает до пятницы")
+        _task(conn, 1, "2026-08-12T10:00:00+00:00", due=DUE_SOON,
+              subject="Перезвонить", text="После 18:00 и с другого номера")
+
+    password = "correct-horse-battery"
+    application = create_app()
+    store.create_user("boss", password, "Директор", role="admin")
+    session = TestClient(application, follow_redirects=False)
+    session.get("/dashboard/login")
+    session.post("/dashboard/login", data={
+        "username": "boss", "password": password,
+        "csrf_token": session.cookies.get("dash_csrf"), "next": "",
+    })
+
+    body = session.get(
+        "/dashboard/movement?start=2026-08-01&end=2026-08-31&category=18").text
+    assert "Клиент думает до пятницы" in body
+    assert "Перезвонить" in body
+    assert "После 18:00 и с другого номера" in body
+    assert 'class="row-silent"' not in body, "след есть — красить нечего"
+
+
+def test_the_page_marks_an_overdue_task_as_overdue(mart, monkeypatch):
+    """Красная строка обязана объяснить себя: дело есть, но просрочено."""
+    from fastapi.testclient import TestClient
+
+    import store
+    from app import create_app
+    from config import get_settings
+
+    monkeypatch.setenv("DASHBOARD_SECRET_KEY", "t" * 48)
+    monkeypatch.setenv("DASHBOARD_COOKIE_SECURE", "false")
+    get_settings.cache_clear()
+    with analytics_session() as conn:
+        _deal(conn, 1)
+        _task(conn, 1, "2026-08-12T10:00:00+00:00", due=DUE_PAST,
+              subject="Перезвонить")
+
+    password = "correct-horse-battery"
+    application = create_app()
+    store.create_user("boss", password, "Директор", role="admin")
+    session = TestClient(application, follow_redirects=False)
+    session.get("/dashboard/login")
+    session.post("/dashboard/login", data={
+        "username": "boss", "password": password,
+        "csrf_token": session.cookies.get("dash_csrf"), "next": "",
+    })
+
+    body = session.get(
+        "/dashboard/movement?start=2026-08-01&end=2026-08-31&category=18").text
+    assert 'class="row-silent"' in body
+    assert "просрочено" in body
+    assert "ни записи, ни дела" not in body, "дело есть, врать про это нельзя"

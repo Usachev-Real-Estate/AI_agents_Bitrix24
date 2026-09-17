@@ -421,6 +421,72 @@ def test_an_activity_is_normalised_not_stored_raw(analytics_db):
     assert row["responsible_id"] == 32
 
 
+def test_the_text_under_the_task_is_kept_and_cleaned(analytics_db):
+    """Название отвечает «что», описание — «о чём договорились».
+
+    «Перезвонить» без описания не отличить от «Перезвонить, клиент просил
+    после 18:00 и с другого номера»: руководитель видит на дашборде дело и
+    не может сказать по нему ничего. Описание портал отдаёт с BB-кодами и
+    переносами — в таблицу оно идёт одной чистой строкой, той же чисткой,
+    что и комментарий.
+    """
+    from analytics import etl
+    from analytics.schema import analytics_session
+
+    client = FakeClient(activities=[
+        _activity(30, 2, 500, "CALL", "2026-09-01T10:00:00+03:00",
+                  SUBJECT="Перезвонить",
+                  DESCRIPTION="[B]Клиент[/B] просил после 18:00\nи с другого номера"),
+    ])
+    with analytics_session() as conn:
+        etl.sync_activities(client, conn, since="2026-01-01T00:00:00+00:00")
+        row = conn.execute(
+            "SELECT subject, description FROM fact_activity"
+            " WHERE activity_id = 30").fetchone()
+
+    assert row["subject"] == "Перезвонить"
+    assert row["description"] == "Клиент просил после 18:00 и с другого номера"
+
+
+def test_a_task_without_a_description_is_stored_all_the_same(analytics_db):
+    """Описание пустое у большинства дел — это не повод терять строку."""
+    from analytics import etl
+    from analytics.schema import analytics_session
+
+    client = FakeClient(activities=[
+        _activity(31, 2, 500, "CALL", "2026-09-01T10:00:00+03:00"),
+    ])
+    with analytics_session() as conn:
+        etl.sync_activities(client, conn, since="2026-01-01T00:00:00+00:00")
+        row = conn.execute(
+            "SELECT description FROM fact_activity"
+            " WHERE activity_id = 31").fetchone()
+
+    assert row["description"] == ""
+
+
+def test_a_description_added_later_reaches_the_mart(analytics_db):
+    """Дозагрузка обязана переписать описание, а не оставить старое пустым."""
+    from analytics import etl
+    from analytics.schema import analytics_session
+
+    first = FakeClient(activities=[
+        _activity(32, 2, 500, "CALL", "2026-09-01T10:00:00+03:00"),
+    ])
+    again = FakeClient(activities=[
+        _activity(32, 2, 500, "CALL", "2026-09-01T10:00:00+03:00",
+                  DESCRIPTION="Показ в субботу в 12:00"),
+    ])
+    with analytics_session() as conn:
+        etl.sync_activities(first, conn, since="2026-01-01T00:00:00+00:00")
+        etl.sync_activities(again, conn, since="2026-01-01T00:00:00+00:00")
+        row = conn.execute(
+            "SELECT description FROM fact_activity"
+            " WHERE activity_id = 32").fetchone()
+
+    assert row["description"] == "Показ в субботу в 12:00"
+
+
 def test_a_second_run_updates_instead_of_duplicating(analytics_db):
     """Догрузка идёт с перекрытием — одна и та же активность придёт дважды."""
     from analytics import etl
