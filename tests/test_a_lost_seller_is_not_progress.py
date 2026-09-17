@@ -180,13 +180,22 @@ def test_the_chat_message_names_the_stage_and_the_broker(sellers):
 # --------------------------------------------------------------------------
 
 def test_an_advertised_object_is_not_called_stuck(sellers, monkeypatch):
-    """«Поиск клиента» — объект в рекламе, и месяцы там нормальны.
+    """«Поиск клиента» — объект в рекламе: месяцы нормальны, квартал нет.
 
     Норма стадии считается по ЗАВЕРШЁННЫМ интервалам, то есть по тем
     карточкам, которые со стадии ушли. На «Поиске клиента» уходят первыми
     самые быстрые, норма выходит по ним короткой, и всё честно
     рекламируемое оказалось бы «зависшим». Это отбор выживших, а не
-    свойство стадии, и порогом он не лечится.
+    свойство стадии, и перцентилем он не лечится.
+
+    Раньше стадия просто исключалась. Решение агентства от 17.09 отменило
+    исключение и заменило его своим порогом: объект, простоявший квартал,
+    — это уже не «в рекламе», а забытый объект, и молчать про него
+    бесконечно значит потерять его совсем.
+
+    Отсюда две проверки в одной: до девяноста дней стадия молчит, после —
+    говорит. Исключение из настройки при этом больше не прячет карточку:
+    для стадии есть верное число, и прятать её незачем.
     """
     import metrics
     from config import get_settings
@@ -210,12 +219,20 @@ def test_an_advertised_object_is_not_called_stuck(sellers, monkeypatch):
         conn.execute(
             "INSERT INTO fact_stage_event(entity_type, entity_id, category_id,"
             " stage_id, entered_at, left_at, duration_sec, seq)"
-            " VALUES ('deal', 14, 0, 'UC_FADPBF', ?, NULL, NULL, 0)", (_ago(90),))
+            " VALUES ('deal', 14, 0, 'UC_FADPBF', ?, NULL, NULL, 0)", (_ago(80),))
+        # А этот стоит дольше квартала — про такой пора говорить.
+        _deal(conn, 15, "UC_FADPBF", "Забытый объект")
+        conn.execute(
+            "INSERT INTO fact_stage_event(entity_type, entity_id, category_id,"
+            " stage_id, entered_at, left_at, duration_sec, seq)"
+            " VALUES ('deal', 15, 0, 'UC_FADPBF', ?, NULL, NULL, 0)", (_ago(120),))
 
     with scoped_session(Scope.everything()) as conn:
         stuck = metrics._stuck_rows(conn, SELLERS)
 
-    assert [row["deal_id"] for row in stuck] == []
+    assert [row["deal_id"] for row in stuck] == [15], "восемьдесят дней молчат, сто двадцать — нет"
+    assert stuck[0]["threshold_days"] == 90
+    assert stuck[0]["threshold_source"] == "90 дней", "строка обязана назвать свой порог"
     get_settings.cache_clear()
 
 

@@ -31,7 +31,7 @@ BUSY_TIMEOUT_MS = 10_000
 #    колонки в ней нет. Пока init_analytics_db() гнал DDL безусловно, это
 #    сходило с рук; с проверкой версии такая база осталась бы без миграции
 #    навсегда. Поднимаем версию задним числом: это и есть починка.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Семантика стадии. Без неё нельзя посчитать ни конверсию, ни win rate:
 # «выиграно» и «проиграно» надо отличать от «в работе», а по одному только
@@ -164,6 +164,10 @@ _DDL: tuple[str, ...] = (
         provider_type_id   TEXT NOT NULL DEFAULT '',
         direction          INTEGER,
         subject            TEXT NOT NULL DEFAULT '',
+        -- Текст дела под его названием. Название отвечает «что», описание —
+        -- «о чём договорились»: «Перезвонить» без описания не отличить от
+        -- «Перезвонить, клиент просил после 18:00 и с другого номера».
+        description        TEXT NOT NULL DEFAULT '',
         responsible_id     INTEGER,
         created_at         TEXT NOT NULL,
         start_time         TEXT,
@@ -420,6 +424,23 @@ def _migrate_comment_read_prompt(conn: sqlite3.Connection) -> None:
         pass
 
 
+def _migrate_activity_description(conn: sqlite3.Connection) -> None:
+    """Добавить описание дела витринам, созданным до его появления.
+
+    Колонка появляется пустой и наполняется не сама: обычный прогон тянет
+    действия фильтром по дате создания, то есть допишет описание только
+    новым. Старым его вернёт ближайший `--full` — он идёт по всему окну
+    витрины без водяного знака и переписывает каждую строку. В cron такой
+    прогон стоит на 02:30, то есть ждать нужно одну ночь. Пустое описание
+    при этом ничего не ломает — строка на экране просто короче.
+    """
+    try:
+        conn.execute("ALTER TABLE fact_activity "
+                     "ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+
+
 def _migrate_dim_user_last_name(conn: sqlite3.Connection) -> None:
     """Добавить last_name витринам, созданным до появления колонки.
 
@@ -468,6 +489,7 @@ def init_analytics_db(db_path: str | Path | None = None) -> None:
             conn.execute(statement)
         _migrate_dim_user_last_name(conn)
         _migrate_comment_read_prompt(conn)
+        _migrate_activity_description(conn)
         conn.execute(
             "INSERT INTO analytics_meta(key, value) VALUES('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",

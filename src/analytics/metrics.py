@@ -746,6 +746,10 @@ def stage_transitions(
         JOIN v_stage_event e2
           ON e2.entity_type = e1.entity_type AND e2.entity_id = e1.entity_id
          AND e2.seq = e1.seq + 1
+         -- Только внутри воронки: клетка «из чужой воронки» в матрице
+         -- одной воронки — бессмыслица, а порядковые номера стадий у
+         -- разных воронок несравнимы. См. events._moves().
+         AND e2.category_id = e1.category_id
         LEFT JOIN dim_stage sf ON sf.stage_id = e1.stage_id AND sf.category_id = :cat
         LEFT JOIN dim_stage st ON st.stage_id = e2.stage_id AND st.category_id = :cat
         WHERE e1.entity_type = 'deal' AND e1.category_id = :cat
@@ -768,6 +772,49 @@ def stage_transitions(
 # читает, а страница на живом месяце их набирает под тысячу.
 MOVES_SHOWN = 200
 
+# Дело живо, пока его не просрочили. Выполненное закрыто, у дела без срока
+# просрочки нет вовсе — «дня нет, значит и просрочки нет», то же правило, по
+# которому в work.py считаются обещания без даты.
+_TASK_LIVE = """(a.completed = 1
+       OR COALESCE(a.end_time, a.start_time) IS NULL
+       OR julianday(COALESCE(a.end_time, a.start_time)) >= julianday('now'))"""
+
+# Окно, в котором ищется след перехода: с начала ТОГО ЖЕ ДНЯ и до ухода со
+# стадии. День московский — по тому же календарю, что и границы периодов
+# (BUSINESS_TZ): полночь у отдела в 00:00 МСК, а не в 03:00.
+_TRACE_WINDOW = """date({col}, '+3 hours') >= date(e2.entered_at, '+3 hours')
+          AND (e2.left_at IS NULL OR {col} < e2.left_at)"""
+
+_NOTE_OF_MOVE = """
+        FROM v_comment c
+        WHERE c.entity_type = 'deal' AND c.entity_id = d.deal_id
+          AND c.is_auto = 0
+          AND {window}
+        ORDER BY c.created_at LIMIT 1
+""".format(window=_TRACE_WINDOW.format(col="c.created_at"))
+
+_NOTE_AUTHOR_OF_MOVE = """
+        FROM v_comment c
+        LEFT JOIN v_user_all au ON au.user_id = c.author_id
+        WHERE c.entity_type = 'deal' AND c.entity_id = d.deal_id
+          AND c.is_auto = 0
+          AND {window}
+        ORDER BY c.created_at LIMIT 1
+""".format(window=_TRACE_WINDOW.format(col="c.created_at"))
+
+# Живое дело важнее просроченного, а среди равных — последнее: спрашивают по
+# тому, что брокер собирается делать, а не по тому, что он успел просрочить
+# раньше. Порядок один на все три подзапроса, иначе экран противоречил бы
+# сам себе — красная строка с делом на послезавтра в той же ячейке.
+_TASK_OF_MOVE = """
+        FROM v_activity a
+        WHERE ((a.owner_type_id = 2 AND a.owner_id = d.deal_id)
+               OR (a.owner_type_id = 3 AND d.contact_id IS NOT NULL
+                   AND d.contact_id > 0 AND a.owner_id = d.contact_id))
+          AND {window}
+        ORDER BY {live} DESC, a.created_at DESC LIMIT 1
+""".format(window=_TRACE_WINDOW.format(col="a.created_at"), live=_TASK_LIVE)
+
 
 def stage_moves(
     conn,
@@ -786,14 +833,28 @@ def stage_moves(
 
     Главное здесь — последняя колонка. Перевод карточки на следующую стадию
     сам по себе не работа: в Битриксе это один клик, и стадию двигают, когда
-    просят «подтянуть воронку». Работа — то, что после клика: запись о
-    разговоре или поставленное дело. Переход без того и другого — ровно та
-    строка, ради которой блок и заводится, и она подсвечена.
+    просят «подтянуть воронку». Работа — то, что вокруг клика: запись о
+    разговоре или живое дело. Переход без того и другого — ровно та строка,
+    ради которой блок и заводится, и она подсвечена.
 
-    «Что написал» ищется НЕ «после перехода вообще», а внутри стояния на
-    новой стадии: от входа до выхода (left_at). Иначе запись, сделанная
-    через три стадии и два месяца, оправдывала бы давно забытый переход, и
-    красных строк на экране не осталось бы вовсе.
+    След ищется в окне «с начала того же дня до ухода со стадии». Правая
+    граница держит блок честным: запись, сделанная через три стадии и два
+    месяца, оправдывала бы давно забытый переход, и красных строк на экране
+    не осталось бы вовсе. Левая взята по ДНЮ, а не по минуте перехода,
+    потому что порядок в работе обратный экранному: брокер созванивается,
+    пишет, что узнал, и только потом двигает карточку. По «строго после»
+    такая работа не засчитывалась, и строка краснела на ровном месте. День
+    московский — тот же календарь, что у границ периода (BUSINESS_TZ).
+
+    Дело засчитывается не любое, а живое: выполненное, ещё не наступившее
+    или бессрочное. Просроченное дело — не след работы, а её отсутствие с
+    отметкой в календаре: обещал перезвонить, срок прошёл, не перезвонил и
+    не перенёс.
+
+    Рядом с названием дела идёт его описание, а запись — рядом с делом, а не
+    вместо него. Название отвечает «что», описание — «о чём договорились»:
+    «Перезвонить» без описания не отличить от «Перезвонить, клиент просил
+    после 18:00 и с другого номера», и руководителю нечего спросить.
 
     Кто двинул — вопрос, на который витрина честно ответить не может:
     crm.stagehistory.list автора перехода не отдаёт, его нет и в самом
@@ -803,7 +864,7 @@ def stage_moves(
     """
     rows = _rows(
         conn,
-        """
+        f"""
         SELECT d.deal_id, d.title, d.opportunity, d.currency_id,
                e2.entered_at AS moved_at,
                COALESCE(sf.name, e1.stage_id) AS from_name,
@@ -813,28 +874,18 @@ def stage_moves(
                d.assigned_by_id AS user_id,
                COALESCE(u.name, '') AS assignee,
                COALESCE(u.department_name, '') AS department,
-               (SELECT c.body FROM v_comment c
-                 WHERE c.entity_id = d.deal_id AND c.is_auto = 0
-                   AND c.created_at >= e2.entered_at
-                   AND (e2.left_at IS NULL OR c.created_at < e2.left_at)
-                 ORDER BY c.created_at LIMIT 1) AS note,
-               (SELECT COALESCE(au.name, '') FROM v_comment c
-                  LEFT JOIN v_user_all au ON au.user_id = c.author_id
-                 WHERE c.entity_id = d.deal_id AND c.is_auto = 0
-                   AND c.created_at >= e2.entered_at
-                   AND (e2.left_at IS NULL OR c.created_at < e2.left_at)
-                 ORDER BY c.created_at LIMIT 1) AS note_author,
-               (SELECT a.subject FROM v_activity a
-                 WHERE ((a.owner_type_id = 2 AND a.owner_id = d.deal_id)
-                        OR (a.owner_type_id = 3 AND d.contact_id IS NOT NULL
-                            AND d.contact_id > 0 AND a.owner_id = d.contact_id))
-                   AND a.created_at >= e2.entered_at
-                   AND (e2.left_at IS NULL OR a.created_at < e2.left_at)
-                 ORDER BY a.created_at LIMIT 1) AS task
+               (SELECT c.body {_NOTE_OF_MOVE}) AS note,
+               (SELECT COALESCE(au.name, '') {_NOTE_AUTHOR_OF_MOVE}) AS note_author,
+               (SELECT a.subject {_TASK_OF_MOVE}) AS task,
+               (SELECT a.description {_TASK_OF_MOVE}) AS task_text,
+               (SELECT {_TASK_LIVE} {_TASK_OF_MOVE}) AS task_live
         FROM v_stage_event e1
         JOIN v_stage_event e2
           ON e2.entity_type = e1.entity_type AND e2.entity_id = e1.entity_id
          AND e2.seq = e1.seq + 1
+         -- Только внутри воронки — см. events._moves(): перевод из общей
+         -- базы не откат и не движение вперёд.
+         AND e2.category_id = e1.category_id
         JOIN v_deal d ON d.deal_id = e1.entity_id
         LEFT JOIN dim_stage sf ON sf.stage_id = e1.stage_id AND sf.category_id = :cat
         LEFT JOIN dim_stage st ON st.stage_id = e2.stage_id AND st.category_id = :cat
@@ -849,9 +900,13 @@ def stage_moves(
     for row in rows:
         row["note"] = (row["note"] or "").strip()
         row["task"] = (row["task"] or "").strip()
+        row["task_text"] = (row["task_text"] or "").strip()
+        row["task_live"] = bool(row["task_live"])
         row["backwards"] = row["to_sort"] < row["from_sort"]
-        # Ни записи, ни дела: клик был, работы не видно.
-        row["silent"] = not row["note"] and not row["task"]
+        # Ни записи, ни живого дела: клик был, работы не видно. Просроченное
+        # дело здесь не спасает — оно и есть отсутствие работы, только с
+        # отметкой в календаре.
+        row["silent"] = not row["note"] and not (row["task"] and row["task_live"])
     # Молчаливые наверх, внутри — по деньгам: разговор начинают с самого
     # дорогого следа, который никто не оставил.
     rows.sort(key=lambda row: (not row["silent"], -(row["opportunity"] or 0)))
@@ -1016,6 +1071,36 @@ def stuck_money(
     }
 
 
+# Стадии, на которых долгое стояние — норма, но не бесконечно.
+#
+# Решение агентства от 17.09. У «Поиска клиента» объект в рекламе живёт
+# месяцами, у «Закрытой продажи (сайт)» карточка ждёт документов: перцентиль
+# завершённых интервалов там короткий (уходят первыми самые быстрые), и по
+# нему зависшей оказывается каждая честно работающая карточка.
+#
+# Но и молчать про них бесконечно нельзя: объект, простоявший квартал, —
+# это уже не «в рекламе», а забытый объект. Поэтому не исключение, а свой
+# порог: до девяноста дней стадия ничего не говорит, после — говорит.
+#
+# Сравнение по НАЗВАНИЮ, а не по идентификатору: одна и та же стадия в
+# разных воронках заведена под разными кодами, и перечислять их пришлось бы
+# столько же раз, сколько воронок, а при заведении новой — вспомнить.
+# Названия агентство назвало само, как и фамилии РОПов.
+LONG_STAGES: frozenset[str] = frozenset({
+    "закрытая продажа (сайт)",
+    "поиск клиента",
+})
+LONG_STAGE_DAYS = 90
+
+
+def _long_stage(stage_name: str) -> bool:
+    """Стадия из тех, где меряют кварталом, а не перцентилем.
+
+    lower() — в Python: в SQLite он кириллицу не трогает.
+    """
+    return (stage_name or "").strip().lower() in LONG_STAGES
+
+
 def _stuck_exempt(category_id: int) -> set[str]:
     """Стадии, на которых простой не считается простоем.
 
@@ -1093,16 +1178,23 @@ def _stuck_rows(
     )
     stuck = []
     for row in rows:
-        if row["stage_id"] in skip:
-            continue
         days = row["days_in_stage"]
-        own = thresholds.get(row["stage_id"], 0) or 0
-        threshold = own or fallback
+        # Стадия со своим порогом решается раньше исключений: её потому и
+        # выносили в исключения, что перцентиль на ней врёт, — а теперь
+        # для неё есть верное число, и прятать карточку больше незачем.
+        if _long_stage(row["stage_name"]):
+            own, threshold, source = 0, float(LONG_STAGE_DAYS), "90 дней"
+        elif row["stage_id"] in skip:
+            continue
+        else:
+            own = thresholds.get(row["stage_id"], 0) or 0
+            threshold = own or fallback
+            source = "стадия" if own else "воронка"
         if days is None or threshold <= 0 or days <= threshold:
             continue
         row["days_in_stage"] = round(days, 1)
         row["threshold_days"] = round(threshold, 1)
-        row["threshold_source"] = "стадия" if own else "воронка"
+        row["threshold_source"] = source
         stuck.append(row)
     return stuck
 
