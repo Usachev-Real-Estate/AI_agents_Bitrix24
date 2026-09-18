@@ -1033,6 +1033,29 @@ def _position_is_rop(position: str, substrings: list[str]) -> bool:
     return False
 
 
+def load_active_user_ids() -> set[int]:
+    """Идентификаторы работающих сотрудников. Пустое множество — не знаем.
+
+    Рассылки спрашивают портал об этом перед каждой отправкой: уволенному
+    сообщение уходит в никуда, а в чате отдела выглядит как работа с
+    человеком, которого в компании нет.
+
+    При ошибке возвращается пустое множество, а не «все»: неудачный запрос
+    к user.get не повод разослать важное сообщение каждому, кто когда-либо
+    был ответственным. Следующий тик спросит заново.
+    """
+    try:
+        users = _bx_get_all_sync("user.get", {"FILTER": {"ACTIVE": True}})
+    except Exception:
+        logger.exception("Failed to load active users")
+        return set()
+    return {
+        uid
+        for u in _as_list(users)
+        if isinstance(u, dict) and (uid := _coerce_int(u.get("ID"))) > 0
+    }
+
+
 def _build_rop_map() -> dict[int, int]:
     """Build department_id → ROP user_id mapping.
 

@@ -53,6 +53,9 @@ buyer-base-rate-lock:
 buyer-commission-reminder:
 	$(PYTHON) src/buyer_commission_reminder.py
 
+shared-lead-qualify-reminder:
+	$(PYTHON) src/shared_lead_qualify_reminder.py
+
 broker-rating-daily:
 	$(PYTHON) src/broker_rating_collectors.py --daily
 

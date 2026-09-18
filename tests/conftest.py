@@ -1,5 +1,6 @@
 """Pytest configuration: import path + hermetic settings environment."""
 
+import importlib
 import sys
 from pathlib import Path
 from typing import Iterator
@@ -57,10 +58,32 @@ def no_bitrix_network(monkeypatch: pytest.MonkeyPatch) -> None:
     # Модули, забравшие функцию к себе через `from tools import ...`, держат
     # уже своё имя, и подмена выше их не касается. Заглушки ставятся каждому
     # поимённо: иначе тест, не подменивший вызов сам, пошёл бы в боевой
-    # портал — молча и успешно, пока однажды не сделает это из CI.
-    import dossier
+    # портал — молча и успешно, пока однажды не сделает это из CI. Список —
+    # это `grep -l "_bx_get_all_sync" src/`, и его надо пополнять вместе с
+    # новым модулем.
+    for module_name in (
+        "broker_rating_collectors",
+        "buyer_commission_reminder",
+        "client_state",
+        "dossier",
+        "fill_buyer_base_rate",
+        "lead_quality_audit",
+        "shared_lead_qualify_reminder",
+        "transcripts",
+    ):
+        module = importlib.import_module(module_name)
+        monkeypatch.setattr(module, "_bx_get_all_sync", _blocked)
 
-    monkeypatch.setattr(dossier, "_bx_get_all_sync", _blocked)
+    # Чтение — половина дела: сообщения уходят другим путём, через
+    # notify._bx_call_sync, и он до сих пор не был закрыт ничем. Тест,
+    # забывший подменить отправку, слал настоящий POST в портал — и
+    # проходил, потому что вызывающий код ошибку отправки переживает.
+    import notify
+
+    def _blocked_call(method: str, params: dict) -> object:
+        raise RuntimeError(f"Bitrix REST disabled in tests: {method}")
+
+    monkeypatch.setattr(notify, "_bx_call_sync", _blocked_call)
 
 
 @pytest.fixture(autouse=True)
