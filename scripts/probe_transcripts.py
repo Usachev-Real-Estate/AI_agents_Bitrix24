@@ -1,17 +1,30 @@
 #!/usr/bin/env python3
-"""Разведка перед запуском ИИ-агента: что реально есть в карточках.
+"""Разведка звонков перед выгрузкой досье: сколько их и у скольких есть текст.
 
 Только чтение. Ничего не меняет в CRM, не обращается к языковой модели
 и не сохраняет тексты разговоров — считает объёмы и покрытие.
 
-Отвечает на вопросы, без которых оценка стоимости остаётся гаданием:
-  * по скольким звонкам реально отдаётся расшифровка (метод возвращает
-    null, если AI-обработка не завершилась);
-  * сколько текста приходится на карточку — это и есть размер контекста;
-  * во что обойдётся полный проход и обычный день.
+ПОЧЕМУ НЕ ТЕЛЕФОНИЯ. Первым делом сюда просилась voximplant.statistic.get:
+она отдаёт CALL_DURATION, TRANSCRIPT_ID и TRANSCRIPT_PENDING одним запросом
+на страницу вместо запроса на звонок. На этом портале таблица мертва — 222
+записи, последняя 31.07.2026, TRANSCRIPT_ID не заполнен ни у одной, тогда
+как crm.activity.list знает 3555 звонков. Звонки регистрирует внешняя АТС
+(megapbx) через REST-приложение, и в статистику Воксимпланта она писать
+перестала. Опаснее всего, что метод дал бы не пустоту, а ЛОЖНОЕ ОТРИЦАНИЕ:
+на десяти последних звонках getTranscript вернул текст у трёх, а таблица
+телефонии о них не знает вовсе. Поэтому источник здесь один —
+crm.activity.list, а наличие текста проверяется единственным честным
+способом: запросом расшифровки.
+
+ЗАЧЕМ ДЛИТЕЛЬНОСТЬ. Расшифровка стоит одного запроса на звонок, и это
+самая дорогая часть выгрузки. Но треть звонков длится ноль секунд, а ещё
+треть — меньше тридцати: в них нет разговора, и расшифровывать там нечего.
+END_TIME − START_TIME приходит вместе со списком дел, бесплатно, и отсекает
+эти звонки ДО первого обращения к расшифровкам. Скрипт отвечает, сколько
+именно остаётся после отсечки — по всему портфелю, а не по выборке.
 
 Запуск:
-    python scripts/probe_transcripts.py --category 18 --limit 50
+    python scripts/probe_transcripts.py --category 18 --category 0
 """
 
 from __future__ import annotations
@@ -29,199 +42,267 @@ if str(_SRC_DIR) not in sys.path:
 
 from config import get_settings, setup_logging  # noqa: E402
 from notify import _bx_call_sync  # noqa: E402
-from tools import _as_list, _bx_get_all_sync, _coerce_int  # noqa: E402
+from tools import (  # noqa: E402
+    _as_list, _bx_get_all_sync, _coerce_int, _parse_datetime,
+)
 
 CALL_ACTIVITY_TYPE_ID = 2
-# Грубая оценка: для русского текста ~3 символа на токен. Считаем консервативно.
-CHARS_PER_TOKEN = 3.0
+DIRECTION_IN = 1
+DIRECTION_OUT = 2
+# Порог, ниже которого разговора не было. Взят не из головы: на этом портале
+# 30 % звонков длятся ровно ноль секунд, ещё 31 % — меньше тридцати секунд.
+LONG_CALL_SEC = 60
+# Сколько сделок спрашивать одним фильтром. Тот же размер, что у истории
+# стадий в tools.py: портал такой список принимает, а запросов выходит в
+# сотню раз меньше, чем при обходе по одной карточке.
+OWNER_CHUNK = 50
 
 
-def list_open_deals(category_id: int, limit: int) -> list[dict[str, Any]]:
-    """Открытые сделки воронки — только id и заголовок."""
-    raw = _bx_get_all_sync(
-        "crm.deal.list",
-        {
-            "filter": {"CATEGORY_ID": category_id, "CLOSED": "N"},
-            "select": ["ID", "TITLE", "STAGE_ID", "ASSIGNED_BY_ID"],
-            "order": {"ID": "DESC"},
-        },
-    )
-    deals = [d for d in _as_list(raw) if isinstance(d, dict)]
-    return deals[:limit]
+def list_open_deals(category_ids: list[int], limit: int) -> list[dict[str, Any]]:
+    """Открытые сделки указанных воронок — только то, что нужно для отбора."""
+    deals: list[dict[str, Any]] = []
+    for category_id in category_ids:
+        raw = _bx_get_all_sync(
+            "crm.deal.list",
+            {
+                "filter": {"CATEGORY_ID": category_id, "CLOSED": "N"},
+                "select": ["ID", "STAGE_ID", "CATEGORY_ID", "ASSIGNED_BY_ID"],
+                "order": {"ID": "DESC"},
+            },
+        )
+        found = [d for d in _as_list(raw) if isinstance(d, dict)]
+        print(f"Воронка {category_id}: открытых сделок {len(found)}")
+        deals.extend(found)
+    return deals[:limit] if limit > 0 else deals
 
 
-def list_call_activities(deal_id: int) -> list[dict[str, Any]]:
-    """Дела типа «Звонок», привязанные к сделке."""
-    raw = _bx_get_all_sync(
-        "crm.activity.list",
-        {
+def _chunks(values: list[int], size: int) -> list[list[int]]:
+    return [values[i:i + size] for i in range(0, len(values), size)]
+
+
+def list_call_activities(deal_ids: list[int]) -> list[dict[str, Any]]:
+    """Звонки по списку сделок. Пачками, с откатом на по-сделочный запрос.
+
+    Откат обязателен: пачка падает целиком, и без него один сбойный
+    идентификатор стирал бы из разведки полсотни карточек, а отчёт при этом
+    выглядел бы успешным.
+    """
+    out: list[dict[str, Any]] = []
+    for chunk in _chunks([d for d in deal_ids if d > 0], OWNER_CHUNK):
+        params = {
             "filter": {
                 "OWNER_TYPE_ID": 2,
-                "OWNER_ID": deal_id,
+                "OWNER_ID": chunk,
                 "TYPE_ID": CALL_ACTIVITY_TYPE_ID,
             },
-            "select": ["ID", "SUBJECT", "CREATED", "DIRECTION", "COMPLETED"],
-        },
-    )
-    return [a for a in _as_list(raw) if isinstance(a, dict)]
+            "select": [
+                "ID", "OWNER_ID", "SUBJECT", "CREATED",
+                "START_TIME", "END_TIME", "DIRECTION", "COMPLETED",
+            ],
+        }
+        try:
+            out.extend(_as_list(_bx_get_all_sync("crm.activity.list", params)))
+            continue
+        except Exception as exc:  # noqa: BLE001 — разведка не падает на пачке
+            print(f"  ! пачка из {len(chunk)} сделок не прочиталась: {exc}",
+                  file=sys.stderr)
+        for deal_id in chunk:
+            single = dict(params)
+            single["filter"] = dict(params["filter"], OWNER_ID=deal_id)
+            try:
+                out.extend(_as_list(_bx_get_all_sync("crm.activity.list", single)))
+            except Exception as exc:  # noqa: BLE001
+                print(f"  ! сделка {deal_id}: {exc}", file=sys.stderr)
+    return [a for a in out if isinstance(a, dict)]
 
 
-def fetch_transcript_length(activity_id: int) -> int | None:
-    """Длина расшифровки в символах; None — расшифровки нет.
+def call_duration_sec(activity: dict[str, Any]) -> int:
+    """Длительность звонка из END_TIME − START_TIME.
 
-    Сам текст наружу не отдаётся: скрипту нужен только объём.
+    Единственный доступный здесь источник длительности: CALL_DURATION живёт
+    в статистике телефонии, а она на этом портале не наполняется. Нет одной
+    из границ — считаем нулём: неизвестную длительность нельзя записывать в
+    длинные звонки, иначе очередь на расшифровку наберётся из пустых.
+    """
+    start = _parse_datetime(activity.get("START_TIME"))
+    end = _parse_datetime(activity.get("END_TIME"))
+    if start is None or end is None:
+        return 0
+    seconds = int((end - start).total_seconds())
+    return seconds if seconds > 0 else 0
+
+
+def has_transcript(activity_id: int) -> bool | None:
+    """Есть ли расшифровка. None — запрос не удался (это не «текста нет»).
+
+    Сам текст наружу не отдаётся: скрипту нужен только факт наличия.
     """
     try:
         result = _bx_call_sync(
             "crm.activity.call.getTranscript", {"activityId": activity_id},
         )
-    except Exception as exc:  # noqa: BLE001 — разведка не должна падать на одном звонке
-        print(f"    ! ошибка по звонку {activity_id}: {exc}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 — разведка не падает на звонке
+        print(f"  ! ошибка по звонку {activity_id}: {exc}", file=sys.stderr)
         return None
     if not result:
-        return None
+        return False
     if isinstance(result, dict):
         text = str(result.get("transcription") or result.get("TRANSCRIPTION") or "")
-        return len(text) or None
-    return len(str(result)) or None
+        return bool(text.strip())
+    return bool(str(result).strip())
 
 
-def comment_chars(deal_id: int) -> int:
-    """Суммарный объём комментариев таймлайна карточки."""
-    raw = _bx_get_all_sync(
-        "crm.timeline.comment.list",
-        {
-            "filter": {"ENTITY_ID": deal_id, "ENTITY_TYPE": "deal"},
-            "select": ["ID", "COMMENT"],
-        },
-    )
-    total = 0
-    for item in _as_list(raw):
-        if isinstance(item, dict):
-            total += len(str(item.get("COMMENT") or ""))
-    return total
+def _bucket(seconds: int) -> str:
+    if seconds <= 0:
+        return "0"
+    if seconds < 30:
+        return "1-29"
+    if seconds < LONG_CALL_SEC:
+        return "30-59"
+    return ">=60"
 
 
-def probe(category_id: int, limit: int) -> dict[str, Any]:
-    deals = list_open_deals(category_id, limit)
-    print(f"Воронка {category_id}: разбираем {len(deals)} открытых сделок\n")
-
-    per_deal: list[dict[str, Any]] = []
-    calls_total = 0
-    calls_with_text = 0
-
-    for index, deal in enumerate(deals, 1):
-        deal_id = _coerce_int(deal.get("ID"))
-        if deal_id <= 0:
-            continue
-        activities = list_call_activities(deal_id)
-        lengths = []
-        for activity in activities:
-            calls_total += 1
-            length = fetch_transcript_length(_coerce_int(activity.get("ID")))
-            if length:
-                calls_with_text += 1
-                lengths.append(length)
-
-        comments = comment_chars(deal_id)
-        transcript_chars = sum(lengths)
-        per_deal.append({
-            "deal_id": deal_id,
-            "calls": len(activities),
-            "calls_with_transcript": len(lengths),
-            "transcript_chars": transcript_chars,
-            "comment_chars": comments,
-            "context_chars": transcript_chars + comments,
-        })
-        print(
-            f"[{index}/{len(deals)}] сделка {deal_id}: "
-            f"звонков {len(activities)}, с расшифровкой {len(lengths)}, "
-            f"текста {transcript_chars + comments} символов"
-        )
-
-    return summarize(per_deal, calls_total, calls_with_text)
-
-
-def summarize(
-    per_deal: list[dict[str, Any]],
-    calls_total: int,
-    calls_with_text: int,
+def probe(
+    category_ids: list[int],
+    deal_limit: int,
+    max_checks: int,
 ) -> dict[str, Any]:
-    contexts = [d["context_chars"] for d in per_deal] or [0]
-    coverage = (calls_with_text / calls_total * 100) if calls_total else 0.0
+    deals = list_open_deals(category_ids, deal_limit)
+    deal_ids = [_coerce_int(d.get("ID")) for d in deals]
+    print(f"Разбираем {len(deal_ids)} сделок\n")
+
+    activities = list_call_activities(deal_ids)
+    print(f"Звонков по этим сделкам: {len(activities)}\n")
+
+    buckets: dict[str, int] = {"0": 0, "1-29": 0, "30-59": 0, ">=60": 0}
+    durations: list[int] = []
+    long_calls: list[dict[str, Any]] = []
+    for activity in activities:
+        seconds = call_duration_sec(activity)
+        durations.append(seconds)
+        buckets[_bucket(seconds)] += 1
+        if seconds >= LONG_CALL_SEC:
+            long_calls.append(activity)
+
+    checked = long_calls if max_checks <= 0 else long_calls[:max_checks]
+    print(f"Спрашиваем расшифровку по {len(checked)} длинным звонкам "
+          f"(из {len(long_calls)})\n")
+
+    with_text = {DIRECTION_IN: 0, DIRECTION_OUT: 0, 0: 0}
+    total_by_dir = {DIRECTION_IN: 0, DIRECTION_OUT: 0, 0: 0}
+    errors = 0
+    for index, activity in enumerate(checked, 1):
+        direction = _coerce_int(activity.get("DIRECTION"))
+        if direction not in (DIRECTION_IN, DIRECTION_OUT):
+            direction = 0
+        total_by_dir[direction] += 1
+        answer = has_transcript(_coerce_int(activity.get("ID")))
+        if answer is None:
+            errors += 1
+        elif answer:
+            with_text[direction] += 1
+        if index % 50 == 0:
+            print(f"  … проверено {index}/{len(checked)}")
+
+    text_total = sum(with_text.values())
+    checks = len(checked) - errors
     return {
-        "deals_probed": len(per_deal),
-        "calls_total": calls_total,
-        "calls_with_transcript": calls_with_text,
-        "transcript_coverage_pct": round(coverage, 1),
-        "deals_without_any_text": sum(1 for c in contexts if c == 0),
-        "context_chars_median": int(statistics.median(contexts)),
-        "context_chars_max": max(contexts),
-        "context_tokens_median": int(statistics.median(contexts) / CHARS_PER_TOKEN),
-        "context_tokens_max": int(max(contexts) / CHARS_PER_TOKEN),
+        "deals_probed": len(deal_ids),
+        "calls_total": len(activities),
+        "duration_buckets": buckets,
+        "duration_median_sec": int(statistics.median(durations)) if durations else 0,
+        "long_calls": len(long_calls),
+        "long_share_pct": round(len(long_calls) / len(activities) * 100, 1)
+        if activities else 0.0,
+        "checked": len(checked),
+        "check_errors": errors,
+        "with_transcript": text_total,
+        "without_transcript": max(checks - text_total, 0),
+        "coverage_pct": round(text_total / checks * 100, 1) if checks else 0.0,
+        "incoming_checked": total_by_dir[DIRECTION_IN],
+        "incoming_with_text": with_text[DIRECTION_IN],
+        "outgoing_checked": total_by_dir[DIRECTION_OUT],
+        "outgoing_with_text": with_text[DIRECTION_OUT],
     }
 
 
-def print_report(stats: dict[str, Any], fleet_size: int) -> None:
-    median_tokens = stats["context_tokens_median"]
+def print_report(stats: dict[str, Any]) -> None:
     print("\n" + "=" * 62)
-    print("РАЗВЕДКА: что есть в карточках")
+    print("РАЗВЕДКА ЗВОНКОВ: длительности и покрытие расшифровками")
     print("=" * 62)
-    print(f"Разобрано сделок:            {stats['deals_probed']}")
-    print(f"Звонков всего:               {stats['calls_total']}")
-    print(f"Из них с расшифровкой:       {stats['calls_with_transcript']} "
-          f"({stats['transcript_coverage_pct']} %)")
-    print(f"Сделок совсем без текста:    {stats['deals_without_any_text']}")
-    print(f"Контекст на карточку, медиана: {stats['context_chars_median']} символов "
-          f"(~{median_tokens} токенов)")
-    print(f"Контекст на карточку, макс.:   {stats['context_chars_max']} символов "
-          f"(~{stats['context_tokens_max']} токенов)")
-
-    print("\nОценка объёма (без цены — подставьте тариф своего провайдера):")
-    full = median_tokens * fleet_size
-    print(f"  Полный проход по {fleet_size} карточкам: "
-          f"~{full / 1_000_000:.1f} млн токенов входа")
-    print(f"  Инкрементально, ~10 % карточек в день:   "
-          f"~{full * 0.1 / 1_000_000:.2f} млн токенов/день")
+    print(f"Сделок разобрано:        {stats['deals_probed']}")
+    print(f"Звонков всего:           {stats['calls_total']}")
+    print()
+    print("Распределение длительностей (END_TIME − START_TIME):")
+    total = stats["calls_total"] or 1
+    for label in ("0", "1-29", "30-59", ">=60"):
+        count = stats["duration_buckets"][label]
+        print(f"  {label:>6} сек: {count:>5}  ({count / total * 100:.0f} %)")
+    print(f"  медиана: {stats['duration_median_sec']} сек")
+    print()
+    print(f"Длинных звонков (>= {LONG_CALL_SEC} сек): {stats['long_calls']} "
+          f"({stats['long_share_pct']} % всех)")
+    print(f"Отсечка экономит запросов: "
+          f"{stats['calls_total'] - stats['long_calls']}")
+    print()
+    print(f"Проверено расшифровок:   {stats['checked']}")
+    if stats["check_errors"]:
+        print(f"  из них не ответили:    {stats['check_errors']} "
+              f"(в покрытие не считаются)")
+    print(f"  с текстом:             {stats['with_transcript']} "
+          f"({stats['coverage_pct']} %)")
+    print(f"  без текста:            {stats['without_transcript']} "
+          f"← столько кандидатов в очередь на запуск")
+    print()
+    print("По направлению звонка:")
+    for label, checked_key, text_key in (
+        ("входящие", "incoming_checked", "incoming_with_text"),
+        ("исходящие", "outgoing_checked", "outgoing_with_text"),
+    ):
+        checked = stats[checked_key]
+        with_text = stats[text_key]
+        share = f"{with_text / checked * 100:.0f} %" if checked else "—"
+        print(f"  {label:<10} проверено {checked:>4}, с текстом {with_text:>4} "
+              f"({share})")
 
     print("\nНа что смотреть:")
-    if stats["transcript_coverage_pct"] < 60:
-        print("  • Покрытие расшифровок ниже 60 % — агент будет видеть картину")
-        print("    неравномерно, и брокеры без расшифровок окажутся в невыгодном")
-        print("    положении не по своей вине. Это надо учесть в правилах.")
-    else:
-        print("  • Покрытие расшифровок достаточное: разговоры можно делать")
-        print("    основным источником, а комментарии — вспомогательным.")
-    if stats["context_tokens_max"] > 30_000:
-        print("  • Есть карточки с очень длинным контекстом. Полная история в")
-        print("    каждом запросе недопустима — нужно инкрементальное состояние.")
-    if stats["deals_without_any_text"]:
-        print(f"  • Карточек совсем без текста: {stats['deals_without_any_text']}.")
-        print("    По ним никакой агент состояние не восстановит — это отдельная")
-        print("    категория «пусто», а не «плохо описано».")
+    print("  • «Без текста» — это ПОТОЛОК очереди на запуск, а не её размер:")
+    print("    приоритетный фильтр (активная стадия, брокер молчит) отберёт")
+    print("    из них меньше. Бюджет --launch-budget держит сотню за прогон.")
+    if stats["outgoing_checked"] and stats["incoming_checked"]:
+        out_share = stats["outgoing_with_text"] / stats["outgoing_checked"]
+        in_share = stats["incoming_with_text"] / stats["incoming_checked"]
+        if in_share - out_share > 0.15:
+            print("  • У исходящих покрытие заметно ниже входящих. Это перекос")
+            print("    не в пользу брокера: он звонил, а текста его разговора")
+            print("    нет, и карточка выглядит молчащей. Ровно те звонки и")
+            print("    надо ставить в очередь первыми.")
+    if stats["check_errors"]:
+        print("  • Часть запросов не ответила. Если их много, цифра покрытия")
+        print("    занижена — повторите разведку, прежде чем верить очереди.")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Разведка расшифровок и объёмов перед запуском ИИ-агента",
+        description="Разведка звонков: длительности и доля без расшифровки",
     )
-    parser.add_argument("--category", type=int, required=True,
-                        help="ID воронки: 18 — покупатели, 0 — продавцы")
-    parser.add_argument("--limit", type=int, default=50,
-                        help="Сколько сделок разобрать (по умолчанию 50)")
-    parser.add_argument("--fleet-size", type=int, default=1000,
-                        help="Всего открытых карточек — для оценки объёма")
+    parser.add_argument("--category", type=int, action="append", required=True,
+                        help="ID воронки; можно повторить: --category 18 --category 0")
+    parser.add_argument("--limit", type=int, default=0,
+                        help="Ограничить число сделок (0 — весь портфель)")
+    parser.add_argument("--max-transcript-checks", type=int, default=0,
+                        help="Ограничить число запросов расшифровки (0 — все длинные)")
     parser.add_argument("--json", action="store_true", help="Вывести результат как JSON")
     args = parser.parse_args()
 
     settings = get_settings()
     setup_logging(settings.log_level)
 
-    stats = probe(args.category, args.limit)
+    stats = probe(args.category, args.limit, args.max_transcript_checks)
     if args.json:
         print(json.dumps(stats, ensure_ascii=False, indent=2))
     else:
-        print_report(stats, args.fleet_size)
+        print_report(stats)
 
 
 if __name__ == "__main__":

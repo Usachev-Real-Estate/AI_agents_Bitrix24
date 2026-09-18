@@ -54,6 +54,14 @@ def no_bitrix_network(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(tools, "_bx_get_all_sync", _blocked)
 
+    # Модули, забравшие функцию к себе через `from tools import ...`, держат
+    # уже своё имя, и подмена выше их не касается. Заглушки ставятся каждому
+    # поимённо: иначе тест, не подменивший вызов сам, пошёл бы в боевой
+    # портал — молча и успешно, пока однажды не сделает это из CI.
+    import dossier
+
+    monkeypatch.setattr(dossier, "_bx_get_all_sync", _blocked)
+
 
 @pytest.fixture(autouse=True)
 def agent_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:

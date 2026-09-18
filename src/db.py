@@ -366,6 +366,29 @@ def init_db() -> None:
         """)
 
         conn.execute("""
+        CREATE TABLE IF NOT EXISTS transcript_launches (
+            activity_id INTEGER PRIMARY KEY,
+            deal_id INTEGER NOT NULL,
+            -- Сколько раз звонок попадал в очередь на запуск расшифровки.
+            -- Две постановки — потолок: если после второй текст не появился,
+            -- дело не в очереди, и третья ничего не изменит. Без счётчика
+            -- один и тот же звонок кочевал бы из очереди в очередь вечно,
+            -- вытесняя оттуда те, по которым запуск ещё может сработать.
+            attempts INTEGER NOT NULL DEFAULT 0,
+            first_queued_at TEXT NOT NULL DEFAULT '',
+            last_queued_at TEXT NOT NULL DEFAULT '',
+            -- ok — текст появился; failed — две постановки без результата или
+            -- ошибка запуска; пусто — ждём. Словарь досье, не кэша.
+            outcome TEXT NOT NULL DEFAULT '',
+            note TEXT NOT NULL DEFAULT ''
+        );
+        """)
+        conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_transcript_launches_deal
+            ON transcript_launches(deal_id);
+        """)
+
+        conn.execute("""
         CREATE TABLE IF NOT EXISTS client_states (
             deal_id INTEGER PRIMARY KEY,
             state_json TEXT NOT NULL,
@@ -1702,6 +1725,103 @@ def get_call_transcript(activity_id: int) -> dict[str, Any] | None:
             (activity_id,),
         ).fetchone()
         return dict(row) if row else None
+
+
+def get_transcript_launch(activity_id: int) -> dict[str, Any] | None:
+    """Строка очереди запуска по звонку или None."""
+    init_db()
+    with db_session() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT activity_id, deal_id, attempts, first_queued_at,
+                   last_queued_at, outcome, note
+            FROM transcript_launches
+            WHERE activity_id = ?
+            """,
+            (activity_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_transcript_launches(deal_ids: list[int]) -> dict[int, dict[str, Any]]:
+    """Строки очереди по списку сделок: activity_id → строка.
+
+    Оптом, а не по звонку: за прогон таких вопросов тысячи, и тысяча
+    открытий базы ради одной строки каждое — это минуты на ровном месте.
+    """
+    if not deal_ids:
+        return {}
+    init_db()
+    out: dict[int, dict[str, Any]] = {}
+    with db_session() as conn:
+        conn.row_factory = sqlite3.Row
+        for start in range(0, len(deal_ids), 500):
+            chunk = deal_ids[start:start + 500]
+            marks = ",".join("?" * len(chunk))
+            rows = conn.execute(
+                f"""
+                SELECT activity_id, deal_id, attempts, first_queued_at,
+                       last_queued_at, outcome, note
+                FROM transcript_launches
+                WHERE deal_id IN ({marks})
+                """,
+                chunk,
+            ).fetchall()
+            for row in rows:
+                out[int(row["activity_id"])] = dict(row)
+    return out
+
+
+def record_transcript_launch(
+    activity_id: int,
+    deal_id: int,
+    queued_at: str,
+    *,
+    outcome: str = "",
+    note: str = "",
+) -> int:
+    """Отметить постановку звонка в очередь. Возвращает число попыток.
+
+    Счётчик растёт только при постановке. Перевод в outcome попыткой не
+    считается: иначе «две постановки» незаметно превратились бы в одну.
+    """
+    init_db()
+    with db_session() as conn:
+        conn.execute(
+            """
+            INSERT INTO transcript_launches (
+                activity_id, deal_id, attempts, first_queued_at,
+                last_queued_at, outcome, note
+            ) VALUES (?, ?, 1, ?, ?, ?, ?)
+            ON CONFLICT(activity_id) DO UPDATE SET
+                deal_id = excluded.deal_id,
+                attempts = transcript_launches.attempts + 1,
+                last_queued_at = excluded.last_queued_at,
+                outcome = excluded.outcome,
+                note = excluded.note
+            """,
+            (activity_id, deal_id, queued_at, queued_at, outcome, note),
+        )
+        row = conn.execute(
+            "SELECT attempts FROM transcript_launches WHERE activity_id = ?",
+            (activity_id,),
+        ).fetchone()
+        return int(row[0]) if row else 1
+
+
+def close_transcript_launch(activity_id: int, outcome: str, note: str = "") -> None:
+    """Закрыть очередь по звонку: текст появился либо больше не ждём."""
+    init_db()
+    with db_session() as conn:
+        conn.execute(
+            """
+            UPDATE transcript_launches
+               SET outcome = ?, note = ?
+             WHERE activity_id = ?
+            """,
+            (outcome, note, activity_id),
+        )
 
 
 def upsert_call_transcript(
