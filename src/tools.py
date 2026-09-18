@@ -223,13 +223,21 @@ def _is_lead_spam_status(status_id: str) -> bool:
     return status_id == LEAD_STATUS_JUNK or "SPAM" in status_id
 
 
+# Прогрессбар клиента портала. В ручном прогоне он полезен, в cron — вреден:
+# рисуется на КАЖДЫЙ запрос, а полная выгрузка досье это две с половиной
+# тысячи запросов, то есть столько же строк в общий cron.log, где их никто
+# не ищет. Задача, которой он не нужен, гасит его себе одной строкой
+# (см. dossier.main); по умолчанию поведение прежнее.
+BX_VERBOSE = True
+
+
 def _get_bitrix() -> Bitrix:
     """Create Bitrix REST client from current settings.
 
     Returns:
         Configured Bitrix instance.
     """
-    return Bitrix(get_settings().b24_webhook_url)
+    return Bitrix(get_settings().b24_webhook_url, verbose=BX_VERBOSE)
 
 
 def _bx_get_all_sync(method: str, params: dict[str, Any]) -> Any:

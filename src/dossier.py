@@ -1247,6 +1247,25 @@ def _deliver(directory: Path, stem: str, now: datetime) -> bool:
         return False
 
 
+def _quiet_the_portal_client() -> None:
+    """Убрать из лога построчный отчёт клиента портала.
+
+    fast_bitrix24 пишет INFO на каждый запрос и рисует прогрессбар. На
+    ручном прогоне это полезно, в cron — нет: полная выгрузка делает две с
+    половиной тысячи запросов, и столько же пар строк уходит в общий
+    cron.log, где их никто не ищет. Однажды этот файл уже дорос до 14 ГБ
+    при диске в 41 (см. scripts/cron_job.sh), и класть туда мегабайт в день
+    ради «Starting get_all» незачем.
+
+    Гасится только шум. Ошибки портала остаются: уровень WARNING, а не
+    CRITICAL. Итоги прогона модуль пишет сам — одной строкой.
+    """
+    import tools  # noqa: PLC0415 — флаг модуля, а не импорт ради имени
+
+    tools.BX_VERBOSE = False
+    logging.getLogger("fast_bitrix24").setLevel(logging.WARNING)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Выгрузка досье по сделкам")
     parser.add_argument("--mode", choices=("full", "delta"), default="delta",
@@ -1263,6 +1282,7 @@ def main(argv: list[str] | None = None) -> int:
 
     settings = get_settings()
     setup_logging(settings.log_level)
+    _quiet_the_portal_client()
     run(
         args.mode,
         limit=args.limit,

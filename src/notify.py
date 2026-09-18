@@ -30,7 +30,12 @@ def _bx_call_sync(method: str, params: dict[str, Any]) -> Any:
     """
 
     def _run() -> Any:
-        bx = Bitrix(get_settings().b24_webhook_url)
+        # Прогрессбар берётся из tools.BX_VERBOSE, а не заводится свой:
+        # расшифровки идут через этот вызов по одному звонку, и в тихом
+        # прогоне они рисовали бы по строке на каждый.
+        from tools import BX_VERBOSE  # noqa: PLC0415 — циклический импорт
+
+        bx = Bitrix(get_settings().b24_webhook_url, verbose=BX_VERBOSE)
         return bx.call(method, params)
 
     try:
