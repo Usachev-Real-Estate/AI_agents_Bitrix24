@@ -59,7 +59,14 @@ OWNER_CHUNK = 50
 
 
 def list_open_deals(category_ids: list[int], limit: int) -> list[dict[str, Any]]:
-    """Открытые сделки указанных воронок — только то, что нужно для отбора."""
+    """Открытые сделки указанных воронок — только то, что нужно для отбора.
+
+    Без параметра order: get_all() его запрещает и падает на проверке
+    контракта, потому что пагинацией управляет сам. Сортировка нужна только
+    ради --limit («возьми свежие N»), и делается она после выборки — портал
+    отдаёт все страницы в любом случае, так что сортировать на его стороне
+    нечего экономить.
+    """
     deals: list[dict[str, Any]] = []
     for category_id in category_ids:
         raw = _bx_get_all_sync(
@@ -67,12 +74,12 @@ def list_open_deals(category_ids: list[int], limit: int) -> list[dict[str, Any]]
             {
                 "filter": {"CATEGORY_ID": category_id, "CLOSED": "N"},
                 "select": ["ID", "STAGE_ID", "CATEGORY_ID", "ASSIGNED_BY_ID"],
-                "order": {"ID": "DESC"},
             },
         )
         found = [d for d in _as_list(raw) if isinstance(d, dict)]
         print(f"Воронка {category_id}: открытых сделок {len(found)}")
         deals.extend(found)
+    deals.sort(key=lambda d: _coerce_int(d.get("ID")), reverse=True)
     return deals[:limit] if limit > 0 else deals
 
 
