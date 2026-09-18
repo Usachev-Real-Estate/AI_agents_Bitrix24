@@ -381,6 +381,47 @@ class Settings(BaseSettings):
         validation_alias="CLIENT_STATE_TRANSCRIPT_RETRY_HOURS",
     )
 
+    # --- Выгрузка досье по сделкам (src/dossier.py) ---
+    # Куда складывать jsonl, когда Drive не настроен или недоступен. Каталог
+    # внутри data/: это единственный том, который переживает пересборку
+    # образа, и тот же, где лежат базы.
+    dossier_dir: str = Field(
+        default="data/dossier",
+        validation_alias="DOSSIER_DIR",
+    )
+    # Сколько расшифровок дозапрашивать за прогон. Предохранитель, а не
+    # рабочая норма: отсечка по длительности (60 секунд) снимает больше трёх
+    # четвертей запросов ещё до кэша, и в обычный день бюджет не расходуется
+    # целиком. Он нужен на день, когда АТС отдаст разом весь месяц.
+    dossier_transcript_budget: int = Field(
+        default=300,
+        validation_alias="DOSSIER_TRANSCRIPT_BUDGET",
+    )
+    # Сколько звонков за прогон класть в очередь на запуск расшифровки.
+    # Очередь отстреливается руками, и сотня — это объём, который человек
+    # проходит за один присест. Больше положить значит не ускорить, а
+    # спрятать хвост, до которого никто не дойдёт.
+    dossier_launch_budget: int = Field(
+        default=100,
+        validation_alias="DOSSIER_LAUNCH_BUDGET",
+    )
+    # Сколько файлов выгрузки хранить (и локально, и в папке Drive).
+    dossier_keep_files: int = Field(
+        default=30,
+        validation_alias="DOSSIER_KEEP_FILES",
+    )
+    # Ключ сервисного аккаунта Google и папка назначения. Пусто — выгрузка
+    # остаётся в dossier_dir, и прогон об этом сообщает. Отсутствие Drive
+    # роняет доставку, но не сбор: файлы уже собраны и лежат на диске.
+    gdrive_credentials_file: str = Field(
+        default="",
+        validation_alias="GDRIVE_CREDENTIALS_FILE",
+    )
+    gdrive_folder_id: str = Field(
+        default="",
+        validation_alias="GDRIVE_FOLDER_ID",
+    )
+
     # --- Аналитическая витрина (ETL) ---
     analytics_db_path: str = Field(
         default="data/analytics.db",
