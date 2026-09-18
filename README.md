@@ -343,6 +343,7 @@ crontab -l
 | `AFINA_API_TIMEOUT_SECONDS` | Таймаут запроса к Афине (по умолчанию 10) |
 | `AFINA_API_PAGE_SIZE` | Размер страницы выдачи, потолок Афины — 100 |
 | `AFINA_CRM_HOST_ENTRY` | `имя:адрес` для hosts контейнера, если Афина на другом хосте |
+| `SHARED_LEAD_REMINDER_ENABLED` | Напоминания брокерам по «Общим лидам». По умолчанию выключены |
 
 Полный список с пояснениями — в `.env.example`.
 
@@ -363,6 +364,7 @@ crontab -l
 | `make etl` / `etl-full` / `etl-backfill` | загрузка витрины |
 | `make dashboard` | запуск веб-дашборда |
 | `make dashboard-adduser USER_LOGIN=...` | завести пользователя дашборда |
+| `make shared-lead-qualify-reminder` | один цикл напоминаний по «Общим лидам» |
 
 ## Структура проекта
 

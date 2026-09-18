@@ -44,6 +44,7 @@ from tools import (  # noqa: E402
     _build_broker_dept_map,
     _bx_get_all_sync,
     _coerce_int,
+    load_active_user_ids,
 )
 
 # Broader than audit's exact WORK_POSITION match — covers «вторички» / trailing spaces.
@@ -272,20 +273,6 @@ def format_enforce_message(
         "(Сумма) до дедлайна.\n"
     )
     return header + "\n" + format_deals_block(deals, webhook_url)
-
-
-def load_active_user_ids() -> set[int]:
-    """Return IDs of active Bitrix users (skip fired/dismissed)."""
-    try:
-        users = _bx_get_all_sync("user.get", {"FILTER": {"ACTIVE": True}})
-    except Exception:
-        logger.exception("Failed to load active users")
-        return set()
-    return {
-        uid
-        for u in _as_list(users)
-        if isinstance(u, dict) and (uid := _coerce_int(u.get("ID"))) > 0
-    }
 
 
 def collect_due_notifications(

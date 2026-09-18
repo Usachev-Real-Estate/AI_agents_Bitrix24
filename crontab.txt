@@ -156,3 +156,20 @@
 #     расшифровок здесь выше: ночью спешить некуда, а прогретый кэш
 #     удешевляет все ежедневные прогоны следующей недели.
 0 0 * * 1 cd /home/Ai_agents_crm && scripts/cron_job.sh dossier-full docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data -v $(pwd)/deploy/gdrive.json:/app/deploy/gdrive.json:ro b24-ai-auditor:latest python src/dossier.py --mode full --transcript-budget 800 >> logs/cron.log 2>&1
+
+# 24. Напоминание квалифицировать лиды на «Общих лидах»: пн–пт каждый час
+#     09:00–13:00 МСК (06–10 UTC), последний тик за час до дедлайна 14:00.
+#
+#     Выключено, пока SHARED_LEAD_REMINDER_ENABLED=false. Строка стоит здесь
+#     активной намеренно: задача сама выйдет по флагу, и включение сводится к
+#     одной правке .env, а не к возне с crontab на сервере.
+#
+#     Часовой шаг, а не десятиминутный, как в исходном --loop: отметок о
+#     прошлой отправке у задачи пока нет, и шаг в 10 минут — это 30 важных
+#     сообщений одному брокеру за утро. Прежде чем учащать, нужна память об
+#     отправленном, как у buyer-commission (см. is_notify_due).
+#
+#     Окно задаётся не только cron: SHARED_LEAD_REMINDER_START_HOUR и
+#     _DEADLINE_HOUR держат его и для ручного запуска, а выходные задача
+#     пропускает сама.
+0 6-10 * * 1-5 cd /home/Ai_agents_crm && scripts/cron_job.sh shared-lead-qualify docker run --rm --env-file .env -v $(pwd)/logs:/app/logs -v $(pwd)/data:/app/data b24-ai-auditor:latest python src/shared_lead_qualify_reminder.py >> logs/cron.log 2>&1
