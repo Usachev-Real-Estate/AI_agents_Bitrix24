@@ -314,6 +314,21 @@ class Settings(BaseSettings):
         default="Europe/Moscow",
         validation_alias="BUYER_COMMISSION_TIMEZONE",
     )
+    # «Общие лиды»: напоминание квалифицировать до дедлайна. Ничего не мутирует.
+    # Выключено по умолчанию: рассылка, которая начинает ходить людям сразу
+    # после выкатки, — это рассылка, которую никто не согласовывал.
+    shared_lead_reminder_enabled: bool = Field(
+        default=False,
+        validation_alias="SHARED_LEAD_REMINDER_ENABLED",
+    )
+    shared_lead_reminder_start_hour: int = Field(
+        default=9,
+        validation_alias="SHARED_LEAD_REMINDER_START_HOUR",
+    )
+    shared_lead_reminder_deadline_hour: int = Field(
+        default=14,
+        validation_alias="SHARED_LEAD_REMINDER_DEADLINE_HOUR",
+    )
     # Broker CRM rating
     broker_rating_period_days: int = Field(
         default=7,
