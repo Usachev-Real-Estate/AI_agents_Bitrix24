@@ -30,6 +30,8 @@
 сразу, а таблица при этом рисуется как ни в чём не бывало.
 """
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 import web  # noqa: F401  — кладёт src/web и src/analytics на sys.path
 
@@ -40,6 +42,20 @@ from scope import Scope, scoped_session
 SELLERS = 0
 BUYERS = 18
 CONTACT = 5001
+
+
+# «Недавно» — это отсчёт от сегодняшнего дня, а не записанное число.
+#
+# Здесь стояло 2026-09-07. К 21 сентября эта дата пришлась ровно на границу
+# порога silent_days=14, и тест начал падать от хода часов: утром проходил,
+# днём краснел. Проверяется-то не «ровно четырнадцать дней», а «запись
+# свежая» — значит и дата обязана быть относительной, с запасом от границы.
+#
+# Заморозить «сегодня» нельзя: молчание считается в SQL через
+# julianday('now'), и подменить его из Python не за что. Значит двигаться
+# должны данные теста, а не время.
+RECENT = (datetime.now(timezone.utc) - timedelta(days=2)).strftime(
+    "%Y-%m-%dT10:00:00+00:00")
 
 
 def _deal(conn, deal_id, *, contact=None, user=10, stage="UC_FADPBF",
@@ -241,7 +257,7 @@ def test_an_old_conversation_is_silence_not_work(agency):
         _deal(conn, 1, contact=CONTACT)
         _act(conn, 100, 2, 1, created="2026-01-10T10:00:00+00:00")
         _deal(conn, 2, contact=5002)
-        _act(conn, 101, 2, 2, created="2026-09-07T10:00:00+00:00")
+        _act(conn, 101, 2, 2, created=RECENT)
 
     result = _work(silent_days=14)
     assert result["silent"] == 1
