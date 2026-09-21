@@ -291,10 +291,17 @@ def sync_dimensions(client: BitrixClient, conn, settings) -> list[int]:
     """Полный рефреш всех измерений. Дёшево — счёт идёт на десятки запросов."""
     now = utc_now_iso()
     overrides = settings.analytics_stage_semantic_overrides
+    # Коммит после каждого справочника: между ними идут запросы к порталу,
+    # и одна транзакция на все пять держала бы замок все десять секунд их
+    # ожидания — ровно столько, сколько сосед готов ждать.
     category_ids = sync_pipelines(client, conn, now)
+    release(conn)
     sync_stages(client, conn, category_ids, now, overrides)
+    release(conn)
     sync_lead_statuses(client, conn, now, overrides)
+    release(conn)
     sync_sources(client, conn, now)
+    release(conn)
     sync_users(client, conn, now)
     return category_ids
 
@@ -430,6 +437,10 @@ def sync_deals(
         touched.append(row["deal_id"])
         if len(batch) >= HISTORY_BATCH:
             conn.executemany(_DEAL_UPSERT, batch)
+            # Пачка записана, а генератор пойдёт за следующей
+            # страницей: держать на ней замок — значит держать
+            # его всю выгрузку.
+            release(conn)
             batch.clear()
     if batch:
         conn.executemany(_DEAL_UPSERT, batch)
@@ -532,6 +543,10 @@ def sync_activities(
         saved += 1
         if len(batch) >= HISTORY_BATCH:
             conn.executemany(_ACTIVITY_UPSERT, batch)
+            # Пачка записана, а генератор пойдёт за следующей
+            # страницей: держать на ней замок — значит держать
+            # его всю выгрузку.
+            release(conn)
             batch.clear()
     if batch:
         conn.executemany(_ACTIVITY_UPSERT, batch)
@@ -565,6 +580,10 @@ def sync_leads(
         touched.append(row["lead_id"])
         if len(batch) >= HISTORY_BATCH:
             conn.executemany(_LEAD_UPSERT, batch)
+            # Пачка записана, а генератор пойдёт за следующей
+            # страницей: держать на ней замок — значит держать
+            # его всю выгрузку.
+            release(conn)
             batch.clear()
     if batch:
         conn.executemany(_LEAD_UPSERT, batch)
@@ -637,6 +656,8 @@ def sync_stage_history(
             )
             replace_stage_events(conn, entity_type, entity_id, events)
             written += len(events)
+        # Кусок дописан; за ним — выборка и запрос истории следующего.
+        release(conn)
     logger.info("Событий стадий записано (%s): %d", entity_type, written)
     return written
 
@@ -741,8 +762,8 @@ def _journal(sql: str, params: tuple) -> int | None:
         return journal.execute(sql, params).lastrowid
 
 
-def release(conn, stage: str) -> None:
-    """Закрыть транзакцию этапа и отпустить блокировку записи.
+def release(conn, stage: str = "") -> None:
+    """Закрыть транзакцию и отпустить блокировку записи.
 
     Витрину пишет кто-то один: SQLite в WAL второго писателя не пускает, а
     busy_timeout у всех соединений — десять секунд. Пока прогон держал одну
@@ -759,9 +780,25 @@ def release(conn, stage: str) -> None:
     коммитом: следующий прогон возьмёт то же окно заново, а записи идут
     upsert'ом. Обратный порядок — знак раньше данных — терял бы карточки, и
     его здесь нет ни в одном этапе.
+
+    Без имени этапа — то же самое, но посреди него, и это оказалось важнее
+    границ. Замер на боевом сервере 21.09: читатель комментариев ждал
+    освобождения витрины 81 секунду — почти весь прогон инкремента, хотя
+    коммиты между этапами уже стояли. Запись берётся на ПЕРВОЙ строке
+    этапа, а запросы к порталу идут дальше: этап комментариев опрашивает
+    его по карточке за раз, полтораста раз по полсекунды, и всё это время
+    держит замок, ничего не записывая.
+
+    Отсюда правило, которому подчинены все вызовы без имени: транзакция
+    записи не имеет права переживать обращение к порталу. Коммит ставится
+    там, где за ним начинается сетевое ожидание.
+
+    Цена измерена, а не прикинута: полтораста коммитов по строке стоят
+    0,07 секунды против восьмидесяти секунд сети.
     """
     conn.commit()
-    logger.debug("Этап «%s» записан", stage)
+    if stage:
+        logger.debug("Этап «%s» записан", stage)
 
 
 @contextmanager
@@ -1020,6 +1057,11 @@ def sync_comments(
             " synced_at=excluded.synced_at, comments=excluded.comments",
             (deal_id, now, len(batch_rows)),
         )
+        # Отсюда и брались те самые восемьдесят секунд: следующая карточка
+        # — это новый запрос к порталу, и до него замок должен быть отдан.
+        # Отметка «карточку спросили» уезжает тем же коммитом, что и её
+        # комментарии, так что упавший прогон просто переспросит карточку.
+        release(conn)
     logger.info("Комментарии: опрошено %s карточек, сохранено %s", asked, saved)
     return saved
 
