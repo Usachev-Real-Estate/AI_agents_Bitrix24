@@ -43,6 +43,7 @@ import hashlib
 import json
 import logging
 import re
+import sqlite3
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -80,6 +81,21 @@ BATCH = 120
 # значит купить отказы вместо скорости. Точное число подбирается замером,
 # для того прогон и печатает секунды на карточку.
 WORKERS = 4
+
+# Сколько раз повторять запись карточки, если витрина занята.
+#
+# Писать в неё может кто-то один: SQLite в WAL второго писателя не пускает,
+# а busy_timeout у соединения — десять секунд. Этого мало: тик ETL держал
+# запись около полутора минут, и 21.09 первая же карточка в него попала.
+# Прогон умер, но пул успел дочитать оставшиеся четыреста — четыреста
+# оплаченных ответов в никуда.
+#
+# Бюджет ожидания считается так: на каждой попытке десять секунд отдаёт сам
+# SQLite плюс пауза с удвоением. Семь попыток перекрывают тик инкремента с
+# запасом. Если не хватило и их — значит идёт полная сверка, и сдаться тут
+# правильнее, чем висеть полчаса.
+WRITE_ATTEMPTS = 7
+WRITE_PAUSE_CAP_SEC = 30
 
 # Сколько последних записей давать модели. Четырёх хватает: обещание живёт
 # в последней, а предыдущие нужны, только чтобы понять, повторяется ли оно.
@@ -374,6 +390,62 @@ def _ask(llm: Any, spare: Any | None, card: dict[str, Any], today: date) -> Any:
         return spare.invoke(messages)
 
 
+_READ_UPSERT = """
+    INSERT INTO fact_comment_read(entity_type, entity_id, source_hash,
+        promised, promised_at, wait_until, refused, refused_why,
+        ready, terms, read_at, prompt_version)
+    VALUES ('deal', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+        source_hash=excluded.source_hash, promised=excluded.promised,
+        promised_at=excluded.promised_at, wait_until=excluded.wait_until,
+        refused=excluded.refused, refused_why=excluded.refused_why,
+        ready=excluded.ready, terms=excluded.terms,
+        read_at=excluded.read_at, prompt_version=excluded.prompt_version
+"""
+
+
+def _save_card(conn, params: tuple, *, attempts: int = WRITE_ATTEMPTS) -> None:
+    """Записать прочитанную карточку, пережив чужую транзакцию.
+
+    За ответ уже заплачено, и терять его из-за того, что витрину в эту
+    секунду держит сосед, нельзя. Десяти секунд busy_timeout не хватает:
+    тик ETL держит запись около полутора минут.
+
+    Повторяется только «database is locked». Любая другая ошибка — это не
+    занятость, а поломка, и прятать её за паузой значит копить мусор в
+    витрине молча.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            conn.execute(_READ_UPSERT, params)
+            conn.commit()
+            return
+        except sqlite3.OperationalError as error:
+            if "locked" not in str(error).lower() or attempt == attempts:
+                raise
+            # Откат перед паузой. Неудачная вставка оставляет транзакцию
+            # открытой, и если в ней уже был прочитан снимок базы, он
+            # остаётся прежним — тем, что был ДО чужого коммита. Повтор
+            # внутри такой транзакции SQLite отвергает мгновенно, не
+            # дожидаясь ничего (SQLITE_BUSY_SNAPSHOT), а текст ошибки тот
+            # же самый: «database is locked». Повторы выродились бы в семь
+            # мгновенных отказов ровно тогда, когда сосед уже ушёл.
+            #
+            # Сегодня читатель приходит сюда без открытого снимка, и SQLite
+            # снимает блокировку чтения сам — проверено. Строка нужна не
+            # поэтому: снимок появится от любого SELECT, сделанного в
+            # транзакции до записи, и отлаживать это будет нечем — в логе
+            # останутся те же семь строк «витрина занята». Терять нечего,
+            # вставка не применилась.
+            conn.rollback()
+            pause = min(WRITE_PAUSE_CAP_SEC, 2 ** (attempt - 1))
+            logger.warning(
+                "Витрина занята (попытка %s из %s), повтор через %s с",
+                attempt, attempts, pause,
+            )
+            time.sleep(pause)
+
+
 def read_cards(conn, llm, *, limit: int = BATCH, today: date | None = None,
                spare: Any | None = None, workers: int = WORKERS,
                usage: dict[str, int] | None = None) -> int:
@@ -387,7 +459,8 @@ def read_cards(conn, llm, *, limit: int = BATCH, today: date | None = None,
     today = today or datetime.now(timezone.utc).date()
     cards = _targets(conn, limit)
     done = 0
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+    pool = ThreadPoolExecutor(max_workers=max(1, workers))
+    try:
         pending = {pool.submit(_ask, llm, spare, card, today): card
                    for card in cards}
         for future in as_completed(pending):
@@ -409,24 +482,12 @@ def read_cards(conn, llm, *, limit: int = BATCH, today: date | None = None,
             if data is None:
                 logger.warning("Карточка %s: ответ не разобран", card["deal_id"])
                 continue
-            conn.execute(
-                """
-                INSERT INTO fact_comment_read(entity_type, entity_id, source_hash,
-                    promised, promised_at, wait_until, refused, refused_why,
-                    ready, terms, read_at, prompt_version)
-                VALUES ('deal', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(entity_type, entity_id) DO UPDATE SET
-                    source_hash=excluded.source_hash, promised=excluded.promised,
-                    promised_at=excluded.promised_at, wait_until=excluded.wait_until,
-                    refused=excluded.refused, refused_why=excluded.refused_why,
-                    ready=excluded.ready, terms=excluded.terms,
-                    read_at=excluded.read_at, prompt_version=excluded.prompt_version
-                """,
-                (card["deal_id"], card["hash"], _text(data.get("promised")),
-                 _day(data.get("promised_at")), _day(data.get("wait_until")),
-                 1 if data.get("refused") else 0, _text(data.get("refused_why")),
-                 _text(data.get("ready")), _text(data.get("terms")), now,
-                 PROMPT_VERSION),
+            params = (
+                card["deal_id"], card["hash"], _text(data.get("promised")),
+                _day(data.get("promised_at")), _day(data.get("wait_until")),
+                1 if data.get("refused") else 0, _text(data.get("refused_why")),
+                _text(data.get("ready")), _text(data.get("terms")), now,
+                PROMPT_VERSION,
             )
             # Коммит на каждой карточке, а не один на партию. Причин две,
             # и вторая дороже первой.
@@ -441,9 +502,19 @@ def read_cards(conn, llm, *, limit: int = BATCH, today: date | None = None,
             # партию: тысяча оплаченных ответов исчезала, потому что
             # тысяча первый не состоялся. Коммит на месте делает прогон
             # прерываемым без потерь — а он идёт полчаса по чужой сети.
-            conn.commit()
+            _save_card(conn, params)
             done += 1
-    logger.info("Прочитано карточек: %s", done)
+    finally:
+        # Отменяем то, что ещё не ушло в модель, и говорим, сколько успели.
+        #
+        # Выход из `with ThreadPoolExecutor(...)` ждёт ВСЕ отправленные
+        # задачи, даже когда прогон уже падает. 21.09 читатель умер на
+        # первой же карточке в 01:00, а пул ещё десять минут дочитывал
+        # оставшиеся четыреста: ответы приходили в мёртвый процесс, деньги
+        # уходили, в базу не попало ничего. Отменяются только те, что не
+        # начались; четыре уже работающих доедут — это потолок потерь.
+        pool.shutdown(wait=True, cancel_futures=True)
+        logger.info("Прочитано карточек: %s", done)
     return done
 
 
