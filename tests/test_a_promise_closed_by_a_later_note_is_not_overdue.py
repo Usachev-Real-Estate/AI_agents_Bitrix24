@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import itertools
 import sys
 from pathlib import Path
 
@@ -73,12 +74,22 @@ def _card(conn, deal_id, *, refused=0):
         (deal_id, refused, "дорого" if refused else "", READ_AT))
 
 
+# Идентификатор записи — сквозной счётчик, а не хеш её даты.
+#
+# Было `hash(at) % 90`, и это падало примерно раз в девяносто прогонов:
+# хеш строки в Python солится PYTHONHASHSEED, своим у каждого запуска, так
+# что две даты время от времени давали один остаток и вторая запись
+# упиралась в UNIQUE. Выглядело как случайная поломка соседних тестов —
+# самый дорогой вид дефекта: его чинят не там, где он есть.
+_ids = itertools.count(1)
+
+
 def _note(conn, deal_id, at, *, auto=0, body="Дозвонился, договорились"):
     conn.execute(
         "INSERT INTO fact_comment(comment_id, entity_type, entity_id,"
         " author_id, body, is_auto, created_at, synced_at)"
         " VALUES (?, 'deal', ?, ?, ?, ?, ?, 'x')",
-        (deal_id * 100 + abs(hash(at)) % 90, deal_id, BROKER, body, auto, at))
+        (next(_ids), deal_id, BROKER, body, auto, at))
 
 
 @pytest.fixture

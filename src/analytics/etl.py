@@ -741,6 +741,29 @@ def _journal(sql: str, params: tuple) -> int | None:
         return journal.execute(sql, params).lastrowid
 
 
+def release(conn, stage: str) -> None:
+    """Закрыть транзакцию этапа и отпустить блокировку записи.
+
+    Витрину пишет кто-то один: SQLite в WAL второго писателя не пускает, а
+    busy_timeout у всех соединений — десять секунд. Пока прогон держал одну
+    транзакцию от первой записи до последней, любой сосед, попавший в это
+    окно, умирал: тик инкремента занимает около полутора минут, полная
+    сверка — полчаса. 21.09 на этом потерял партию читатель комментариев:
+    упёрся в тик первой же карточкой, а пул успел дочитать и выбросить
+    ещё четыреста оплаченных ответов.
+
+    Коммит между этапами делает окно блокировки коротким. Цена названа
+    честно: прогон перестаёт быть одной транзакцией и, упав на середине,
+    оставит обновлённым то, что успел. Это безопасно ровно потому, что
+    водяной знак сущности ставится ПОСЛЕ её данных и уезжает тем же
+    коммитом: следующий прогон возьмёт то же окно заново, а записи идут
+    upsert'ом. Обратный порядок — знак раньше данных — терял бы карточки, и
+    его здесь нет ни в одном этапе.
+    """
+    conn.commit()
+    logger.debug("Этап «%s» записан", stage)
+
+
 @contextmanager
 def etl_run(conn, kind: str, entity: str = "") -> Iterator[dict[str, int]]:
     """Журналировать прогон: страница «Качество данных» показывает лаг и ошибки.
@@ -750,6 +773,11 @@ def etl_run(conn, kind: str, entity: str = "") -> Iterator[dict[str, int]]:
     писателя. Поэтому перед записью итога транзакция прогона закрывается явно —
     коммитом при успехе, откатом при ошибке. Внешний менеджер соединения
     повторит то же действие вхолостую.
+
+    Откат здесь отменяет только незавершённый этап: между этапами прогон
+    коммитит сам (см. release), иначе он держал бы блокировку записи от
+    начала до конца и убивал соседей. Прогон, упавший на середине, оставляет
+    витрину частично обновлённой — и это осознанный размен, описанный там же.
     """
     run_id = _journal(
         "INSERT INTO etl_run(kind, entity, started_at, status) VALUES (?, ?, ?, 'running')",
@@ -801,6 +829,7 @@ def run_sync(kind: str, *, since_override: str | None = None) -> dict[str, Any]:
                 sync_users(client, conn, utc_now_iso())
             else:
                 sync_dimensions(client, conn, settings)
+            release(conn, "справочники")
 
             overlap = settings.analytics_etl_overlap_minutes
             deal_since = get_watermark(conn, ENTITY_DEAL, overlap) if incremental else None
@@ -811,10 +840,12 @@ def run_sync(kind: str, *, since_override: str | None = None) -> dict[str, Any]:
             )
             lead_ids = sync_leads(client, conn, since=since, modified_since=lead_since)
             link_leads_to_deals(conn)
+            release(conn, "сделки и лиды")
 
             sync_stage_history(client, conn, ENTITY_DEAL, deal_ids)
             if lead_ids and _lead_history_supported(conn, client):
                 sync_stage_history(client, conn, ENTITY_LEAD, lead_ids)
+            release(conn, "история стадий")
 
             # Действия — свой водяной знак: у них нет DATE_MODIFY, догрузка
             # идёт по дате создания, и делить его со сделками нельзя.
@@ -824,7 +855,10 @@ def run_sync(kind: str, *, since_override: str | None = None) -> dict[str, Any]:
             summary["activities"] = sync_activities(
                 client, conn, since=since, modified_since=act_since,
             )
+            # Знак уезжает тем же коммитом, что и дела: порознь они разошлись
+            # бы при падении между ними.
             set_watermark(conn, ENTITY_ACTIVITY, full_sync=not incremental)
+            release(conn, "дела")
 
             # Комментарии обходятся по карточкам, а не по дате: у метода
             # обязателен фильтр по сущности. Полный прогон берёт все сделки,
@@ -833,13 +867,16 @@ def run_sync(kind: str, *, since_override: str | None = None) -> dict[str, Any]:
             summary["comments"] = sync_comments(
                 client, conn, batch=COMMENT_BATCH if incremental else None,
             )
+            release(conn, "комментарии")
 
             if kind == "full":
                 summary["deleted_deals"] = reconcile_deleted(client, conn, ENTITY_DEAL, since)
                 summary["deleted_leads"] = reconcile_deleted(client, conn, ENTITY_LEAD, since)
+                release(conn, "удалённые карточки")
 
             set_watermark(conn, ENTITY_DEAL, full_sync=not incremental)
             set_watermark(conn, ENTITY_LEAD, full_sync=not incremental)
+            release(conn, "водяные знаки")
 
             counters["rows"] = (
                 len(deal_ids) + len(lead_ids) + summary["activities"]

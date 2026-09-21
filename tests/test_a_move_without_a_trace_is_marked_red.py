@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import itertools
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -90,13 +91,24 @@ def _deal(conn, deal_id, *, user=BROKER, amount=500000, contact=None):
         (deal_id, ENTERED, LEFT))
 
 
+# Идентификатор записи — сквозной счётчик, а не хеш её даты.
+#
+# Было `hash(at) % 900`, и это падало примерно раз в девятьсот прогонов:
+# хеш строки в Python солится PYTHONHASHSEED, своим у каждого запуска, так
+# что две даты время от времени давали один остаток и вторая запись
+# упиралась в UNIQUE. Выглядело как случайная поломка соседних тестов —
+# самый дорогой вид дефекта: его чинят не там, где он есть. (В соседнем
+# файле тот же приём стрелял раз в девяносто — там его и поймали.)
+_ids = itertools.count(1)
+
+
 def _note(conn, deal_id, at, body="Созвонились, ждёт подборку", author=BROKER,
           auto=0):
     conn.execute(
         "INSERT INTO fact_comment(comment_id, entity_type, entity_id,"
         " author_id, body, is_auto, created_at, synced_at)"
         " VALUES (?, 'deal', ?, ?, ?, ?, ?, 'x')",
-        (deal_id * 1000 + hash(at) % 900, deal_id, author, body, auto, at))
+        (next(_ids), deal_id, author, body, auto, at))
 
 
 def _task(conn, deal_id, at, *, owner_type=2, owner=None, due=None, done=0,
