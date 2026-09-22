@@ -485,6 +485,15 @@ class Settings(BaseSettings):
         validation_alias="ANALYTICS_STAGE_SEMANTIC_OVERRIDES_JSON",
     )
 
+    # --- Клиентский слой ---
+    # Своя база, а не таблицы в витрине: у витрины один писатель, и
+    # сентябрьские «database is locked» стоили ночного бюджета ровно
+    # потому, что к нему подсаживались соседи.
+    clients_db_path: str = Field(
+        default="data/clients.db",
+        validation_alias="CLIENTS_DB_PATH",
+    )
+
     # --- Веб-дашборд ---
     dashboard_secret_key: str = Field(
         default="",
