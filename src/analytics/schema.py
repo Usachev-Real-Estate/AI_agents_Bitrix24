@@ -31,7 +31,7 @@ BUSY_TIMEOUT_MS = 10_000
 #    колонки в ней нет. Пока init_analytics_db() гнал DDL безусловно, это
 #    сходило с рук; с проверкой версии такая база осталась бы без миграции
 #    навсегда. Поднимаем версию задним числом: это и есть починка.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # Семантика стадии. Без неё нельзя посчитать ни конверсию, ни win rate:
 # «выиграно» и «проиграно» надо отличать от «в работе», а по одному только
@@ -168,10 +168,19 @@ _DDL: tuple[str, ...] = (
         -- «о чём договорились»: «Перезвонить» без описания не отличить от
         -- «Перезвонить, клиент просил после 18:00 и с другого номера».
         description        TEXT NOT NULL DEFAULT '',
+        -- Кто дело СОЗДАЛ. Это не ответственный: звонок за брокера
+        -- часто заводит колл-центр или РОП, и «по карточке три дела» и
+        -- «по карточке три дела, и ни одного не завёл брокер» — разные
+        -- отчёты. Портал отдаёт оба поля одним ответом.
+        author_id          INTEGER,
         responsible_id     INTEGER,
         created_at         TEXT NOT NULL,
         start_time         TEXT,
         end_time           TEXT,
+        -- Срок дела: «что брокер обещал сделать дальше». Без него на вопрос
+        -- «назначен ли следующий шаг» ответить нечем, а на этом вопросе
+        -- держатся и состояние клиента, и счётчик просроченных обещаний.
+        deadline           TEXT,
         completed          INTEGER NOT NULL DEFAULT 0,
         synced_at          TEXT NOT NULL
     );
@@ -441,6 +450,27 @@ def _migrate_activity_description(conn: sqlite3.Connection) -> None:
         pass
 
 
+def _migrate_activity_deadline_and_author(conn: sqlite3.Connection) -> None:
+    """Добавить срок и автора дела витринам, созданным до их появления.
+
+    Колонки появляются пустыми и сами не наполняются: обычный прогон тянет
+    действия фильтром по дате создания и допишет поля только новым. Старым
+    их вернёт ближайший `--full` — он идёт по всему окну витрины без
+    водяного знака и переписывает каждую строку. В cron такой прогон стоит
+    на 02:35, то есть ждать одну ночь.
+
+    До этой ночи `deadline` пуст у всего портфеля, и правило «назначен ли
+    следующий шаг» будет отвечать «нет» на всё. Поэтому читающий код обязан
+    отличать «срока нет» от «мы его ещё не забрали»: первое — это NULL при
+    свежем synced_at, второе — NULL при synced_at старше полной сверки.
+    """
+    for column in ("deadline TEXT", "author_id INTEGER"):
+        try:
+            conn.execute(f"ALTER TABLE fact_activity ADD COLUMN {column}")
+        except sqlite3.OperationalError:
+            pass
+
+
 def _migrate_dim_user_last_name(conn: sqlite3.Connection) -> None:
     """Добавить last_name витринам, созданным до появления колонки.
 
@@ -490,6 +520,7 @@ def init_analytics_db(db_path: str | Path | None = None) -> None:
         _migrate_dim_user_last_name(conn)
         _migrate_comment_read_prompt(conn)
         _migrate_activity_description(conn)
+        _migrate_activity_deadline_and_author(conn)
         conn.execute(
             "INSERT INTO analytics_meta(key, value) VALUES('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
