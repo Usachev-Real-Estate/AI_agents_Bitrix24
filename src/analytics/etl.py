@@ -455,21 +455,50 @@ def sync_deals(
     return touched
 
 
+# DEADLINE и AUTHOR_ID приходят тем же ответом, что и всё остальное:
+# лишних запросов к порталу два новых поля не стоят ни одного.
 ACTIVITY_SELECT = [
     "ID", "OWNER_TYPE_ID", "OWNER_ID", "PROVIDER_TYPE_ID", "DIRECTION",
-    "SUBJECT", "DESCRIPTION", "RESPONSIBLE_ID", "CREATED", "START_TIME",
-    "END_TIME", "COMPLETED",
+    "SUBJECT", "DESCRIPTION", "AUTHOR_ID", "RESPONSIBLE_ID", "CREATED",
+    "START_TIME", "END_TIME", "DEADLINE", "COMPLETED",
 ]
+
+
+# Отсечка «срока нет».
+#
+# Портал не оставляет DEADLINE пустым: делу без срока он проставляет дату из
+# далёкого будущего. Сравнивать с конкретным значением нельзя — оно зависит
+# от версии портала и часового пояса.
+#
+# Сравнивается МОМЕНТ, а не строка года. Первая редакция резала по первым
+# четырём символам, и это ловилось собственным тестом: 2100-01-01 по Москве
+# — это 2099-12-31 в UTC, то есть «далёкое будущее» проходило отсечку как
+# настоящий срок. Сдвиг часового пояса ломает любое сравнение по году;
+# сравнение моментов от него не зависит вовсе.
+NO_DEADLINE_AFTER = datetime(2090, 1, 1, tzinfo=timezone.utc)
+
+
+def _deadline(raw: Any) -> str | None:
+    """Срок дела или None, если портал сказал «срока нет»."""
+    value = to_utc_iso(raw)
+    if not value:
+        return None
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return None if moment >= NO_DEADLINE_AFTER else value
+
 
 _ACTIVITY_UPSERT = """
 INSERT INTO fact_activity(
     activity_id, owner_type_id, owner_id, provider_type_id, direction,
-    subject, description, responsible_id, created_at, start_time, end_time,
-    completed, synced_at
+    subject, description, author_id, responsible_id, created_at, start_time,
+    end_time, deadline, completed, synced_at
 ) VALUES (
     :activity_id, :owner_type_id, :owner_id, :provider_type_id, :direction,
-    :subject, :description, :responsible_id, :created_at, :start_time,
-    :end_time, :completed, :synced_at
+    :subject, :description, :author_id, :responsible_id, :created_at,
+    :start_time, :end_time, :deadline, :completed, :synced_at
 )
 ON CONFLICT(activity_id) DO UPDATE SET
     owner_type_id = excluded.owner_type_id,
@@ -478,10 +507,12 @@ ON CONFLICT(activity_id) DO UPDATE SET
     direction = excluded.direction,
     subject = excluded.subject,
     description = excluded.description,
+    author_id = excluded.author_id,
     responsible_id = excluded.responsible_id,
     created_at = excluded.created_at,
     start_time = excluded.start_time,
     end_time = excluded.end_time,
+    deadline = excluded.deadline,
     completed = excluded.completed,
     synced_at = excluded.synced_at
 """
@@ -501,10 +532,14 @@ def _activity_row(raw: dict[str, Any], now: str) -> dict[str, Any]:
         # Через ту же чистку, что и комментарий: портал отдаёт описание с
         # BB-кодами и переносами, а в таблицу оно идёт одной строкой.
         "description": _comment_text(raw.get("DESCRIPTION")),
+        # Автор и ответственный — разные люди чаще, чем кажется: звонок за
+        # брокера заводит колл-центр, дело «перезвонить» ставит РОП.
+        "author_id": _int(raw.get("AUTHOR_ID")) or None,
         "responsible_id": _int(raw.get("RESPONSIBLE_ID")) or None,
         "created_at": to_utc_iso(raw.get("CREATED")),
         "start_time": to_utc_iso(raw.get("START_TIME")),
         "end_time": to_utc_iso(raw.get("END_TIME")),
+        "deadline": _deadline(raw.get("DEADLINE")),
         "completed": 1 if _str(raw.get("COMPLETED")).upper() == "Y" else 0,
         "synced_at": now,
     }
