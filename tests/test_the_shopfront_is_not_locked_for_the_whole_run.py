@@ -11,9 +11,29 @@
 одной транзакцией и, упав на середине, оставляет обновлённым то, что успел.
 Безопасно это ровно потому, что водяной знак сущности ставится ПОСЛЕ её
 данных: упавший прогон не сдвинет границу окна, и следующий возьмёт то же
-окно заново, а записи идут upsert'ом. Здесь проверяются обе стороны размена —
-и что замок отпускается, и что порядок «данные, потом знак» соблюдён. Второе
-важнее: нарушив его, прогон терял бы карточки молча.
+окно заново, а записи идут upsert'ом.
+
+Проверяется КАЖДАЯ граница этапа, а не одна.
+
+Первая редакция этого файла ставила наблюдателя в одну точку — на входе в
+этап комментариев — и на том успокаивалась. Разбор показал, чего она стоила:
+из шести вызовов release() можно было удалить любые пять, и все пять тестов
+оставались зелёными. Наблюдатель видел только последний коммит перед собой,
+а тот вбирал в себя все предыдущие, так что отличить шесть коммитов от
+одного файл не мог в принципе. Удаление release() между сделками и историей
+стадий — то есть слияние двух самых долгих этапов загрузки в одну
+транзакцию — прошло бы мимо тестов молча и вернуло бы ровно ту беду, ради
+которой всё и писалось.
+
+Теперь наблюдатель приходит на вход КАЖДОГО этапа и спрашивает две вещи
+сразу: свободна ли запись и видно ли уже то, что записал предыдущий этап.
+Второй вопрос важнее первого: отпустить замок, не закоммитив, — это не
+починка, а её видимость.
+
+Без наблюдателя остаётся один вызов, последний: после release() «водяные
+знаки» прогон больше ничего не пишет, и наблюдать там нечего — этот коммит
+всё равно сделает выход из etl_run. Он стоит в коде не ради окна, а ради
+того, кто завтра допишет туда восьмой этап.
 """
 
 import sqlite3
@@ -25,6 +45,21 @@ from schema import analytics_session
 from stages import ENTITY_ACTIVITY, ENTITY_DEAL, ENTITY_LEAD
 
 DEAL = 101
+
+# Этап -> счётчик, доказывающий, что этап закоммичен. Имя этапа здесь то же,
+# что и в release(): тест называет границу теми же словами, что и код.
+MARKS = {
+    "справочники": "SELECT COUNT(*) FROM dim_pipeline",
+    "сделки и лиды": "SELECT COUNT(*) FROM fact_deal",
+    "история стадий": "SELECT COUNT(*) FROM fact_stage_event",
+    "дела": "SELECT COUNT(*) FROM fact_activity",
+    "комментарии": "SELECT COUNT(*) FROM fact_comment",
+    "удалённые карточки": "SELECT COUNT(*) FROM fact_deal WHERE is_deleted = 1",
+}
+
+# Границы, у которых есть наблюдаемое окно в обычном прогоне. «Удалённые
+# карточки» сюда не входят: этот этап бывает только у полной сверки.
+WATCHED = ("справочники", "сделки и лиды", "история стадий", "дела", "комментарии")
 
 
 class _NoPortal:
@@ -39,29 +74,222 @@ class _NoPortal:
         return None
 
 
-def _one_deal(_client, conn, _settings, *, since, modified_since=None):
-    """Заменяет sync_deals: одна строка в витрину — та, что ищет сосед."""
-    conn.execute(
-        """
-        INSERT INTO fact_deal(deal_id, title, category_id, stage_id, assigned_by_id,
-            source_id, opportunity, currency_id, date_create, date_modify, closedate,
-            is_closed, is_won, is_lost, contact_id, is_deleted, synced_at)
-        VALUES (?, 'ВГ 747', 18, 'C18:NEW', 32, 'CALL', 0, 'RUB',
-                '2026-08-01T10:00:00+00:00', '2026-08-01T10:00:00+00:00',
-                NULL, 0, 0, 0, 5000, 0, 'x')
-        """,
-        (DEAL,),
-    )
-    return [DEAL]
+def _watch(db_path, seen, stage):
+    """Что видит и может сосед на входе в очередной этап.
+
+    Сосед — это читатель комментариев: отдельное соединение, короткое
+    терпение, единственное желание записать одну строку. Спрашиваем у него
+    и про замок, и про видимость: в WAL читатель видит только закоммиченное,
+    так что нулевой счётчик означал бы «замок отпущен, а данных ещё нет».
+    """
+    other = sqlite3.connect(db_path, timeout=0.05)
+    other.execute("PRAGMA journal_mode=WAL")
+    record = {"visible": {}}
+    try:
+        for name, query in MARKS.items():
+            record["visible"][name] = other.execute(query).fetchone()[0]
+        other.execute("BEGIN IMMEDIATE")
+        other.execute(
+            "INSERT INTO dim_source(source_id, name, synced_at) VALUES (?, ?, 'x')",
+            (f"N{len(seen)}", "сосед"),
+        )
+        other.commit()
+        record["wrote"] = True
+    except sqlite3.OperationalError as error:
+        record["wrote"] = False
+        record["error"] = str(error)
+    finally:
+        other.close()
+    seen[stage] = record
+
+
+def _run_watched(db_path, monkeypatch, kind):
+    """Прогон из заглушек, где каждый этап пишет метку, а следующий смотрит.
+
+    Заглушки, а не настоящий клиент портала: проверяется не то, что
+    загружается, а то, когда отпускается замок. Каждая заглушка сперва
+    зовёт наблюдателя — то есть спрашивает про ПРЕДЫДУЩИЙ этап, — и только
+    потом пишет свою метку.
+    """
+    seen: dict = {}
+
+    def probe(stage):
+        _watch(db_path, seen, stage)
+
+    def _dimensions(_client, conn, _settings):
+        conn.execute(
+            "INSERT INTO dim_pipeline(category_id, name, is_active, sort, synced_at)"
+            " VALUES (18, 'Покупатели', 1, 10, 'x')"
+        )
+        return [18]
+
+    def _deals(_client, conn, _settings, *, since, modified_since=None):
+        probe("справочники")
+        conn.execute(
+            """
+            INSERT INTO fact_deal(deal_id, title, category_id, stage_id,
+                assigned_by_id, source_id, opportunity, currency_id, date_create,
+                date_modify, closedate, is_closed, is_won, is_lost, contact_id,
+                is_deleted, synced_at)
+            VALUES (?, 'ВГ 747', 18, 'C18:NEW', 32, 'CALL', 0, 'RUB',
+                    '2026-08-01T10:00:00+00:00', '2026-08-01T10:00:00+00:00',
+                    NULL, 0, 0, 0, 5000, 0, 'x')
+            """,
+            (DEAL,),
+        )
+        return [DEAL]
+
+    def _leads(_client, _conn, *, since, modified_since=None):
+        return []
+
+    def _history(_client, conn, _entity, _ids):
+        probe("сделки и лиды")
+        conn.execute(
+            "INSERT INTO fact_stage_event(entity_type, entity_id, category_id,"
+            " stage_id, entered_at, left_at, duration_sec, seq)"
+            " VALUES ('deal', ?, 18, 'C18:NEW', '2026-08-01T10:00:00+00:00',"
+            " NULL, NULL, 1)",
+            (DEAL,),
+        )
+
+    def _activities(_client, conn, *, since, modified_since=None):
+        probe("история стадий")
+        conn.execute(
+            "INSERT INTO fact_activity(activity_id, owner_type_id, owner_id,"
+            " provider_type_id, subject, description, responsible_id, created_at,"
+            " completed, synced_at) VALUES (1, 2, ?, 'CALL', 'Звонок', '', 32,"
+            " '2026-08-01T10:00:00+00:00', 1, 'x')",
+            (DEAL,),
+        )
+        return 1
+
+    def _comments(_client, conn, *, batch=None):
+        probe("дела")
+        conn.execute(
+            "INSERT INTO fact_comment(comment_id, entity_type, entity_id,"
+            " author_id, body, is_auto, created_at, synced_at)"
+            " VALUES (1, 'deal', ?, 32, 'Показ был', 0,"
+            " '2026-08-01T10:00:00+00:00', 'x')",
+            (DEAL,),
+        )
+        return 1
+
+    def _reconcile(_client, conn, entity, _since):
+        if entity == ENTITY_DEAL:
+            probe("комментарии")
+            conn.execute("UPDATE fact_deal SET is_deleted = 1 WHERE deal_id = ?",
+                         (DEAL,))
+        return 1
+
+    real_watermark = etl.set_watermark
+
+    def _watermark(conn, entity, *, full_sync=False):
+        # Последняя наблюдаемая граница. В обычном прогоне перед знаками идут
+        # комментарии, в полной сверке — удалённые карточки.
+        if entity == ENTITY_DEAL:
+            probe("удалённые карточки" if kind == "full" else "комментарии")
+        real_watermark(conn, entity, full_sync=full_sync)
+
+    monkeypatch.setattr(etl, "BitrixClient", lambda *a, **kw: _NoPortal())
+    monkeypatch.setattr(etl, "sync_dimensions", _dimensions)
+    monkeypatch.setattr(etl, "sync_users", lambda *a, **kw: None)
+    monkeypatch.setattr(etl, "sync_deals", _deals)
+    monkeypatch.setattr(etl, "sync_leads", _leads)
+    monkeypatch.setattr(etl, "sync_stage_history", _history)
+    monkeypatch.setattr(etl, "sync_activities", _activities)
+    monkeypatch.setattr(etl, "sync_comments", _comments)
+    monkeypatch.setattr(etl, "reconcile_deleted", _reconcile)
+    monkeypatch.setattr(etl, "set_watermark", _watermark)
+
+    etl.run_sync(kind, since_override="2026-01-01")
+    return seen
 
 
 @pytest.fixture
-def staged(monkeypatch):
-    """Прогон из одних заглушек: остаются только этапы и коммиты между ними.
+def backfill(analytics_db, monkeypatch):
+    return _run_watched(analytics_db, monkeypatch, "backfill")
 
-    Настоящий FakeClient здесь не нужен и мешал бы: проверяется не то, что
-    загружается, а то, когда отпускается замок.
+
+@pytest.fixture
+def full(analytics_db, monkeypatch):
+    return _run_watched(analytics_db, monkeypatch, "full")
+
+
+# ── Каждая граница этапа: замок свободен и записанное видно ────────────
+@pytest.mark.parametrize("stage", WATCHED)
+def test_the_write_lock_is_free_at_every_stage_boundary(backfill, stage):
+    """Сосед приходит с терпением в 50 миллисекунд на вход каждого этапа.
+
+    Одна точка наблюдения не годилась: последний коммит перед ней вбирал
+    все предыдущие, и удаление любого из них проходило незамеченным.
     """
+    record = backfill[stage]
+
+    assert record["wrote"], (
+        f"витрина занята после этапа «{stage}»: {record.get('error')}"
+    )
+
+
+@pytest.mark.parametrize("stage", WATCHED)
+def test_every_stage_is_committed_before_the_next_one_starts(backfill, stage):
+    """Отпустить замок мало — записанное должно быть видно, то есть закоммичено.
+
+    Читают витрину отдельным соединением: веб и все прочие. В WAL читатель
+    видит только закоммиченное, так что ноль здесь означал бы «замок
+    отпущен, а данных ещё нет» — то есть коммита не было.
+    """
+    assert backfill[stage]["visible"][stage] == 1, (
+        f"этап «{stage}» не закоммичен к началу следующего"
+    )
+
+
+def test_the_full_sync_commits_its_deletions_too(full):
+    """У полной сверки есть свой этап, которого нет у остальных.
+
+    Пометка удалённых — единственное, что делает только она, и держать её
+    в общей транзакции значило бы вернуть получасовое окно занятости
+    именно тому прогону, у которого оно и было самым длинным.
+    """
+    record = full["удалённые карточки"]
+
+    assert record["wrote"], f"витрина занята: {record.get('error')}"
+    assert record["visible"]["удалённые карточки"] == 1
+
+
+def test_a_stage_does_not_leak_the_next_ones_data(backfill):
+    """Обратная проверка: наблюдатель смотрит туда, куда думает.
+
+    Если бы он приходил позже, чем заявлено, счётчики следующих этапов были
+    бы уже ненулевыми — и оба теста выше зеленели бы, ничего не проверяя.
+    """
+    assert backfill["справочники"]["visible"]["сделки и лиды"] == 0
+    assert backfill["сделки и лиды"]["visible"]["история стадий"] == 0
+    assert backfill["история стадий"]["visible"]["дела"] == 0
+    assert backfill["дела"]["visible"]["комментарии"] == 0
+
+
+# ── Цена размена: прогон больше не одна транзакция ─────────────────────
+@pytest.fixture
+def died_halfway(analytics_db, monkeypatch):
+    """Прогон, упавший на этапе комментариев."""
+    def _boom(*_a, **_kw):
+        raise RuntimeError("портал ответил пятисоткой")
+
+    def _one_deal(_client, conn, _settings, *, since, modified_since=None):
+        conn.execute(
+            """
+            INSERT INTO fact_deal(deal_id, title, category_id, stage_id,
+                assigned_by_id, source_id, opportunity, currency_id, date_create,
+                date_modify, closedate, is_closed, is_won, is_lost, contact_id,
+                is_deleted, synced_at)
+            VALUES (?, 'ВГ 747', 18, 'C18:NEW', 32, 'CALL', 0, 'RUB',
+                    '2026-08-01T10:00:00+00:00', '2026-08-01T10:00:00+00:00',
+                    NULL, 0, 0, 0, 5000, 0, 'x')
+            """,
+            (DEAL,),
+        )
+        return [DEAL]
+
     monkeypatch.setattr(etl, "BitrixClient", lambda *a, **kw: _NoPortal())
     monkeypatch.setattr(etl, "sync_dimensions", lambda *a, **kw: [])
     monkeypatch.setattr(etl, "sync_users", lambda *a, **kw: None)
@@ -69,79 +297,8 @@ def staged(monkeypatch):
     monkeypatch.setattr(etl, "sync_leads", lambda *a, **kw: [])
     monkeypatch.setattr(etl, "sync_stage_history", lambda *a, **kw: None)
     monkeypatch.setattr(etl, "sync_activities", lambda *a, **kw: 0)
-    return monkeypatch
+    monkeypatch.setattr(etl, "sync_comments", _boom)
 
-
-def _neighbour(db_path):
-    """Второе соединение с коротким терпением — как читатель комментариев."""
-    other = sqlite3.connect(db_path, timeout=0.05)
-    other.execute("PRAGMA journal_mode=WAL")
-    return other
-
-
-# ── Замок отпускается посреди прогона ──────────────────────────────────
-@pytest.fixture
-def midway(analytics_db, staged):
-    """Что видит и может сосед, пришедший к середине прогона.
-
-    Точка входа — этап комментариев: до него прогон успел записать
-    справочники, сделки, историю стадий и дела, то есть четыре коммита.
-    """
-    seen: dict = {}
-
-    def _probe(_client, _conn, **_kwargs):
-        other = _neighbour(analytics_db)
-        try:
-            seen["deals_visible"] = other.execute(
-                "SELECT COUNT(*) FROM fact_deal"
-            ).fetchone()[0]
-            other.execute("BEGIN IMMEDIATE")
-            other.execute(
-                "INSERT INTO dim_source(source_id, name, synced_at)"
-                " VALUES ('NEIGHBOUR', 'сосед', 'x')"
-            )
-            other.commit()
-            seen["wrote"] = True
-        except sqlite3.OperationalError as error:
-            seen["error"] = str(error)
-        finally:
-            other.close()
-        return 0
-
-    staged.setattr(etl, "sync_comments", _probe)
-    etl.run_sync("backfill", since_override="2026-01-01")
-    return seen
-
-
-def test_a_neighbour_can_write_midway_through_the_run(midway):
-    """Главная проверка: прогон не держит запись всё своё время.
-
-    Сосед приходит с терпением в 50 миллисекунд — прогон обязан уже отпустить
-    замок, а не дожидаться конца.
-    """
-    assert midway.get("wrote"), (
-        f"витрина занята посреди прогона: {midway.get('error')}"
-    )
-
-
-def test_what_the_run_has_written_is_already_visible(midway):
-    """Отпустить замок мало: записанное должно быть видно, то есть закоммичено.
-
-    Читают витрину отдельным соединением — веб и все прочие. В WAL читатель
-    видит только закоммиченное, так что нулевой счётчик здесь означал бы
-    «замок отпущен, а данных ещё нет».
-    """
-    assert midway.get("deals_visible") == 1
-
-
-# ── Цена размена: прогон больше не одна транзакция ─────────────────────
-@pytest.fixture
-def died_halfway(analytics_db, staged):
-    """Прогон, упавший на этапе комментариев."""
-    def _boom(*_a, **_kw):
-        raise RuntimeError("портал ответил пятисоткой")
-
-    staged.setattr(etl, "sync_comments", _boom)
     with pytest.raises(RuntimeError):
         etl.run_sync("backfill", since_override="2026-01-01")
     return analytics_db

@@ -4,6 +4,8 @@
 тому, кто соберётся вернуть старое поведение, и он должен сразу увидеть цену.
 """
 
+from datetime import date
+
 import pytest
 import web  # noqa: F401  — кладёт src/web и src/analytics на sys.path
 
@@ -318,8 +320,17 @@ def test_a_card_with_two_open_intervals_is_listed_once(mart):
         stuck = metrics.stuck_deals(conn, 18)
 
     assert [row["deal_id"] for row in stuck] == [31], "одна карточка — одна строка"
-    # 1 февраля, а не 5 января: дни считаются от входа именно в «Подбор»
-    assert stuck[0]["days_in_stage"] < 240
+    # 1 февраля, а не 5 января: дни считаются от входа именно в «Подбор».
+    #
+    # Сравнивается с обеими датами, а не с порогом 240. Порог стоял ровно
+    # между ними — и старел вместе с календарём: к середине октября верный
+    # ответ перерос его, и тест покраснел бы сам, без единой правки кода.
+    # Число, разделяющее два случая сегодня, завтра не разделяет ничего.
+    from_the_right_stage = (date.today() - date(2026, 2, 1)).days
+    from_the_wrong_one = (date.today() - date(2026, 1, 5)).days
+
+    assert abs(stuck[0]["days_in_stage"] - from_the_right_stage) <= 1
+    assert stuck[0]["days_in_stage"] < from_the_wrong_one
 
 
 # --------------------------------------------------------------------------

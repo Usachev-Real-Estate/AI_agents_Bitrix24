@@ -17,6 +17,8 @@
 того, кто не сделал ничего.
 """
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 import web  # noqa: F401  — кладёт src/web и src/analytics на sys.path
 
@@ -26,6 +28,20 @@ from scope import Scope, scoped_session
 
 SELLERS = 0
 CONTACT = 5001
+
+
+# «Недавно» — это отсчёт от сегодняшнего дня, а не записанное число.
+#
+# Здесь стояло 2026-09-07. К 21 сентября эта дата пришлась ровно на границу
+# порога silent_days=14, и тест начал падать от хода часов: утром проходил,
+# днём краснел. Проверяется-то не «ровно четырнадцать дней», а «запись
+# свежая» — значит и дата обязана быть относительной, с запасом от границы.
+#
+# Заморозить «сегодня» нельзя: молчание считается в SQL через
+# julianday('now'), и подменить его из Python не за что. Значит двигаться
+# должны данные теста, а не время.
+RECENT = (datetime.now(timezone.utc) - timedelta(days=2)).strftime(
+    "%Y-%m-%dT10:00:00+00:00")
 
 
 def _deal(conn, deal_id, *, user=10, contact=CONTACT):
@@ -43,12 +59,12 @@ def _deal(conn, deal_id, *, user=10, contact=CONTACT):
 
 
 def _note(conn, comment_id, deal_id, body, *, auto=0,
-          created="2026-09-07T10:00:00+00:00", author=10):
+          created=None, author=10):
     conn.execute(
         "INSERT INTO fact_comment(comment_id, entity_type, entity_id, author_id,"
         " body, is_auto, created_at, synced_at)"
         " VALUES (?, 'deal', ?, ?, ?, ?, ?, 'x')",
-        (comment_id, deal_id, author, body, auto, created),
+        (comment_id, deal_id, author, body, auto, created or RECENT),
     )
 
 
@@ -117,7 +133,7 @@ def test_a_fresh_note_keeps_the_card_from_going_silent(agency):
             """
         )
         _note(conn, 100, 1, "жду фотографии от Станислава и выложим на циан",
-              created="2026-09-07T10:00:00+00:00")
+              created=RECENT)
 
     assert _work(silent_days=14)["silent"] == 0
 
@@ -132,8 +148,9 @@ def test_a_note_beats_a_bare_mark(agency):
                 provider_type_id, direction, subject, responsible_id, created_at,
                 start_time, completed, synced_at)
             VALUES (200, 2, 1, 'TODO', NULL, 'Связаться с клиентом', 10,
-                    '2026-09-07T10:00:00+00:00', NULL, 1, 'x')
-            """
+                    ?, NULL, 1, 'x')
+            """,
+            (RECENT,),
         )
         _note(conn, 100, 1, "продает через риелтора, показ тоже через него")
 

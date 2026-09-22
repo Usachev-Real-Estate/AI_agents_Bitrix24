@@ -17,6 +17,8 @@
 две, даёт 67% и возглавил бы список, ничего не значив.
 """
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 import web  # noqa: F401  — кладёт src/web и src/analytics на sys.path
 
@@ -29,6 +31,20 @@ from scope import Scope, scoped_session
 SELLERS = 0
 WINDOW = {"label": "вчера", "since": "2026-09-07T00:00:00+03:00",
           "until": "2026-09-08T00:00:00+03:00"}
+
+
+# «Недавно» — это отсчёт от сегодняшнего дня, а не записанное число.
+#
+# Здесь стояло 2026-09-07. К 21 сентября эта дата пришлась ровно на границу
+# порога silent_days=14, и тест начал падать от хода часов: утром проходил,
+# днём краснел. Проверяется-то не «ровно четырнадцать дней», а «запись
+# свежая» — значит и дата обязана быть относительной, с запасом от границы.
+#
+# Заморозить «сегодня» нельзя: молчание считается в SQL через
+# julianday('now'), и подменить его из Python не за что. Значит двигаться
+# должны данные теста, а не время.
+RECENT = (datetime.now(timezone.utc) - timedelta(days=2)).strftime(
+    "%Y-%m-%dT10:00:00+00:00")
 
 
 def _deal(conn, deal_id, *, user, contact, stage="UC_FADPBF"):
@@ -44,7 +60,7 @@ def _deal(conn, deal_id, *, user, contact, stage="UC_FADPBF"):
     )
 
 
-def _call(conn, activity_id, deal_id, *, user, created="2026-09-07T10:00:00+00:00"):
+def _call(conn, activity_id, deal_id, *, user, created=None):
     conn.execute(
         """
         INSERT INTO fact_activity(activity_id, owner_type_id, owner_id,
@@ -52,7 +68,7 @@ def _call(conn, activity_id, deal_id, *, user, created="2026-09-07T10:00:00+00:0
             completed, synced_at)
         VALUES (?, 2, ?, 'CALL', 2, '', ?, ?, 1, 'x')
         """,
-        (activity_id, deal_id, user, created),
+        (activity_id, deal_id, user, created or RECENT),
     )
 
 

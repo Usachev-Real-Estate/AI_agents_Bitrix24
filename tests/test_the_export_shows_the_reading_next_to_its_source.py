@@ -65,8 +65,20 @@ def _card(conn, deal_id, *, broker="Иванова Мария", body="Позво
         " VALUES (?, 'deal', ?, 1, ?, 0, ?, 'x')",
         (deal_id * 10, deal_id, body, f"{_day(-30)}T10:00:00+00:00"),
     )
+    # Дата прочтения — тоже отсчёт от сегодня, и это не педантизм.
+    #
+    # Здесь стояло абсолютное '2026-09-09' рядом с относительной датой
+    # записи _day(-30). Две такие даты едут навстречу друг другу: в
+    # сентябре запись была ДО прочтения и обещание держалось, а в октябре
+    # оказалась ПОСЛЕ — и правило «брокер вернулся к карточке» закрывало
+    # его само. Тест краснел бы в середине октября, без единой правки кода,
+    # и разбирались бы с ним как с поломкой выгрузки.
+    #
+    # Смешивать относительные даты с абсолютными хуже, чем брать любые
+    # одни: расходятся они молча и не сразу.
     fields = {"promised": "", "promised_at": None, "wait_until": None,
-              "refused": 0, "refused_why": "", "ready": "", "terms": ""}
+              "refused": 0, "refused_why": "", "ready": "", "terms": "",
+              "read_at": _day(-25)}
     fields.update(read)
     conn.execute(
         """
@@ -74,7 +86,7 @@ def _card(conn, deal_id, *, broker="Иванова Мария", body="Позво
             promised, promised_at, wait_until, refused, refused_why, ready,
             terms, read_at, prompt_version)
         VALUES ('deal', ?, 'h', :promised, :promised_at, :wait_until,
-                :refused, :refused_why, :ready, :terms, '2026-09-09', '4')
+                :refused, :refused_why, :ready, :terms, :read_at, '4')
         """.replace("?", str(deal_id)),
         fields,
     )
