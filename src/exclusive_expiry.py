@@ -457,7 +457,6 @@ def run_exclusive_expiry(
 def main() -> None:
     settings = get_settings()
     setup_logging(settings.log_level)
-    logging.getLogger("httpx").setLevel(logging.WARNING)
     result = run_exclusive_expiry(settings)
     if result.get("status") == "error":
         sys.exit(1)

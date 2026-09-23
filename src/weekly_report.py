@@ -18,7 +18,7 @@ from db import (  # noqa: E402
     purge_test_violations,
 )
 from notify import send_chat_message_chunked, _bx_call_sync  # noqa: E402
-from config import get_settings  # noqa: E402
+from config import get_settings, quiet_http_clients  # noqa: E402
 from broker_rating import (  # noqa: E402
     compute_all_ratings,
     format_rating_leaderboard,
@@ -359,6 +359,7 @@ def format_weekly_report(
 
 def main():
     init_db()
+    quiet_http_clients()
     settings = get_settings()
     # purge_test_violations() удаляет строки из violations/audit_runs. Генератор
     # отчёта не должен чистить базу как побочный эффект — только по явному флагу

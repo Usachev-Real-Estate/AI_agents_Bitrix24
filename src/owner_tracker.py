@@ -11,7 +11,7 @@ _SRC_DIR = Path(__file__).resolve().parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
-from config import get_settings  # noqa: E402
+from config import get_settings, quiet_http_clients  # noqa: E402
 from fast_bitrix24 import Bitrix  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -240,6 +240,9 @@ async def async_main():
 
     # Enable logging output to console if needed
     logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
+    # Задача настраивает лог сама, поэтому и глушить клиента портала ей
+    # приходится самой: в адресе вебхука лежит токен.
+    quiet_http_clients()
 
     bx = Bitrix(settings.b24_webhook_url)
 
