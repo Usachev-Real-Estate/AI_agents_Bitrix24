@@ -49,6 +49,14 @@ _ENTRY = re.compile(
 # ночь читателя комментариев (20 минут) с четырёхкратным резервом.
 RUNWAY_MIN = 60
 
+# Обращение к витрине НА ЗАПИСЬ. Соединение `analytics_session(readonly=True)`
+# писать физически не умеет, и считать его писателем — ложная тревога `[V8]`:
+# клиентский слой витрину только читает, и первый же его выход в крон объявил
+# бы его писателем, а значит связал бы ему расписание без всякой причины.
+_WRITES_SHOPFRONT = re.compile(
+    r"analytics_session\((?![^)]*readonly\s*=\s*True)|init_analytics_db\(",
+)
+
 ETL = "src/analytics/etl.py"
 # Точки входа крона, которые ПИШУТ в витрину. Это `grep -l analytics_session`
 # по путям из crontab.txt; полнота списка проверяется отдельным тестом ниже.
@@ -183,6 +191,11 @@ def test_the_list_of_writers_is_still_complete():
     Следующую задачу, которая пишет в витрину, добавят так же, как добавили
     читателя комментариев: строкой в crontab.txt. Тест должен заметить её
     сам, а не ждать ночного «database is locked».
+
+    Грепается именно ЗАПИСЬ. Соединение только на чтение витрине не мешает:
+    в WAL читатель не блокирует писателя. Объявив писателем читателя, тест
+    потребовал бы развести его с полной сверкой — и следующий человек
+    развёл бы, потому что тест так сказал `[V8]`.
     """
     found = set()
     for entry in _entries():
@@ -190,10 +203,25 @@ def test_the_list_of_writers_is_still_complete():
         if not path.exists():
             continue
         source = path.read_text(encoding="utf-8")
-        if "analytics_session" in source or "init_analytics_db" in source:
+        if _WRITES_SHOPFRONT.search(source):
             found.add(entry["script"])
 
     assert found == SHOPFRONT_WRITERS, (
         "в крон добавился писатель витрины — впишите его в SHOPFRONT_WRITERS "
         "и убедитесь, что он не попадает в окно полной сверки"
+    )
+
+
+def test_a_reader_of_the_mart_is_not_counted_as_its_writer():
+    """Регулярка различает запись и чтение, а не «встречается ли слово».
+
+    Без этой проверки поправка `[V8]` была бы непроверенной: список писателей
+    сошёлся бы и с регуляркой, которая ловит вообще всё.
+    """
+    assert _WRITES_SHOPFRONT.search("with analytics_session() as conn:")
+    assert _WRITES_SHOPFRONT.search("    init_analytics_db(db_path)")
+    assert not _WRITES_SHOPFRONT.search("with analytics_session(readonly=True) as conn:")
+    assert not _WRITES_SHOPFRONT.search("analytics_session(path, readonly=True)")
+    assert not _WRITES_SHOPFRONT.search(
+        "analytics_session(\n            db_path,\n            readonly=True,\n        )"
     )

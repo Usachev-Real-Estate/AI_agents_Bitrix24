@@ -44,7 +44,8 @@ DEFAULT_DB_PATH = Path("data/clients.db")
 # и цена ожидания та же: страница, которая не открылась.
 BUSY_TIMEOUT_MS = 10_000
 
-SCHEMA_VERSION = 1
+# 2: колонка key_reason в clients — почему ключ получился таким.
+SCHEMA_VERSION = 2
 
 # --------------------------------------------------------------------------
 # словарь значений
@@ -161,6 +162,7 @@ _DDL: tuple[str, ...] = (
         phone_valid           INTEGER NOT NULL DEFAULT 0,
         is_agent              INTEGER NOT NULL DEFAULT 0,
         agent_reason          TEXT    NOT NULL DEFAULT '',
+        key_reason            TEXT    NOT NULL DEFAULT '',
         contact_id            INTEGER,
         name                  TEXT    NOT NULL DEFAULT '',
         assignee_id           INTEGER,
@@ -404,6 +406,18 @@ def clients_session(
         conn.close()
 
 
+def _migrate_key_reason(conn: sqlite3.Connection) -> None:
+    """Добавить причину ключа базам, заведённым до правила раздела 2.4.
+
+    Колонка появляется пустой и наполняется ближайшей пересборкой: ключ
+    считается заново каждым полным прогоном, вместе с ним и причина.
+    """
+    try:
+        conn.execute("ALTER TABLE clients ADD COLUMN key_reason TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+
+
 def _schema_is_current(db_path: str | Path | None) -> bool:
     """Схема уже нужной версии — писать нечего.
 
@@ -435,6 +449,7 @@ def init_clients_db(db_path: str | Path | None = None) -> None:
     with clients_session(db_path) as conn:
         for statement in _DDL:
             conn.execute(statement)
+        _migrate_key_reason(conn)
         conn.execute(
             "INSERT INTO clients_meta(key, value) VALUES('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
