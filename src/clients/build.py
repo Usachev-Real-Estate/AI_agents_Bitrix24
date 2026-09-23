@@ -353,10 +353,21 @@ def build(*, now: datetime | None = None, dry_run: bool = False,
     # прогоне: вопрос «верно ли задумано правило ключа» задаёт живой
     # портфель, и ответ на него должен быть в логе каждого прогона, а не
     # добываться отдельным запуском тогда, когда что-то уже разъехалось.
-    counted = census.take(assignment, fetched.contacts)
+    counted = census.take(
+        assignment, fetched.contacts,
+        cards={
+            deal_id: census.Linked(
+                category_id=deal.get("category_id"),
+                assignee_id=deal.get("assigned_by_id"),
+            )
+            for deal_id, deal in portfolio.deals.items()
+        },
+    )
     logger.info("Ключи: %s, по причинам: %s", counted.by_kind, counted.by_reason)
     logger.info("Агентов среди клиентов: %d, по признакам: %s",
                 counted.agents, counted.agents_by_reason)
+    logger.info("Клиентов в обеих воронках: %d, у нескольких брокеров: %d",
+                counted.both_funnels, counted.several_brokers)
     logger.info("Спорные телефоны: %s", counted.conflicts.as_dict())
 
     summary: dict[str, Any] = {
