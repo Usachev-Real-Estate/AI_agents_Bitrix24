@@ -12,6 +12,7 @@ V13), — и для клиентского слоя этого мало. Кон�
 остальное, что делает прогон целиком.
 """
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -400,6 +401,70 @@ def test_two_cards_of_one_person_become_one_client_with_two_brokers(
     links = _rows(book, "SELECT entity_id FROM client_links"
                         " WHERE client_key = 'p:+79001112233' ORDER BY entity_id")
     assert [row["entity_id"] for row in links] == [7, 13]
+
+
+def _conflicted(portal):
+    """Посадить два разных человека на один номер и пересобрать."""
+    both = dict(CONTACTS)
+    both[88] = dict(CONTACTS[88], PHONE=[{"VALUE": "+79001112233"}])
+    portal(both)
+
+
+def test_a_contested_number_is_written_down_and_not_only_logged(
+    book, portfolio, portal,
+):
+    """Спорный номер остаётся в базе, а не только в ночном логе.
+
+    Лог ротируется, а вопрос «этот номер давно так или со вчера» задаёт тот,
+    кто разбирается с конкретным клиентом, — и задаёт его днём. Таблица
+    `merge_conflicts` заведена схемой ровно под это; пустая, она делала бы
+    вид, что спорных номеров в портфеле нет.
+    """
+    _conflicted(portal)
+
+    build_mod.build(now=NOW)
+
+    rows = _rows(book, "SELECT * FROM merge_conflicts")
+    assert len(rows) == 1
+    assert rows[0]["phone_norm"] == "+79001112233"
+    assert json.loads(rows[0]["contact_ids_json"]) == [77, 88]
+    assert rows[0]["detected_at"] == rows[0]["last_seen_at"] == NOW.isoformat()
+
+
+def test_an_old_conflict_keeps_the_day_it_was_first_seen(book, portfolio, portal):
+    """Второй прогон обновляет «видели», но не «обнаружили».
+
+    Иначе конфликт, живущий полгода, каждую ночь выглядел бы свежим, и
+    отличить застарелую путаницу от вчерашней опечатки стало бы нечем.
+    """
+    _conflicted(portal)
+    build_mod.build(now=NOW)
+    later = NOW + timedelta(days=3)
+
+    build_mod.build(now=later)
+
+    rows = _rows(book, "SELECT * FROM merge_conflicts")
+    assert len(rows) == 1, "ключ по номеру: таблица не растёт с каждым прогоном"
+    assert rows[0]["detected_at"] == NOW.isoformat()
+    assert rows[0]["last_seen_at"] == later.isoformat()
+
+
+def test_a_conflict_that_went_away_is_not_erased(book, portfolio, portal):
+    """Разошедшийся конфликт остаётся строкой со старым «видели».
+
+    Удалить её значит стереть единственную запись о том, что эти два
+    контакта когда-то делили номер. Прогон, который его не встретил, о нём
+    молчит — этим молчанием конфликт и «рассасывается».
+    """
+    _conflicted(portal)
+    build_mod.build(now=NOW)
+    portal(CONTACTS)
+
+    build_mod.build(now=NOW + timedelta(days=3))
+
+    rows = _rows(book, "SELECT * FROM merge_conflicts")
+    assert len(rows) == 1
+    assert rows[0]["last_seen_at"] == NOW.isoformat(), "видели в прошлый раз, не сейчас"
 
 
 def test_a_night_without_the_portal_wakes_the_admin(book, portfolio, portal, monkeypatch):

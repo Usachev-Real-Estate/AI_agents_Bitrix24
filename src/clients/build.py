@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from datetime import datetime, timezone
@@ -289,6 +290,44 @@ def write_aliases(conn, decisions: Mapping[int, Decision]) -> int:
     return len(seen)
 
 
+_CONFLICT_UPSERT = """
+INSERT INTO merge_conflicts (phone_norm, contact_ids_json, detected_at, last_seen_at)
+VALUES (:phone_norm, :contact_ids_json, :at, :at)
+ON CONFLICT(phone_norm) DO UPDATE SET
+    contact_ids_json = excluded.contact_ids_json,
+    last_seen_at = excluded.last_seen_at
+"""
+
+
+def write_conflicts(conn, conflicts: Mapping[str, tuple[int, ...]], *, at: str) -> int:
+    """Записать номера, по которым склейка запрещена (раздел 2.4 ТЗ).
+
+    Единственное место, где история спорного телефона вообще остаётся.
+    Разбор портфеля считает их в лог, но лог ротируется, а вопрос «этот
+    номер давно так или со вчера» задаёт тот, кто разбирается с конкретным
+    клиентом, а не читает ночную сводку.
+
+    `detected_at` ставится один раз и переписыванию не подлежит — иначе
+    конфликт, живущий полгода, каждую ночь выглядел бы свежим. `last_seen_at`
+    обновляется каждым прогоном, который его увидел.
+
+    Строки НЕ удаляются. Конфликт «рассасывается» не событием, а тем, что
+    очередной прогон его больше не встретил; старый `last_seen_at` и
+    читается как «в прошлый раз уже не повторилось». Удаление стёрло бы
+    единственную запись о том, что эти два контакта когда-то делили номер.
+    """
+    rows = [
+        {
+            "phone_norm": phone,
+            "contact_ids_json": json.dumps(list(ids)),
+            "at": at,
+        }
+        for phone, ids in sorted(conflicts.items())
+    ]
+    conn.executemany(_CONFLICT_UPSERT, rows)
+    return len(rows)
+
+
 def write_events(conn, events: Iterable[Event], assignee_by_key: Mapping[str, int | None]) -> int:
     """Записать ленту upsert'ом по (вид, источник)."""
     rows = []
@@ -431,6 +470,7 @@ def build(*, now: datetime | None = None, dry_run: bool = False,
         conn.executemany(_CLIENT_UPSERT, list(rows.values()))
         write_links(conn, decisions, portfolio)
         write_aliases(conn, decisions)
+        write_conflicts(conn, assignment.conflicts, at=moment.isoformat())
         write_events(conn, events, assignee_by_key)
         _write_totals(conn, events, rows, run_id, moment)
 
