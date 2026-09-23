@@ -40,6 +40,7 @@ if __package__ in (None, ""):  # запуск как `python src/clients/build.p
             sys.path.insert(0, _p)
 
 from analytics.schema import analytics_session  # noqa: E402
+from clients import census  # noqa: E402
 from clients.contacts import fetch_contacts  # noqa: E402
 from clients.events import Event, Totals, build_events, totals  # noqa: E402
 from clients.keys import Decision, assign_keys  # noqa: E402
@@ -310,12 +311,14 @@ def build(*, now: datetime | None = None, dry_run: bool = False,
     categories = (settings.sellers_category_id, settings.buyers_category_id)
     degraded: list[str] = []
 
-    init_clients_db()
     # Прогон на части портфеля — всегда сухой: признак агента копится по
     # контакту, и над половиной карточек ключи получаются другими.
     dry = dry_run or bool(limit)
     run_id = 0
     if not dry:
+        # База заводится только там, где в неё будут писать: сухой прогон,
+        # оставляющий за собой пустой файл, — это уже не «ничего не пишет».
+        init_clients_db()
         with clients_session() as conn:
             run_id = open_run(conn, MODE_FULL, moment)
 
@@ -340,14 +343,25 @@ def build(*, now: datetime | None = None, dry_run: bool = False,
         fetched = fetch_contacts(portal, portfolio.contact_ids)
     complete = fetched.complete
 
-    decisions = assign_keys(cards, fetched.contacts, type_names=type_names).decisions
+    assignment = assign_keys(cards, fetched.contacts, type_names=type_names)
+    decisions = assignment.decisions
     key_by_contact = _key_by_contact(decisions)
     events = build_events(portfolio, {d: v.key for d, v in decisions.items()},
                           key_by_contact)
 
+    # Разбор портфеля числами. Считается всегда, а не только на сухом
+    # прогоне: вопрос «верно ли задумано правило ключа» задаёт живой
+    # портфель, и ответ на него должен быть в логе каждого прогона, а не
+    # добываться отдельным запуском тогда, когда что-то уже разъехалось.
+    counted = census.take(assignment, fetched.contacts)
+    logger.info("Ключи: %s, по причинам: %s", counted.by_kind, counted.by_reason)
+    logger.info("Агентов среди клиентов: %d, по признакам: %s",
+                counted.agents, counted.agents_by_reason)
+    logger.info("Спорные телефоны: %s", counted.conflicts.as_dict())
+
     summary: dict[str, Any] = {
         "cards": len(cards),
-        "clients": len({decision.key for decision in decisions.values()}),
+        "clients": counted.clients,
         "events": len(events),
         "complete": complete,
         "degraded": degraded,

@@ -343,3 +343,24 @@ def test_the_client_belongs_to_the_broker_of_his_newest_deal(book, portfolio, po
     links = _rows(book, "SELECT entity_id FROM client_links"
                         " WHERE client_key = 'p:+79001112233' ORDER BY entity_id")
     assert [row["entity_id"] for row in links] == [7, 12], "обе сделки у одного клиента"
+
+
+def test_a_dry_run_leaves_no_file_behind(tmp_path, portfolio, portal, monkeypatch):
+    """Сухой прогон не оставляет за собой даже пустой базы.
+
+    Соседний тест этого не видел: он пользуется фикстурой, которая заводит
+    базу заранее, и проверяет лишь пустоту таблиц. «Ничего не пишет»
+    означает в том числе «не создаёт файла» — иначе на боевом сервере
+    после диагностического прогона появляется `data/clients.db`, которого
+    никто не просил, и следующий человек гадает, откуда он взялся.
+    """
+    from config import get_settings
+
+    path = tmp_path / "ни-разу-не-открытая.db"
+    monkeypatch.setenv("CLIENTS_DB_PATH", str(path))
+    get_settings.cache_clear()
+
+    summary = build_mod.build(now=NOW, dry_run=True)
+
+    assert summary["written"] is False
+    assert not path.exists(), "сухой прогон оставил за собой файл базы"
