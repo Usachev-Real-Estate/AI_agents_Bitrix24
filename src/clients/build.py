@@ -489,9 +489,6 @@ def main() -> int:
 
     settings = get_settings()
     setup_logging(settings.log_level)
-    # Клиент портала пишет каждый запрос в лог вместе с адресом вебхука, а в
-    # адресе лежит токен. Новая задача не должна пополнять эту утечку.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     summary = build(dry_run=args.dry_run, limit=args.limit)
     logger.info("Готово: %s", summary)

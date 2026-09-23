@@ -13,7 +13,7 @@ if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
 from fast_bitrix24 import Bitrix  # noqa: E402
-from config import get_settings  # noqa: E402
+from config import get_settings, quiet_http_clients  # noqa: E402
 from notify import (  # noqa: E402
     send_chat_message_chunked,
     send_user_chat_message_chunked,
@@ -196,6 +196,9 @@ async def async_main():
 
     # Enable logging output to console
     logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
+    # Задача настраивает лог сама, поэтому и глушить клиента портала ей
+    # приходится самой: в адресе вебхука лежит токен.
+    quiet_http_clients()
 
     bx = Bitrix(settings.b24_webhook_url)
 
