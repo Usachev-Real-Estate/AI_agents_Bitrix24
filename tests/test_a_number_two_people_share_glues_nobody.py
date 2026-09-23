@@ -6,18 +6,24 @@
 одному телефон другого, и тогда у одного «клиента» окажется чужая история,
 чужой ответственный и разбор, написанный не про него.
 
-Поэтому правило узкое: номер годится в ключ, только если он разобрался и
-числится ровно за одним контактом. Всё остальное уходит на ключ по контакту,
-а сам номер остаётся на экране — он нужен брокеру, даже когда не годится
-для склейки.
+Поэтому номер, числящийся за несколькими контактами, сам по себе ключа не
+даёт: сначала спрашивают имя. Совпало у всех — это один человек, заведённый
+дважды, и карточки склеиваются. Разошлось — карточки уходят на ключ по
+контакту, а номер остаётся на экране: брокеру он нужен, даже когда не
+годится для склейки.
+
+Измерено на живом портфеле: из 237 общих номеров 116 — один человек, 120 —
+разные люди. Правило, отказывавшее всем, ошибалось ровно в половине случаев.
 """
 
 from clients.keys import (
+    WHY_AGENT,
     WHY_CONFLICT,
     WHY_NO_CONTACT,
     WHY_NO_PHONE,
     WHY_PHONE,
     WHY_PHONE_INVALID,
+    WHY_PHONE_SHARED,
     Card,
     assign_keys,
     phone_candidates,
@@ -26,8 +32,8 @@ from clients.keys import (
 TYPES = {"CLIENT": "Клиент"}
 
 
-def _contact(*phones, **extra):
-    card = {"NAME": "Пётр", "TYPE_ID": "CLIENT",
+def _contact(*phones, name="Пётр", **extra):
+    card = {"NAME": name, "TYPE_ID": "CLIENT",
             "PHONE": [{"VALUE": value} for value in phones]}
     card.update(extra)
     return card
@@ -106,15 +112,16 @@ def test_two_deals_of_one_contact_are_one_client():
     assert got[1].key_reason == WHY_PHONE
 
 
-def test_two_contacts_with_one_number_glue_nobody():
-    """Один телефон у двух контактов — не склейка, а конфликт.
+def test_two_different_people_with_one_number_glue_nobody():
+    """Один телефон у двух разных людей — не склейка, а конфликт.
 
     Оба уходят на ключ по контакту, конфликт записывается, и повторная
     встреча того же номера ничего нового не создаёт: таблица конфликтов
     ключуется номером.
     """
     cards = [Card(1, contact_id=77), Card(2, contact_id=88)]
-    contacts = {77: _contact("+79001112233"), 88: _contact("+79001112233")}
+    contacts = {77: _contact("+79001112233", name="Пётр"),
+                88: _contact("+79001112233", name="Мария")}
 
     got = _one(cards, contacts)
 
@@ -122,10 +129,147 @@ def test_two_contacts_with_one_number_glue_nobody():
     assert got.decisions[2].key == "c:88"
     assert got.decisions[1].key_reason == WHY_CONFLICT
     assert got.conflicts == {"+79001112233": (77, 88)}
+    assert got.merged == {}
     assert got.decisions[1].phone_valid is True, (
         "номер разобран — запрещена склейка по нему, а не сам номер"
     )
     assert got.decisions[1].phone_norm is None
+
+
+def test_one_person_entered_twice_is_glued_after_all():
+    """Один номер и одно имя на двух карточках — один клиент.
+
+    Это и есть исправление, ради которого правило пересматривали: половина
+    общих номеров портфеля — дубль одного человека, и отказ склеивать их
+    оставлял брокеру две строки на одного покупателя.
+    """
+    cards = [Card(1, contact_id=77), Card(2, contact_id=88)]
+    contacts = {77: _contact("+79001112233", name="Пётр"),
+                88: _contact("+79001112233", name="пётр ")}
+
+    got = _one(cards, contacts)
+
+    assert got.decisions[1].key == got.decisions[2].key == "p:+79001112233"
+    assert got.decisions[1].key_reason == WHY_PHONE_SHARED
+    assert got.conflicts == {}
+    assert got.merged == {"+79001112233": (77, 88)}
+
+
+def test_a_second_number_does_not_pull_the_twin_off_the_shared_key():
+    """Своих номеров у карточки бывает два — ключ всё равно один на двоих.
+
+    Номер выбирается на группу, а не на карточку. Иначе у карточки с двумя
+    номерами выигрывал бы её собственный меньший, у её двойника — общий, и
+    склейка, ради которой всё затевалось, не состоялась бы ни разу там, где
+    у человека записан второй телефон.
+    """
+    cards = [Card(1, contact_id=77), Card(2, contact_id=88)]
+    contacts = {
+        77: _contact("+79001112233", "+79000001111"),
+        88: _contact("+79001112233"),
+    }
+
+    got = _one(cards, contacts)
+
+    assert got.decisions[1].key == got.decisions[2].key == "p:+79000001111"
+    assert ("phone", "+79001112233") in got.decisions[1].aliases
+    assert got.decisions[1].key_reason == WHY_PHONE_SHARED, (
+        "причина смотрит на карточку, а не на номер: клиент собран по имени,"
+        " хотя ключом уехал на второй телефон, который ни за кем не числится"
+    )
+
+
+def test_a_chain_of_shared_numbers_is_one_person():
+    """Общий номер с одним соседом и другой с другим — все трое один человек.
+
+    У человека бывает три карточки и в каждой свой набор телефонов. Разбор
+    парами оставил бы его двумя клиентами.
+    """
+    cards = [Card(1, contact_id=77), Card(2, contact_id=88), Card(3, contact_id=99)]
+    contacts = {
+        77: _contact("+79000001111"),
+        88: _contact("+79000001111", "+79000002222"),
+        99: _contact("+79000002222"),
+    }
+
+    got = _one(cards, contacts).decisions
+
+    assert got[1].key == got[2].key == got[3].key == "p:+79000001111"
+
+
+def test_one_name_on_two_numbers_glues_neither():
+    """Одно имя на РАЗНЫХ общих номерах — заполнитель, а не человек.
+
+    Карточки, заведённые автоматом, получают одинаковую подпись. Склейка по
+    ней свела бы в одного клиента незнакомых людей с разных номеров. Отказ
+    стоит дёшево: эти карточки остаются ровно там, где были до правила.
+    """
+    cards = [Card(i, contact_id=70 + i) for i in range(1, 5)]
+    contacts = {
+        71: _contact("+79000001111"), 72: _contact("+79000001111"),
+        73: _contact("+79000002222"), 74: _contact("+79000002222"),
+    }
+
+    got = _one(cards, contacts)
+
+    assert got.merged == {}
+    assert sorted(got.conflicts) == ["+79000001111", "+79000002222"]
+    assert {d.key for d in got.decisions.values()} == {"c:71", "c:72", "c:73", "c:74"}
+
+
+def test_a_nameless_twin_is_not_glued():
+    """Безымянная карточка рядом с живой не склеивается.
+
+    Почти наверняка это её же автоматический двойник — но «почти» здесь и
+    есть ответ: цену ошибочной склейки платит брокер, получивший чужую
+    историю в карточке клиента.
+    """
+    cards = [Card(1, contact_id=77), Card(2, contact_id=88)]
+    contacts = {77: _contact("+79001112233"), 88: _contact("+79001112233", name="")}
+
+    got = _one(cards, contacts)
+
+    assert got.merged == {}
+    assert got.decisions[1].key == "c:77"
+
+
+def test_two_nameless_cards_are_not_declared_one_person():
+    """Двое безымянных на одном номере — не один человек, а «не знаем».
+
+    Отдельно от соседнего теста: там одна карточка названа, и сравнение
+    отвергает пару уже по разнице имён. Здесь имён нет ни у кого, и
+    отвергнуть пару может только прямое требование «названы все». Без него
+    два пустых имени совпали бы друг с другом, и семейный телефон свёл бы
+    в одного клиента двух разных людей.
+    """
+    cards = [Card(1, contact_id=77), Card(2, contact_id=88)]
+    contacts = {77: _contact("+79001112233", name=""),
+                88: _contact("+79001112233", name="")}
+
+    got = _one(cards, contacts)
+
+    assert got.merged == {}
+    assert got.decisions[1].key == "c:77"
+    assert got.decisions[2].key == "c:88"
+
+
+def test_an_agent_found_on_one_twin_covers_the_other():
+    """Признак агента переходит на все карточки одного человека.
+
+    Решение агентства — «одна сделка назвала агентом, значит агент» — про
+    человека, а не про строку справочника. Без перехода тот же человек
+    оказался бы наполовину агентом: одна его карточка склеилась бы по
+    телефону, вторая нет.
+    """
+    cards = [Card(1, contact_id=77), Card(2, title="Лариса агент, 2-к", contact_id=88)]
+    contacts = {77: _contact("+79001112233"), 88: _contact("+79001112233")}
+
+    got = _one(cards, contacts).decisions
+
+    assert got[1].is_agent is True
+    assert got[2].is_agent is True
+    assert got[1].key == "c:77", "агент по телефону не склеивается"
+    assert got[1].key_reason == WHY_AGENT
 
 
 def test_a_shared_number_is_not_offered_as_an_alias_either():
@@ -137,8 +281,8 @@ def test_a_shared_number_is_not_offered_as_an_alias_either():
     """
     cards = [Card(1, contact_id=77), Card(2, contact_id=88)]
     contacts = {
-        77: _contact("+79001112233", "+79002223344"),
-        88: _contact("+79001112233"),
+        77: _contact("+79001112233", "+79002223344", name="Пётр"),
+        88: _contact("+79001112233", name="Мария"),
     }
 
     got = _one(cards, contacts)

@@ -63,12 +63,12 @@ DERIVED_ALIASES = (ALIAS_PHONE, ALIAS_CONTACT)
 _CLIENT_UPSERT = """
 INSERT INTO clients (
     client_key, phone_norm, phone_raw, phone_valid, is_agent, agent_reason,
-    key_reason, contact_id, name, assignee_id, assignee_name, department_id,
-    updated_at
+    key_reason, contact_id, name, assignee_id, assignee_name, assignee_count,
+    department_id, updated_at
 ) VALUES (
     :client_key, :phone_norm, :phone_raw, :phone_valid, :is_agent, :agent_reason,
-    :key_reason, :contact_id, :name, :assignee_id, :assignee_name, :department_id,
-    :updated_at
+    :key_reason, :contact_id, :name, :assignee_id, :assignee_name, :assignee_count,
+    :department_id, :updated_at
 )
 ON CONFLICT(client_key) DO UPDATE SET
     phone_norm = excluded.phone_norm,
@@ -81,6 +81,7 @@ ON CONFLICT(client_key) DO UPDATE SET
     name = excluded.name,
     assignee_id = excluded.assignee_id,
     assignee_name = excluded.assignee_name,
+    assignee_count = excluded.assignee_count,
     department_id = excluded.department_id,
     updated_at = excluded.updated_at
 """
@@ -174,6 +175,13 @@ def client_rows(
     вопрос «кто ведёт его сейчас», а любое усреднение не отвечает ни на
     какой. При равенстве дат выигрывает больший номер сделки — чтобы ответ
     не зависел от порядка выдачи витрины.
+
+    Рядом лежит ``assignee_count`` — сколько брокеров ведёт клиента на самом
+    деле. Одного поля мало: агентство прямо говорит, что клиент бывает и
+    собственником, и покупателем и работает с разными брокерами, а склейка
+    по совпавшему имени такие карточки как раз и сводит вместе. Без счётчика
+    колонка «ответственный» молча выдавала бы одного из нескольких за
+    единственного, и РОП спрашивал бы с него за чужую работу.
     """
     by_key: dict[str, list[Decision]] = {}
     for decision in decisions.values():
@@ -190,6 +198,11 @@ def client_rows(
         )
         deal = portfolio.deals.get(newest.deal_id, {})
         assignee_id = deal.get("assigned_by_id")
+        brokers = {
+            portfolio.deals.get(item.deal_id, {}).get("assigned_by_id")
+            for item in group
+        }
+        brokers.discard(None)
         user = portfolio.users.get(int(assignee_id)) if assignee_id else None
         contact = contacts.get(newest.contact_id) if newest.contact_id else None
         rows[key] = {
@@ -204,6 +217,7 @@ def client_rows(
             "name": _contact_name(contact) or deal.get("title") or "",
             "assignee_id": assignee_id,
             "assignee_name": _user_name(user),
+            "assignee_count": len(brokers) or None,
             "department_id": user.get("department_id") if user else None,
             "updated_at": now.isoformat(),
         }
@@ -368,6 +382,8 @@ def build(*, now: datetime | None = None, dry_run: bool = False,
                 counted.agents, counted.agents_by_reason)
     logger.info("Клиентов в обеих воронках: %d, у нескольких брокеров: %d",
                 counted.both_funnels, counted.several_brokers)
+    logger.info("Склеено по совпавшему имени: номеров %d, контактов %d",
+                counted.merged_phones, counted.merged_contacts)
     logger.info("Спорные телефоны: %s", counted.conflicts.as_dict())
 
     summary: dict[str, Any] = {

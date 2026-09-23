@@ -340,9 +340,66 @@ def test_the_client_belongs_to_the_broker_of_his_newest_deal(book, portfolio, po
     assert row["assignee_id"] == 20, "сделка двухдневной давности свежее сорокадневной"
     assert row["assignee_name"] == "Новикова Анна"
     assert row["department_id"] == 9, "отдел берётся у того же человека"
+    assert row["assignee_count"] == 2, (
+        "рядом с «кто ведёт сейчас» стоит «сколько их всего»: одного поля мало,"
+        " когда клиента ведут двое"
+    )
     links = _rows(book, "SELECT entity_id FROM client_links"
                         " WHERE client_key = 'p:+79001112233' ORDER BY entity_id")
     assert [row["entity_id"] for row in links] == [7, 12], "обе сделки у одного клиента"
+
+
+def test_a_client_led_by_one_broker_counts_one(book, portfolio, portal):
+    """Обратная половина счётчика: один брокер — единица, а не пусто.
+
+    Пусто означало бы «не считали»: остальные счётчики книги живут по этому
+    правилу, и брокеры обязаны жить по нему же, иначе фильтр «у кого больше
+    одного» молча пропустит тех, кого ещё не считали.
+    """
+    build_mod.build(now=NOW)
+
+    row = _rows(book, "SELECT * FROM clients WHERE client_key = 'p:+79001112233'")[0]
+    assert row["assignee_count"] == 1
+
+
+def test_two_cards_of_one_person_become_one_client_with_two_brokers(
+    book, portfolio, portal,
+):
+    """Сквозная проверка всей правки: дубль склеивается, брокеры считаются.
+
+    Один человек заведён дважды — один номер, одно имя, две карточки, два
+    разных брокера. До исправления правила такой номер объявлялся спорным и
+    давал двух клиентов; брокер видел одного покупателя дважды и звонил ему
+    дважды. Теперь это один клиент, и рядом с ответственным честно стоит,
+    что ведут его двое.
+    """
+    with analytics_session() as conn:
+        conn.execute(
+            "INSERT INTO dim_user(user_id, name, last_name, department_id,"
+            " synced_at) VALUES (20, 'Анна', 'Новикова', 9, ?)", (SYNCED,),
+        )
+        conn.execute(
+            "INSERT INTO fact_deal(deal_id, title, category_id, stage_id,"
+            " assigned_by_id, contact_id, date_create, is_deleted, synced_at)"
+            " VALUES (13, 'он же, второй картой', 18, 'C18:NEW', 20, 99, ?, 0, ?)",
+            (_at(1), SYNCED),
+        )
+    twin = dict(CONTACTS)
+    twin[99] = {"ID": "99", "NAME": "Пётр", "LAST_NAME": "Сидоров",
+                "PHONE": [{"VALUE": "8 900 111 22 33"}]}
+    portal(twin)
+
+    build_mod.build(now=NOW)
+
+    rows = _rows(book, "SELECT * FROM clients WHERE contact_id IN (77, 99)")
+    assert len(rows) == 1, "две карточки одного человека — один клиент"
+    assert rows[0]["client_key"] == "p:+79001112233"
+    assert rows[0]["key_reason"] == "склейка по телефону: имя совпало"
+    assert rows[0]["assignee_count"] == 2
+    assert rows[0]["assignee_id"] == 20, "ведёт тот, у кого свежая сделка"
+    links = _rows(book, "SELECT entity_id FROM client_links"
+                        " WHERE client_key = 'p:+79001112233' ORDER BY entity_id")
+    assert [row["entity_id"] for row in links] == [7, 13]
 
 
 def test_a_dry_run_leaves_no_file_behind(tmp_path, portfolio, portal, monkeypatch):
