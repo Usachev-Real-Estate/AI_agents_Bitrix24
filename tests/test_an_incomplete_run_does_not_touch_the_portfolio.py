@@ -402,6 +402,32 @@ def test_two_cards_of_one_person_become_one_client_with_two_brokers(
     assert [row["entity_id"] for row in links] == [7, 13]
 
 
+def test_a_night_without_the_portal_wakes_the_admin(book, portfolio, portal, monkeypatch):
+    """Прогон, не тронувший портфель, выходит с ненулевым кодом.
+
+    Правильно не писать — половина дела; вторая половина сказать, что не
+    писал. `scripts/cron_job.sh` шлёт админу алерт по ненулевому коду, и
+    только он отличает «портал не ответил одну ночь» от «портфель замёрз
+    неделю назад, а список выглядит живым».
+    """
+    portal(CONTACTS, fail={88})
+    monkeypatch.setattr("sys.argv", ["build"])
+
+    assert build_mod.main() == 1
+    assert _rows(book, "SELECT * FROM clients") == []
+
+
+def test_a_dry_run_that_wrote_nothing_is_not_a_failure(portfolio, portal, monkeypatch):
+    """Сухой прогон не пишет нарочно — будить админа не за что.
+
+    Без этой половины проверки диагностический прогон слал бы админу алерт
+    каждый раз, и алерты перестали бы читать — вместе с настоящими.
+    """
+    monkeypatch.setattr("sys.argv", ["build", "--dry-run"])
+
+    assert build_mod.main() == 0
+
+
 def test_a_dry_run_leaves_no_file_behind(tmp_path, portfolio, portal, monkeypatch):
     """Сухой прогон не оставляет за собой даже пустой базы.
 
