@@ -67,6 +67,7 @@ def create_app(settings=None) -> FastAPI:
     app.include_router(auth.router, prefix=config.base_path)
     app.include_router(routes_api.router, prefix=config.base_path)
     app.include_router(routes_clients.router, prefix=config.base_path)
+    app.include_router(routes_clients.pages, prefix=config.base_path)
     app.include_router(routes_pages.router, prefix=config.base_path)
     app.include_router(routes_users.router, prefix=config.base_path)
 

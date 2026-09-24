@@ -22,16 +22,24 @@ import sqlite3
 from typing import Any, Iterator
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 import clients_read as read
+from clients.schema import TRIAGE_LABELS, TRIAGE_ORDER
 from clients_scope import BookMissing, scoped_clients
-from context import scope_for
+from context import base_context, scope_for
 from transcripts_read import read_transcript
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
+
+# Страницы живут в ЭТОМ файле, а не в routes_pages: тот читает витрину, а
+# здесь другая база, другая область видимости и другой способ отказа.
+# Общего у них — только шаблонизатор.
+pages = APIRouter()
+
+PAGE_SIZE = 100
 
 # Параметры фильтра, которые ручка списка принимает из строки запроса.
 # Перечислены поимённо: «всё, что пришло» означало бы, что имя колонки из
@@ -162,3 +170,94 @@ async def api_call_transcript(request: Request, activity_id: int) -> JSONRespons
         {"activity_id": activity_id, "client_key": owner, "text": text},
         headers={"Cache-Control": "no-store"},
     )
+
+
+# --------------------------------------------------------------------------
+# экраны
+# --------------------------------------------------------------------------
+
+def _page_context(request: Request, active: str) -> dict[str, Any]:
+    context = base_context(request, active=active)
+    context["triage_labels"] = TRIAGE_LABELS
+    context["triage_order"] = TRIAGE_ORDER
+    return context
+
+
+def _render(request: Request, template: str, context: dict) -> HTMLResponse:
+    return request.app.state.templates.TemplateResponse(request, template, context)
+
+
+def _no_book(request: Request) -> HTMLResponse:
+    """Экран, объясняющий, что книги ещё нет.
+
+    Не пустая таблица: «клиентов ноль» — вывод, по которому РОП решит, что
+    работать не с кем, а правда в том, что прогон ни разу не шёл.
+
+    Контекст заполняется ЦЕЛИКОМ, теми же ключами, что и обычный экран.
+    Шаблон не должен догадываться, каким путём к нему пришли: недостающий
+    ключ уронит страницу в пятисотку, то есть ровно в то, от чего этот
+    экран и заводился.
+    """
+    context = _page_context(request, "clients")
+    context.update({
+        "book_missing": BOOK_MISSING["detail"],
+        "clients": [], "total": 0, "counts": {}, "filters": {},
+        "page": 1, "pages": 1,
+    })
+    return _render(request, "clients.html", context)
+
+
+@pages.get("/clients", response_class=HTMLResponse)
+async def clients_page(request: Request) -> HTMLResponse:
+    """Вкладка «Клиенты»: кого смотреть первым (раздел 9 ТЗ)."""
+    context = _page_context(request, "clients")
+    filters = _filters(request)
+    page = max(1, _int_or_one(request.query_params.get("page")))
+
+    try:
+        with scoped_clients(scope_for(request)) as conn:
+            conn.row_factory = sqlite3.Row
+            rows, total = read.page_of_clients(
+                conn, filters=filters, limit=PAGE_SIZE,
+                offset=(page - 1) * PAGE_SIZE,
+            )
+            counts = read.counts_by_state(conn)
+    except BookMissing:
+        return _no_book(request)
+
+    context.update({
+        "clients": rows, "total": total, "counts": counts,
+        "filters": filters, "page": page,
+        "pages": max(1, -(-total // PAGE_SIZE)),
+    })
+    return _render(request, "clients.html", context)
+
+
+@pages.get("/clients/{client_key:path}", response_class=HTMLResponse)
+async def client_page(request: Request, client_key: str) -> HTMLResponse:
+    """Страница одного клиента: шапка, карточки, лента (раздел 9 ТЗ).
+
+    Расшифровки в ленту не рендерятся — они подгружаются по клику через
+    `/api/calls/{id}/transcript`. У клиента с сорока звонками страница
+    иначе весила бы мегабайты, и открывалась бы соответственно.
+    """
+    context = _page_context(request, "clients")
+    try:
+        with scoped_clients(scope_for(request)) as conn:
+            conn.row_factory = sqlite3.Row
+            found = read.read_client(conn, client_key)
+    except BookMissing:
+        return _no_book(request)
+
+    if found is None:
+        raise HTTPException(status_code=404, detail="Клиент не найден")
+
+    context.update(found)
+    return _render(request, "client.html", context)
+
+
+def _int_or_one(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 1

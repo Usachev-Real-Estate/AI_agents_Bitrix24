@@ -293,3 +293,85 @@ def test_a_call_outside_the_scope_has_no_owner(book):
 def test_an_unknown_call_has_no_owner(conn):
     """Несуществующий звонок ничьим не объявляется."""
     assert read.client_of_call(conn, 999) is None
+
+
+# ── порядок на экране: по срочности, а не по алфавиту ──────────────────
+
+def test_the_screen_orders_by_urgency_and_not_by_key(conn):
+    """Экран открывают, чтобы узнать, кого смотреть первым.
+
+    Порядок здесь другой, чем у ручки: там по ключу ради курсора, здесь по
+    срочности состояния. Алфавит на вопрос «кого первым» не отвечает, а
+    выглядит ровно так же правдоподобно — список отсортирован, строки на
+    месте, и понять, что сортировка не та, можно только зная, какой она
+    должна быть.
+    """
+    rows, _ = read.page_of_clients(conn)
+
+    assert _keys(rows) == ["p:1", "p:3", "p:2"], "брошен, остыл, движется"
+
+
+def test_inside_one_state_the_longest_silence_comes_first(book, conn):
+    """Внутри состояния сверху те, кто молчит дольше."""
+    with clients_session(book) as writer:
+        writer.execute(
+            "UPDATE clients SET triage_state = 'abandoned', silence_days = 100"
+            " WHERE client_key = 'p:2'"
+        )
+
+    rows, _ = read.page_of_clients(conn)
+
+    assert _keys(rows)[:2] == ["p:2", "p:1"], "сто дней молчания раньше сорока"
+
+
+def test_a_client_without_counted_silence_does_not_lead_the_state(book, conn):
+    """Непосчитанная тишина не выдаёт себя за самую долгую.
+
+    Держится это на неявном правиле движка: при `DESC` SQLite кладёт NULL
+    последними (при `ASC` — первыми). Оговорки в запросе нет нарочно, она
+    ничего не меняет; но правило чужое, и менять сортировку на возрастание
+    или переезжать на другой движок можно только сломав этот тест.
+
+    Цена ошибки: клиент, которого прогон ещё не считал, встал бы во главе
+    списка брошенных — то есть первым, кому звонить.
+    """
+    with clients_session(book) as writer:
+        writer.execute(
+            "UPDATE clients SET triage_state = 'abandoned', silence_days = NULL"
+            " WHERE client_key = 'p:3'"
+        )
+
+    rows, _ = read.page_of_clients(conn)
+
+    assert _keys(rows)[0] == "p:1", "посчитанные сорок дней раньше непосчитанного"
+
+
+def test_the_screen_says_how_many_there_are_in_total(conn):
+    """Всего — отдельным числом, а не длиной страницы.
+
+    Подпись «показаны первые сто из тысячи» и есть то, ради чего его
+    считают: без неё страница выглядит как весь портфель.
+    """
+    rows, total = read.page_of_clients(conn, limit=1)
+
+    assert len(rows) == 1
+    assert total == 3
+
+
+def test_the_counts_cover_the_whole_book_not_the_page(conn):
+    """Числа у фильтров считаются по всей книге, а не по странице.
+
+    Число рядом с фильтром обязано говорить, сколько там всего, иначе
+    фильтр незачем и открывать.
+    """
+    counts = read.counts_by_state(conn)
+
+    assert counts == {"abandoned": 1, "cooling": 1, "moving": 1}
+
+
+def test_an_empty_state_does_not_clutter_the_filters(book, conn):
+    """Состояние, в котором никого нет, из шапки пропадает."""
+    with clients_session(book) as writer:
+        writer.execute("UPDATE clients SET triage_state = 'moving'")
+
+    assert read.counts_by_state(conn) == {"moving": 3}

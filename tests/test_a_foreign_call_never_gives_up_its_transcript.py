@@ -284,3 +284,88 @@ def test_a_call_without_a_transcript_says_so_without_guessing(admin, tmp_path):
 
     assert response.status_code == 404
     assert response.json()["text"] is None
+
+
+# ── экраны ─────────────────────────────────────────────────────────────
+
+def test_the_list_screen_shows_the_clients(admin):
+    """Вкладка «Клиенты» открывается и показывает список."""
+    response = admin.get(f"{BASE}/clients")
+
+    assert response.status_code == 200
+    assert "Свой" in response.text and "Чужой" in response.text
+
+
+def test_the_list_screen_keeps_a_foreign_department_away(rop_a):
+    """На экране РОПа чужого клиента нет — как и в ручке."""
+    body = rop_a.get(f"{BASE}/clients").text
+
+    assert "Свой" in body
+    assert "Чужой" not in body
+
+
+def test_the_raw_phone_is_not_printed_in_the_list_screen(admin):
+    """Дописки брокера к номеру в таблицу не попадают.
+
+    На карточке одного человека они нужны и показываются; список уходит
+    целиком и его выгружают.
+    """
+    assert "жена Ольга" not in admin.get(f"{BASE}/clients").text
+
+
+def test_the_state_filter_narrows_the_screen(admin):
+    """Фишка состояния в шапке сужает список."""
+    body = admin.get(f"{BASE}/clients?triage_state=moving").text
+
+    assert "Чужой" in body
+    assert "Свой" not in body
+
+
+def test_the_client_screen_opens_by_its_phone_key(admin):
+    """Страница клиента открывается по ключу `p:+7…` целиком."""
+    response = admin.get(f"{BASE}/clients/p:+79001112233")
+
+    assert response.status_code == 200
+    assert "Свой" in response.text
+
+
+def test_the_client_screen_does_not_render_the_transcript(admin):
+    """Текст звонка в ленту не рендерится — только ссылка.
+
+    У клиента с сорока звонками страница иначе весила бы мегабайты и
+    открывалась бы соответственно (раздел 9 ТЗ).
+    """
+    body = admin.get(f"{BASE}/clients/p:+79001112233").text
+
+    assert "разговор своего клиента" not in body
+    assert f"/api/calls/{CALL_A}/transcript" in body
+
+
+def test_a_foreign_client_screen_is_not_found(rop_a):
+    """Чужая карточка не открывается и ничего о себе не сообщает."""
+    response = rop_a.get(f"{BASE}/clients/c:88")
+
+    assert response.status_code == 404
+    assert "Чужой" not in response.text
+
+
+def test_the_screen_without_a_book_explains_itself(app_without_book):
+    """Экран без книги объясняет словами, а не показывает пустую таблицу.
+
+    Пустая таблица читается как «работать не с кем» — вывод, который РОП
+    сделает, а поправить будет нечем.
+    """
+    session = _login(app_without_book, "boss")
+
+    response = session.get(f"{BASE}/clients")
+
+    assert response.status_code == 200
+    assert "не собрана" in response.text
+    assert "Ничего не найдено" not in response.text
+
+
+def test_the_menu_has_the_clients_tab(admin):
+    """Пункт меню есть, и он ведёт на экран, а не в никуда."""
+    body = admin.get(f"{BASE}/clients").text
+
+    assert f'href="{BASE}/clients' in body

@@ -22,6 +22,8 @@ import json
 import sqlite3
 from typing import Any, Iterator
 
+from clients.schema import TRIAGE_ORDER
+
 # Потолок страницы из раздела 7.2. Читатель просит сколько хочет, отдаётся
 # не больше: ручка отдаёт поток, и страница в десять тысяч строк держала бы
 # соединение с книгой открытым всё время её разбора.
@@ -165,6 +167,80 @@ def _conditions(filters: dict[str, Any], cursor: str | None) -> tuple[str, list[
         params.append(cursor)
 
     return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
+
+
+# Порядок срочности из раздела 9 ТЗ. Строится из TRIAGE_ORDER, а не
+# переписывается рядом: список, оторванный от набора значений, расходится с
+# ним молча — новое состояние просто уезжает в конец, и никто не замечает,
+# что оно там не по смыслу, а по недосмотру.
+_RANK = " ".join(
+    f"WHEN '{state}' THEN {index}" for index, state in enumerate(TRIAGE_ORDER)
+)
+TRIAGE_RANK = f"CASE c.triage_state {_RANK} ELSE {len(TRIAGE_ORDER)} END"
+
+
+def page_of_clients(
+    conn: sqlite3.Connection,
+    *,
+    filters: dict[str, Any] | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    """Страница списка для экрана: строки и сколько их всего.
+
+    Порядок другой, чем у ручки: там по ключу ради курсора, здесь по
+    СРОЧНОСТИ — экран открывают, чтобы узнать, кого смотреть первым, и
+    алфавит на этот вопрос не отвечает. Внутри одного состояния сверху
+    те, кто молчит дольше.
+
+    Клиент с непосчитанной тишиной оказывается в конце своего состояния
+    сам собой: при `DESC` SQLite кладёт NULL последними. Это неявное
+    правило движка, а не наше решение, и держится оно тестом — явная
+    оговорка `silence_days IS NULL` тут ничего не меняет, и стоять рядом
+    с комментарием, будто она что-то защищает, не должна.
+
+    Всего — отдельным запросом, а не `len(rows)`: подпись «показаны первые
+    сто из тысячи» и есть то, ради чего его считают.
+    """
+    where, params = _conditions(filters or {}, None)
+    columns = ", ".join(f"c.{name}" for name in LIST_COLUMNS)
+    rows = [
+        dict(row) for row in conn.execute(
+            f"SELECT {columns},"
+            " (SELECT COUNT(*) FROM v_client_link l WHERE l.client_key = c.client_key)"
+            " AS cards,"
+            " rv.created_at AS reviewed_at, rv.reviewed_through"
+            " FROM v_client c"
+            f" LEFT JOIN ({_LAST_REVIEW}) rv ON rv.client_key = c.client_key"
+            f"{where}"
+            f" ORDER BY {TRIAGE_RANK}, c.silence_days DESC, c.client_key"
+            " LIMIT ? OFFSET ?",
+            (*params, max(1, int(limit)), max(0, int(offset))),
+        )
+    ]
+    for row in rows:
+        row["reviewed"] = _reviewed_state(row)
+
+    total = conn.execute(
+        "SELECT COUNT(*) FROM v_client c"
+        f" LEFT JOIN ({_LAST_REVIEW}) rv ON rv.client_key = c.client_key{where}",
+        params,
+    ).fetchone()[0]
+    return rows, total
+
+
+def counts_by_state(conn: sqlite3.Connection) -> dict[str, int]:
+    """Сколько клиентов в каждом состоянии — для шапки экрана.
+
+    Считается по всей видимой книге, а не по текущей странице: число рядом
+    с фильтром обязано говорить, сколько там всего, иначе фильтр незачем
+    и открывать.
+    """
+    rows = conn.execute(
+        "SELECT triage_state, COUNT(*) FROM v_client GROUP BY triage_state"
+    ).fetchall()
+    found = {str(state): int(count) for state, count in rows}
+    return {state: found.get(state, 0) for state in TRIAGE_ORDER if found.get(state)}
 
 
 def read_client(conn: sqlite3.Connection, client_key: str) -> dict[str, Any] | None:

@@ -40,6 +40,7 @@ NAV = [
     ("leads", "Лиды"),
     ("deals", "Сделки"),
     ("movement", "Движение"),
+    ("clients", "Клиенты"),
     ("people", "Люди"),
     (objects.SLUG, "Объекты"),
     ("table", "Таблица"),

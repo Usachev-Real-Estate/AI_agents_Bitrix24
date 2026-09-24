@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}Клиенты{% endblock %}
+
+{# Период и воронка в шапке этому экрану не нужны: список отвечает на
+   вопрос «кого смотреть первым», а не «как дела за август». Фильтры свои. #}
+{% block filters %}
+<form class="filters" method="get" action="" data-autosubmit>
+  <div class="chips">
+    <a class="chip {{ '' if filters.triage_state else 'active' }}"
+       href="?{{ qs(request, triage_state=None, page=None) }}">все</a>
+    {% for state in triage_order %}
+      {% if counts.get(state) %}
+        <a class="chip {{ 'active' if filters.triage_state == state else '' }}"
+           href="?{{ qs(request, triage_state=state, page=None) }}">
+          {{ triage_labels[state] }} <span class="muted">{{ counts[state] }}</span></a>
+      {% endif %}
+    {% endfor %}
+  </div>
+  <label class="field">тишина дольше
+    <input type="number" name="silence_gt" min="0" step="1"
+           value="{{ filters.silence_gt or '' }}" placeholder="дней"></label>
+  <label class="field">разобран
+    <select name="reviewed">
+      <option value="">неважно</option>
+      <option value="no" {{ 'selected' if filters.reviewed == 'no' }}>нет</option>
+      <option value="stale" {{ 'selected' if filters.reviewed == 'stale' }}>устарел</option>
+      <option value="yes" {{ 'selected' if filters.reviewed == 'yes' }}>свежий</option>
+    </select></label>
+  <noscript><button class="btn" type="submit">Показать</button></noscript>
+</form>
+{% endblock %}
+
+{% block content %}
+<h1 class="section-title">Клиенты · кого смотреть первым</h1>
+
+{% if book_missing %}
+  {# Не «ничего не найдено»: пустая таблица читается как «работать не с
+     кем», а правда в том, что прогон ни разу не шёл. #}
+  <div class="card empty">
+    <p>{{ book_missing }}</p>
+  </div>
+{% else %}
+
+<div class="card">
+  <div class="card-head">
+    <div>
+      <h2>Список</h2>
+      <p class="card-sub">
+        Всего {{ total | int_ru }}{% if filters %} по фильтру{% endif %}.
+        Сверху те, с кем дольше всего ничего не происходит.
+      </p>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Клиент</th>
+          <th>Состояние</th>
+          <th>Ответственный</th>
+          <th class="num">Тишина</th>
+          <th class="nowrap">Последнее касание</th>
+          <th class="nowrap">Следующий шаг</th>
+          <th class="num">Карточек</th>
+          <th>Разобран</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in clients %}
+        <tr>
+          <td class="ellipsis" title="{{ row.name }}">
+            <a href="{{ base_path }}/clients/{{ row.client_key | urlencode }}">
+              {{ row.name or '(без имени)' }}</a>
+            {% if row.phone_norm %}
+              <span class="muted nowrap">{{ row.phone_norm }}</span>
+            {% endif %}
+            {% if row.is_agent %}<span class="badge">агент</span>{% endif %}
+          </td>
+          <td class="nowrap" title="{{ row.triage_reason }}">
+            {{ triage_labels.get(row.triage_state, row.triage_state) }}
+          </td>
+          <td class="nowrap">
+            {{ row.assignee_name or '—' }}
+            {# Брокеров у клиента бывает несколько: колонка, показывающая
+               одного из них молча, заставляет спрашивать не с того. #}
+            {% if row.assignee_count and row.assignee_count > 1 %}
+              <span class="badge" title="Клиента ведут несколько брокеров">
+                +{{ row.assignee_count - 1 }}</span>
+            {% endif %}
+          </td>
+          <td class="num">
+            {{ row.silence_days | days if row.silence_days is not none else '—' }}
+          </td>
+          <td class="muted nowrap">{{ row.last_touch_at | date_ru if row.last_touch_at else '—' }}</td>
+          <td class="nowrap">
+            {% if row.next_step_at %}
+              {{ row.next_step_at | date_ru }}
+              {% if row.next_step_overdue %}<span class="badge badge-lost">просрочен</span>{% endif %}
+            {% else %}—{% endif %}
+          </td>
+          <td class="num">{{ row.cards }}</td>
+          <td class="nowrap">
+            {% if row.reviewed == 'yes' %}{{ row.reviewed_at | date_ru }}
+            {% elif row.reviewed == 'stale' %}<span class="muted">устарел</span>
+            {% else %}—{% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="8" class="empty">Под фильтр никто не подошёл</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  {% if pages > 1 %}
+  <div class="pagination">
+    {% if page > 1 %}
+      <a class="btn" href="?{{ qs(request, page=page - 1) }}">← назад</a>
+    {% endif %}
+    <span>страница {{ page }} из {{ pages }}</span>
+    {% if page < pages %}
+      <a class="btn" href="?{{ qs(request, page=page + 1) }}">вперёд →</a>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+
+{% endif %}
+{% endblock %}
