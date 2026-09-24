@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block title %}{{ client.name or 'Клиент' }}{% endblock %}
+
+{# Фильтры периода на карточке одного человека бессмысленны: историю
+   смотрят целиком, а не за август. #}
+{% block filters %}{% endblock %}
+
+{% block content %}
+<h1 class="section-title">
+  {{ client.name or '(без имени)' }}
+  {% if client.is_agent %}<span class="badge" title="{{ client.agent_reason }}">агент</span>{% endif %}
+</h1>
+
+<div class="grid grid-2">
+  <div class="card">
+    <div class="card-head"><div><h2>Кто это</h2></div></div>
+    <dl class="kv">
+      <dt>Телефон</dt>
+      {# Здесь сырой номер уместен и нужен: на карточке одного человека
+         брокеру важно всё, что записано рядом, — кому звонить и когда.
+         В списке его нет, потому что список уходит в выгрузки. #}
+      <dd>{{ client.phone_norm or client.phone_raw or '—' }}</dd>
+      <dt>Состояние</dt>
+      <dd>{{ triage_labels.get(client.triage_state, client.triage_state) }}
+        <span class="muted">{{ client.triage_reason }}</span></dd>
+      <dt>Ответственный</dt>
+      <dd>{{ client.assignee_name or '—' }}
+        {% if client.assignee_count and client.assignee_count > 1 %}
+          <span class="badge">всего брокеров: {{ client.assignee_count }}</span>
+        {% endif %}</dd>
+      <dt>Тишина</dt>
+      <dd>{{ client.silence_days | days if client.silence_days is not none else 'не считалась' }}</dd>
+      <dt>Следующий шаг</dt>
+      <dd>{% if client.next_step_at %}{{ client.next_step_at | date_ru }}
+          {% if client.next_step_overdue %}<span class="badge badge-lost">просрочен</span>{% endif %}
+          {% else %}не назначен{% endif %}</dd>
+      <dt>Почему этот ключ</dt>
+      <dd class="muted">{{ client.key_reason }}</dd>
+    </dl>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><div><h2>Карточки</h2></div></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Сделка</th><th>Стадия</th><th class="nowrap">Заведена</th><th></th></tr></thead>
+        <tbody>
+          {% for card in cards %}
+          <tr>
+            <td class="ellipsis" title="{{ card.title }}">{{ card.title or '—' }}</td>
+            <td class="nowrap">{{ card.stage_name or card.stage_id }}
+              {% if card.closed %}<span class="badge">закрыта</span>{% endif %}</td>
+            <td class="muted nowrap">{{ card.date_create | date_ru if card.date_create else '—' }}</td>
+            <td class="nowrap">
+              <a href="{{ crm_link('deal', card.entity_id) }}" target="_blank" rel="noopener">открыть ↗</a>
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="4" class="empty">Карточек нет</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+{% if reviews %}
+<div class="card">
+  <div class="card-head"><div><h2>Разбор</h2><p class="card-sub">Новые сверху</p></div></div>
+  {% for review in reviews %}
+  <div class="review">
+    <p class="muted">{{ review.created_at | date_ru }} · {{ review.author or 'без автора' }}
+      {% if client.last_event_at and review.reviewed_through
+            and client.last_event_at > review.reviewed_through %}
+        <span class="badge">устарел: с тех пор были события</span>
+      {% endif %}</p>
+    <p>{{ review.summary }}</p>
+    {% if review.recommendation %}<p><b>Что делать:</b> {{ review.recommendation }}</p>{% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="card-head">
+    <div>
+      <h2>Лента</h2>
+      <p class="card-sub">
+        {{ events | length | int_ru }} событий, по возрастанию времени.
+        Текст звонка открывается по ссылке — в ленту он не грузится.
+      </p>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th class="nowrap">Когда</th><th>Что</th><th>Автор</th><th>Подробности</th></tr>
+      </thead>
+      <tbody>
+        {% for event in events %}
+        <tr>
+          <td class="muted nowrap">{{ event.at | date_ru }}</td>
+          <td class="nowrap">{{ event.kind }}</td>
+          <td class="nowrap">
+            {# Автор выделяется, когда это НЕ ответственный: чужая запись в
+               карточке — это или помощь, или чужая работа, и различать их
+               должен человек, а не догадка. #}
+            {% if event.author_is_assignee == 0 %}<b>не ответственный</b>{% endif %}
+            {% if event.is_system %}<span class="badge">робот</span>{% endif %}
+          </td>
+          <td class="ellipsis">
+            {% if event.kind == 'call' %}
+              <a href="{{ base_path }}/api/calls/{{ event.source_id }}/transcript"
+                 target="_blank" rel="noopener">расшифровка ↗</a>
+            {% else %}
+              {{ event.payload.get('body') or event.payload.get('subject') or '—' }}
+            {% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4" class="empty">Событий нет</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
