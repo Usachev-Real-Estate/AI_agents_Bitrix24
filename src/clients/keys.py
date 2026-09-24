@@ -78,6 +78,12 @@ WHY_PHONE_INVALID = "телефон не разобран"
 WHY_NO_PHONE = "у контакта нет телефона"
 WHY_NO_CONTACT = "ни контакта, ни телефона"
 
+# Со скольких групп карточек одно имя перестаёт быть доводом за то, что
+# перед нами один человек. См. split_shared: порог, а не «больше одной»,
+# потому что двумя группами одно имя делают и тёзки, и заполнитель, а это
+# разные вещи с разной ценой.
+NAMESAKE_LIMIT = 2
+
 ALIAS_PHONE = "phone"
 ALIAS_CONTACT = "contact"
 
@@ -124,6 +130,7 @@ class Assignment:
     decisions: dict[int, Decision]
     conflicts: dict[str, tuple[int, ...]]
     merged: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    namesake_spread: dict[int, int] = field(default_factory=dict)
 
 
 def phone_candidates(contact: Mapping[str, Any] | None) -> tuple[tuple[str, str], ...]:
@@ -217,19 +224,26 @@ def shared_phones(
 def split_shared(
     shared: Mapping[str, tuple[int, ...]],
     contacts: Mapping[int, Mapping[str, Any]],
-) -> tuple[dict[str, tuple[int, ...]], dict[str, tuple[int, ...]]]:
-    """Разделить общие номера на склейку и конфликт. Возвращает ``(merged, conflicts)``.
+) -> tuple[dict[str, tuple[int, ...]], dict[str, tuple[int, ...]], dict[int, int]]:
+    """Разделить общие номера. Возвращает ``(merged, conflicts, spread)``.
 
     Склейка — когда все контакты на номере названы одинаково: один человек,
     заведённый дважды. Конфликт — всё остальное; обе карточки уходят на
     ``c:``, номер не становится ни ключом, ни псевдонимом, иначе псевдоним
     привёл бы к одному из двух наугад.
 
-    Одно и то же имя, встреченное в РАЗНЫХ группах карточек, склейки не даёт
-    ни одной из них. Такое имя — не человек, а заполнитель: карточки,
-    заведённые автоматом, получают одинаковую подпись, и склейка по ней
-    свела бы в одного клиента незнакомых людей с разных номеров. Отказ стоит
-    дёшево (карточки остаются там же, где были до правила), ошибка — дорого.
+    Одно и то же имя, встреченное в ``NAMESAKE_LIMIT`` группах карточек и
+    более, склейки не даёт ни одной из них. Такое имя — скорее заполнитель,
+    чем человек: карточки, заведённые автоматом, получают одинаковую
+    подпись, и склейка по ней свела бы в одного клиента незнакомых людей с
+    разных номеров.
+
+    Порог задан числом, а не «больше одной группы», потому что одно имя в
+    двух группах — это и заполнитель, и обыкновенные тёзки, а цена у них
+    разная. Тёзки — две честные пары дублей, которым отказали зря; заполнитель
+    — двое незнакомых, которых чуть не склеили. Отличить их можно только
+    числом групп, и третья величина в ответе, ``spread``, это число и
+    показывает: сколько имён на скольких группах. Имён она не содержит.
 
     Считается именно по группам, а не по номерам: у одного человека бывает
     три карточки, связанные двумя разными общими номерами, и его имя тогда
@@ -255,6 +269,11 @@ def split_shared(
     for norm, mark in named.items():
         places.setdefault(mark, set()).add(root_of[shared[norm][0]])
 
+    spread: dict[int, int] = {}
+    for groups in places.values():
+        if len(groups) > 1:
+            spread[len(groups)] = spread.get(len(groups), 0) + 1
+
     merged: dict[str, tuple[int, ...]] = {}
     conflicts: dict[str, tuple[int, ...]] = {}
     for norm, ids in shared.items():
@@ -262,9 +281,11 @@ def split_shared(
         # признаёт, — но проверяется и здесь: он ложен, и без проверки
         # словарь `places` пришлось бы читать по ключу, которого нет.
         mark = named.get(norm)
-        target = merged if mark and len(places[mark]) == 1 else conflicts
+        target = (
+            merged if mark and len(places[mark]) < NAMESAKE_LIMIT else conflicts
+        )
         target[norm] = ids
-    return merged, conflicts
+    return merged, conflicts, dict(sorted(spread.items()))
 
 
 def _components(
@@ -375,7 +396,9 @@ def assign_keys(
     См. модульный докстринг.
     """
     ordered = sorted(cards, key=lambda card: card.deal_id)
-    merged, conflicts = split_shared(shared_phones(ordered, contacts), contacts)
+    merged, conflicts, spread = split_shared(
+        shared_phones(ordered, contacts), contacts,
+    )
 
     # Проход первый: кто агент. Порядок по номеру сделки, чтобы причина,
     # попавшая в карточку клиента, не зависела от порядка выдачи портала.
@@ -403,6 +426,8 @@ def assign_keys(
             "Телефонов за разными людьми: %d — склейка по ним запрещена",
             len(conflicts),
         )
+    if spread:
+        logger.info("Имён в нескольких группах сразу: %s (групп: имён)", spread)
 
     key_phones = _key_phones(
         sorted({card.contact_id for card in ordered if card.contact_id}),
@@ -416,7 +441,8 @@ def assign_keys(
             {i for ids in merged.values() for i in ids},
             agent_by_deal, agent_by_contact,
         )
-    return Assignment(decisions=decisions, conflicts=conflicts, merged=merged)
+    return Assignment(decisions=decisions, conflicts=conflicts, merged=merged,
+                      namesake_spread=spread)
 
 
 def _decide(
