@@ -38,8 +38,25 @@ from clients.schema import clients_session
 SCOPED_VIEWS = ("v_client", "v_client_link", "v_client_event", "v_client_review")
 
 
+class BookMissing(RuntimeError):
+    """Книги клиентов нет или она пуста как файл.
+
+    Дашборд живёт независимо от ночной пересборки: его поднимают раньше,
+    чем слой собрался хоть раз, а `CLIENTS_DB_PATH` может смотреть не туда.
+    Это не «клиентов ноль» и не поломка кода — это «книги ещё нет», и
+    отвечать на такое пятисоткой значит показать человеку трассировку
+    вместо объяснения.
+    """
+
+
 def apply_scope(conn: sqlite3.Connection, scope: Scope) -> None:
     """Создать на соединении суженные представления книги."""
+    # Представление над несуществующей таблицей SQLite создаёт молча:
+    # имена он разрешает при первом запросе, а не при CREATE VIEW. Без
+    # этой проверки книга, которой нет, обнаружилась бы посреди отдачи
+    # потока — когда заголовки ответа уже ушли читателю.
+    if not _book_is_there(conn):
+        raise BookMissing("в книге клиентов нет таблицы clients")
     conn.execute("CREATE TEMP TABLE scope_department (department_id INTEGER PRIMARY KEY)")
     if not scope.unrestricted:
         conn.executemany(
@@ -68,12 +85,29 @@ def apply_scope(conn: sqlite3.Connection, scope: Scope) -> None:
         )
 
 
+def _book_is_there(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'clients'"
+    ).fetchone()
+    return row is not None
+
+
 @contextmanager
 def scoped_clients(scope: Scope) -> Iterator[sqlite3.Connection]:
     """Соединение с книгой, суженное до области видимости.
 
-    Единственный способ читать книгу из веба.
+    Единственный способ читать книгу из веба. Книги нет — ``BookMissing``,
+    и обработчик обязан сказать об этом словами.
     """
-    with clients_session(readonly=True) as conn:
+    try:
+        session = clients_session(readonly=True)
+        conn = session.__enter__()
+    except sqlite3.Error as error:
+        # Файла нет вовсе: readonly-соединение его не создаёт и падает
+        # прямо здесь.
+        raise BookMissing(str(error)) from error
+    try:
         apply_scope(conn, scope)
         yield conn
+    finally:
+        session.__exit__(None, None, None)
