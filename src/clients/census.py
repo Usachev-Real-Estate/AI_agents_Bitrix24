@@ -37,10 +37,12 @@ _AGENT_OTHER = "прочее"
 #
 # Разряды считаются по номерам, которые правило склеить ОТКАЗАЛОСЬ, —
 # склеенные уходят в свой счётчик. Поэтому «тот же человек» здесь не ноль
-# только в одном случае: имя совпало, но это же имя встретилось и на
-# другом общем номере, то есть перед нами заполнитель, а не человек
-# (см. split_shared). Этот разряд и есть цена защиты от заполнителей —
-# её видно в каждом прогоне, а не только когда что-то разъехалось.
+# только в одном случае: имя совпало, но это же имя носит слишком много
+# групп карточек (см. split_shared). Этот разряд и есть цена защиты от
+# заполнителей, и на боевом портфеле 24.09 она оказалась 20 номеров из 119
+# кандидатов — не единицы, как ожидалось. Рядом с ним поэтому стоит
+# namesake_spread: он показывает, тёзки это (имя на двух группах) или
+# настоящий заполнитель (имя на десятке).
 SAME_PERSON = "тот же человек"
 SAME_SURNAME = "одна фамилия, разные имена"
 DIFFERENT = "разные люди"
@@ -92,6 +94,7 @@ class Census:
     several_brokers: int = 0
     merged_phones: int = 0
     merged_contacts: int = 0
+    namesake_spread: dict[int, int] = field(default_factory=dict)
     conflicts: Conflicts = field(default_factory=Conflicts)
 
 
@@ -173,6 +176,7 @@ def take(
         several_brokers=several_brokers,
         merged_phones=len(assignment.merged),
         merged_contacts=len({i for ids in assignment.merged.values() for i in ids}),
+        namesake_spread=dict(assignment.namesake_spread),
         conflicts=_conflicts(assignment, contacts, linked),
     )
 

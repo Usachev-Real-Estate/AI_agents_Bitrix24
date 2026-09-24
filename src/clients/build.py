@@ -423,6 +423,8 @@ def build(*, now: datetime | None = None, dry_run: bool = False,
                 counted.both_funnels, counted.several_brokers)
     logger.info("Склеено по совпавшему имени: номеров %d, контактов %d",
                 counted.merged_phones, counted.merged_contacts)
+    logger.info("Имён в нескольких группах сразу: %s (групп: имён)",
+                counted.namesake_spread)
     logger.info("Спорные телефоны: %s", counted.conflicts.as_dict())
 
     summary: dict[str, Any] = {

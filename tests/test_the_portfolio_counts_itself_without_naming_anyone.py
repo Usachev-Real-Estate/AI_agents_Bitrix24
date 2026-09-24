@@ -107,6 +107,10 @@ def test_one_name_on_many_numbers_is_a_placeholder_not_a_person():
     assert got.conflicts.total == 2
     assert _verdicts(got)[census.SAME_PERSON] == 2
     assert got.clients == 4
+    assert got.namesake_spread == {2: 1}, (
+        "рядом с ценой защиты стоит её причина: одно имя на двух группах —"
+        " это тёзки, на десятке — заполнитель, и отказ у них один и тот же"
+    )
 
 
 def test_a_nameless_stub_against_a_living_card_is_told_apart():
@@ -299,6 +303,7 @@ def test_the_count_holds_no_names_and_no_numbers():
             "both_funnels": got.both_funnels, "several_brokers": got.several_brokers,
             "merged_phones": got.merged_phones,
             "merged_contacts": got.merged_contacts,
+            "namesake_spread": got.namesake_spread,
         },
         ensure_ascii=False,
     )

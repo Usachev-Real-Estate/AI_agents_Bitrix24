@@ -16,6 +16,7 @@
 разные люди. Правило, отказывавшее всем, ошибалось ровно в половине случаев.
 """
 
+from clients import keys
 from clients.keys import (
     WHY_AGENT,
     WHY_CONFLICT,
@@ -215,6 +216,69 @@ def test_one_name_on_two_numbers_glues_neither():
     assert got.merged == {}
     assert sorted(got.conflicts) == ["+79000001111", "+79000002222"]
     assert {d.key for d in got.decisions.values()} == {"c:71", "c:72", "c:73", "c:74"}
+
+
+def test_the_count_of_groups_sharing_a_name_is_reported():
+    """Сколько имён на скольких группах — отдельное число в ответе.
+
+    Без него отказ по заполнителю неотличим от отказа по тёзкам: и там и
+    там «имя совпало, а склейки нет». А это разные вещи с разной ценой —
+    тёзки это две честные пары дублей, которым отказали зря, заполнитель
+    это двое незнакомых, которых чуть не склеили. Разброс и есть то
+    единственное, чем они различаются, и имён в нём нет.
+    """
+    cards = [Card(i, contact_id=70 + i) for i in range(1, 7)]
+    contacts = {
+        71: _contact("+79000001111"), 72: _contact("+79000001111"),
+        73: _contact("+79000002222"), 74: _contact("+79000002222"),
+        75: _contact("+79000003333", name="Другой"),
+        76: _contact("+79000003333", name="Другой"),
+    }
+
+    got = _one(cards, contacts)
+
+    assert got.namesake_spread == {2: 1}, "одно имя на двух группах, второе на одной"
+    assert got.merged == {"+79000003333": (75, 76)}
+
+
+def test_a_name_met_once_does_not_enter_the_spread():
+    """Имя, встреченное в одной группе, в разброс не попадает.
+
+    Иначе разброс считал бы все склейки подряд и перестал бы отвечать на
+    свой вопрос — «много ли имён, носимых сразу несколькими группами».
+    """
+    cards = [Card(1, contact_id=77), Card(2, contact_id=88)]
+    contacts = {77: _contact("+79001112233"), 88: _contact("+79001112233")}
+
+    assert _one(cards, contacts).namesake_spread == {}
+
+
+def test_the_namesake_limit_is_a_number_and_not_a_hardcoded_two():
+    """Порог вынесен константой, и правило считает именно по ней.
+
+    На боевом портфеле 24.09 защита съела 20 склеек из 119 — не единицы,
+    как ожидалось. Решать, тёзки это или заполнители, будет замер, и тогда
+    порог придётся двигать. Правило, в котором «больше одной группы» зашито
+    выражением, двигать пришлось бы правкой условия.
+    """
+    assert keys.NAMESAKE_LIMIT == 2
+
+    cards = [Card(i, contact_id=70 + i) for i in range(1, 5)]
+    contacts = {
+        71: _contact("+79000001111"), 72: _contact("+79000001111"),
+        73: _contact("+79000002222"), 74: _contact("+79000002222"),
+    }
+    assert _one(cards, contacts).merged == {}, "при пороге 2 тёзки не склеиваются"
+
+    keys.NAMESAKE_LIMIT = 3
+    try:
+        got = _one(cards, contacts)
+    finally:
+        keys.NAMESAKE_LIMIT = 2
+
+    assert sorted(got.merged) == ["+79000001111", "+79000002222"], (
+        "при пороге 3 имя на двух группах снова считается доводом"
+    )
 
 
 def test_a_nameless_twin_is_not_glued():
