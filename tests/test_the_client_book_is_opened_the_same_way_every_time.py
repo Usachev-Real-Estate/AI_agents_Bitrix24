@@ -153,6 +153,35 @@ def test_the_tables_are_created_by_ddl_alone(tmp_path):
         conn.close()
 
 
+def test_a_column_added_later_reaches_a_book_opened_earlier(tmp_path):
+    """Книга прежней редакции дополняется, а не заводится заново.
+
+    Заново нельзя: в ней уже лежат разборы, переезды ключей и лента — всё,
+    что нельзя пересчитать из портала. Проверяется каждая дописываемая
+    колонка, а не последняя: список _ADDED_COLUMNS растёт, и молча
+    выпавшая из него колонка обнаружилась бы на боевой базе, где новых
+    книг никто больше не заводит.
+    """
+    db_path = tmp_path / "clients.db"
+    init_clients_db(db_path)
+    with clients_session(db_path) as conn:
+        for name, _declaration in schema._ADDED_COLUMNS:
+            conn.execute(f"ALTER TABLE clients DROP COLUMN {name}")
+        conn.execute("UPDATE clients_meta SET value = '1' WHERE key = 'schema_version'")
+        conn.execute(
+            "INSERT INTO clients(client_key, updated_at) VALUES ('c:77', '')"
+        )
+
+    init_clients_db(db_path)
+
+    with clients_session(db_path, readonly=True) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(clients)")}
+        kept = conn.execute("SELECT COUNT(*) FROM clients").fetchone()[0]
+
+    assert {name for name, _ in schema._ADDED_COLUMNS} <= columns
+    assert kept == 1, "прежние клиенты пережили дополнение схемы"
+
+
 def test_the_version_is_written_down(tmp_path):
     """Версия схемы записана в базу, иначе следующий init не с чем сверять."""
     db_path = tmp_path / "clients.db"

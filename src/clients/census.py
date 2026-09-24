@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from clients.keys import AGENT_STAGE_WHY, Assignment
+from clients.names import fingerprint, name_parts
 
 # Во что складывать причины признака агента. Порядок важен: строки причин
 # приходят из classify_counterparty свободным текстом, и первая подошедшая
@@ -32,15 +33,14 @@ _AGENT_BUCKETS = (
 )
 _AGENT_OTHER = "прочее"
 
-_NAME_FIELDS = ("LAST_NAME", "NAME", "SECOND_NAME")
-
-# Чем объясняется спорный номер.
+# Чем объясняется номер, оставшийся спорным.
 #
-# ТЗ отказывается склеивать два контакта с одним телефоном, предполагая
-# двух разных людей. Агентство говорит обратное: один человек бывает и
-# собственником, и покупателем, и ведут его разные брокеры — то есть двумя
-# карточками он оказывается штатно, а не по ошибке. Разряды ниже и
-# различают эти два объяснения, не показав ни одного имени.
+# Разряды считаются по номерам, которые правило склеить ОТКАЗАЛОСЬ, —
+# склеенные уходят в свой счётчик. Поэтому «тот же человек» здесь не ноль
+# только в одном случае: имя совпало, но это же имя встретилось и на
+# другом общем номере, то есть перед нами заполнитель, а не человек
+# (см. split_shared). Этот разряд и есть цена защиты от заполнителей —
+# её видно в каждом прогоне, а не только когда что-то разъехалось.
 SAME_PERSON = "тот же человек"
 SAME_SURNAME = "одна фамилия, разные имена"
 DIFFERENT = "разные люди"
@@ -90,6 +90,8 @@ class Census:
     agents_by_reason: dict[str, int] = field(default_factory=dict)
     both_funnels: int = 0
     several_brokers: int = 0
+    merged_phones: int = 0
+    merged_contacts: int = 0
     conflicts: Conflicts = field(default_factory=Conflicts)
 
 
@@ -100,27 +102,15 @@ def _bucket(reason: str) -> str:
     return _AGENT_OTHER
 
 
-def _parts(contact: Mapping[str, Any] | None) -> list[str]:
-    """Непустые части имени контакта в сравнимом виде."""
-    if not contact:
-        return []
-    return [
-        value for value in (
-            str(contact.get(field_name) or "").strip().casefold()
-            for field_name in _NAME_FIELDS
-        ) if value
-    ]
-
-
 def _verdict(ids: tuple[int, ...], contacts: Mapping[int, Mapping[str, Any]]) -> str:
-    """Чем объясняется один спорный номер.
+    """Чем объясняется один общий номер.
 
     Сравнивается имя ЦЕЛИКОМ, а не только фамилия. В карточках, заведённых
     автоматически по входящему звонку, фамилия чаще всего пуста, а имя
     лежит в одном поле строкой; первая редакция этого разбора опёрлась на
     фамилию и отправила в «не знаем» 231 конфликт из 237.
     """
-    named = [_parts(contacts.get(contact_id)) for contact_id in ids]
+    named = [name_parts(contacts.get(contact_id)) for contact_id in ids]
     known = [parts for parts in named if parts]
     if not known:
         return NO_NAMES
@@ -128,7 +118,7 @@ def _verdict(ids: tuple[int, ...], contacts: Mapping[int, Mapping[str, Any]]) ->
         # Безымянный огрызок против живой карточки. Почти наверняка та же
         # запись, заведённая автоматом, — но «почти» здесь и есть ответ.
         return ONE_NAMELESS
-    if len({" ".join(sorted(parts)) for parts in known}) == 1:
+    if len({fingerprint(contacts.get(contact_id)) for contact_id in ids}) == 1:
         return SAME_PERSON
     surnames = {parts[0] for parts in known}
     return SAME_SURNAME if len(surnames) == 1 else DIFFERENT
@@ -181,6 +171,8 @@ def take(
         agents_by_reason=dict(sorted(agents_by_reason.items(), key=lambda pair: -pair[1])),
         both_funnels=both_funnels,
         several_brokers=several_brokers,
+        merged_phones=len(assignment.merged),
+        merged_contacts=len({i for ids in assignment.merged.values() for i in ids}),
         conflicts=_conflicts(assignment, contacts, linked),
     )
 

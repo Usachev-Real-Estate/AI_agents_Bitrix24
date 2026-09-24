@@ -45,7 +45,8 @@ DEFAULT_DB_PATH = Path("data/clients.db")
 BUSY_TIMEOUT_MS = 10_000
 
 # 2: колонка key_reason в clients — почему ключ получился таким.
-SCHEMA_VERSION = 2
+# 3: колонка assignee_count — сколько брокеров ведёт клиента на самом деле.
+SCHEMA_VERSION = 3
 
 # --------------------------------------------------------------------------
 # словарь значений
@@ -167,6 +168,7 @@ _DDL: tuple[str, ...] = (
         name                  TEXT    NOT NULL DEFAULT '',
         assignee_id           INTEGER,
         assignee_name         TEXT    NOT NULL DEFAULT '',
+        assignee_count        INTEGER,
         department_id         INTEGER,
         triage_state          TEXT    NOT NULL DEFAULT 'unknown',
         triage_reason         TEXT    NOT NULL DEFAULT '',
@@ -406,16 +408,24 @@ def clients_session(
         conn.close()
 
 
-def _migrate_key_reason(conn: sqlite3.Connection) -> None:
-    """Добавить причину ключа базам, заведённым до правила раздела 2.4.
+# Колонки, дописываемые в уже заведённую clients. Все наполняются ближайшей
+# полной пересборкой — ключ и агрегаты считаются заново каждым прогоном, —
+# поэтому значения по умолчанию здесь только «мы это ещё не считали».
+_ADDED_COLUMNS = (
+    ("key_reason", "TEXT NOT NULL DEFAULT ''"),
+    # Без DEFAULT 0 по той же причине, что и остальные счётчики: ноль
+    # брокеров невозможен, и он означал бы не «их нет», а «не считали».
+    ("assignee_count", "INTEGER"),
+)
 
-    Колонка появляется пустой и наполняется ближайшей пересборкой: ключ
-    считается заново каждым полным прогоном, вместе с ним и причина.
-    """
-    try:
-        conn.execute("ALTER TABLE clients ADD COLUMN key_reason TEXT NOT NULL DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass
+
+def _migrate_columns(conn: sqlite3.Connection) -> None:
+    """Дописать колонки базам, заведённым прежними редакциями схемы."""
+    for name, declaration in _ADDED_COLUMNS:
+        try:
+            conn.execute(f"ALTER TABLE clients ADD COLUMN {name} {declaration}")
+        except sqlite3.OperationalError:
+            pass
 
 
 def _schema_is_current(db_path: str | Path | None) -> bool:
@@ -449,7 +459,7 @@ def init_clients_db(db_path: str | Path | None = None) -> None:
     with clients_session(db_path) as conn:
         for statement in _DDL:
             conn.execute(statement)
-        _migrate_key_reason(conn)
+        _migrate_columns(conn)
         conn.execute(
             "INSERT INTO clients_meta(key, value) VALUES('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",

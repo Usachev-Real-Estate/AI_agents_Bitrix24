@@ -6,10 +6,12 @@
 не склеивает никого: приоритет 1 раздела 2.4 отменён правилом конфликта из
 того же раздела.
 
-Чтобы решать, смягчать ли конфликт, нужно знать, чем он на самом деле
-объясняется. Агентство говорит: один человек бывает и собственником, и
-покупателем, и ведут его разные брокеры — то есть двумя карточками он
-оказывается штатно, а не по ошибке. Разбор и различает эти объяснения.
+Разбор ответил: из 237 спорных номеров 116 — один и тот же человек,
+заведённый дважды, 120 — действительно разные люди. Правило по этому ответу
+исправлено (см. clients.names), и разбор остаётся при нём дальше: он считает,
+сколько номеров склеилось по совпавшему имени, а сколько осталось спорными и
+почему именно. Без этого счёта изменение правила пришлось бы принимать на
+веру каждую ночь.
 
 Имён при этом не показывает ни одного: он уходит в лог крона, а лог
 пересылают.
@@ -52,12 +54,19 @@ def _verdicts(got):
     return got.conflicts.by_verdict
 
 
-def test_one_person_entered_twice_is_told_apart():
-    """Имя совпало целиком — это дубль, а не два человека."""
+def test_one_person_entered_twice_becomes_one_client():
+    """Имя совпало целиком — это дубль, и он склеивается, а не считается.
+
+    Ради этого разбор и затевался: две карточки одного человека на одном
+    номере обязаны стать одним клиентом, а не двумя строками списка, по
+    которым брокер звонит дважды.
+    """
     got = _sharing_one_number(_contact(), _contact())
 
-    assert got.conflicts.total == 1
-    assert _verdicts(got)[census.SAME_PERSON] == 1
+    assert got.clients == 1
+    assert got.merged_phones == 1
+    assert got.merged_contacts == 2
+    assert got.conflicts.total == 0, "склеенный номер спорным больше не числится"
 
 
 def test_a_name_in_one_field_is_still_a_name():
@@ -73,8 +82,31 @@ def test_a_name_in_one_field_is_still_a_name():
         _contact(last="", first="Иван Петров"),
     )
 
-    assert _verdicts(got)[census.SAME_PERSON] == 1
-    assert _verdicts(got)[census.NO_NAMES] == 0
+    assert got.clients == 1
+    assert got.merged_phones == 1
+
+
+def test_one_name_on_many_numbers_is_a_placeholder_not_a_person():
+    """Одно имя на разных общих номерах — заполнитель, и склейки не даёт.
+
+    Карточки, заведённые автоматом, получают одну и ту же подпись. Склейка
+    по ней собрала бы в одного клиента незнакомых людей с разных номеров —
+    самую дорогую из возможных ошибок. Защита видна в разборе: такие номера
+    остаются спорными с вердиктом «тот же человек», и цена её известна
+    числом в каждом прогоне.
+    """
+    cards = [Card(i, contact_id=70 + i) for i in range(1, 5)]
+    contacts = {
+        71: _contact(phone="+79001110001"), 72: _contact(phone="+79001110001"),
+        73: _contact(phone="+79001110002"), 74: _contact(phone="+79001110002"),
+    }
+
+    got = _take(cards, contacts)
+
+    assert got.merged_phones == 0
+    assert got.conflicts.total == 2
+    assert _verdicts(got)[census.SAME_PERSON] == 2
+    assert got.clients == 4
 
 
 def test_a_nameless_stub_against_a_living_card_is_told_apart():
@@ -265,6 +297,8 @@ def test_the_count_holds_no_names_and_no_numbers():
             "conflicts": got.conflicts.as_dict(),
             "cards": got.cards, "clients": got.clients, "agents": got.agents,
             "both_funnels": got.both_funnels, "several_brokers": got.several_brokers,
+            "merged_phones": got.merged_phones,
+            "merged_contacts": got.merged_contacts,
         },
         ensure_ascii=False,
     )

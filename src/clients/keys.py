@@ -12,6 +12,13 @@
 2. ``c:<CONTACT_ID>`` — контакт есть, телефон не годится;
 3. ``d:<DEAL_ID>`` — нет ни того, ни другого.
 
+**Номер, числящийся за двумя контактами, склеивает их, только если это
+один и тот же человек.** Первая редакция правила отказывала всем таким
+номерам, предполагая двух разных людей. Измерение живого портфеля
+(сентябрь, 237 спорных номеров) показало, что предположение верно ровно в
+половине случаев: 120 — действительно разные люди, 116 — один человек,
+заведённый дважды. Различает их имя; сравнение живёт в `clients.names`.
+
 **Агент по телефону не склеивается, и признак агента накапливается по
 контакту.** Решение агентства: одна сделка назвала контрагента агентом —
 агент и все остальные сделки этого контакта. Без накопления признак
@@ -37,8 +44,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping, Sequence
+from typing import AbstractSet, Any, Iterable, Mapping, Sequence
 
+from clients.names import fingerprint, one_person
 from counterparty import WHO_AGENT, classify_counterparty
 from kc_owner_import import normalize_phone
 
@@ -63,6 +71,7 @@ AGENT_STAGE_WHY = "стадия «Агент»"
 # «почему эти две карточки не один клиент» задают чаще всех остальных, и
 # отвечать на него чтением кода — значит не отвечать.
 WHY_PHONE = "склейка по телефону"
+WHY_PHONE_SHARED = "склейка по телефону: имя совпало"
 WHY_AGENT = "агент: склейка по телефону запрещена"
 WHY_CONFLICT = "телефон числится за двумя контактами"
 WHY_PHONE_INVALID = "телефон не разобран"
@@ -105,10 +114,16 @@ class Decision:
 
 @dataclass(frozen=True)
 class Assignment:
-    """Ключи всего портфеля и телефоны, по которым склейка запрещена."""
+    """Ключи портфеля и разбор номеров, которые делят несколько контактов.
+
+    ``conflicts`` — по ним склейка запрещена, ``merged`` — по ним она,
+    наоборот, и состоялась: контакты названы одинаково, значит это один
+    человек с двумя карточками.
+    """
 
     decisions: dict[int, Decision]
     conflicts: dict[str, tuple[int, ...]]
+    merged: dict[str, tuple[int, ...]] = field(default_factory=dict)
 
 
 def phone_candidates(contact: Mapping[str, Any] | None) -> tuple[tuple[str, str], ...]:
@@ -176,15 +191,13 @@ def _agent_why(card: Card, contact: Mapping[str, Any] | None,
     return ""
 
 
-def phone_conflicts(
+def shared_phones(
     cards: Iterable[Card],
     contacts: Mapping[int, Mapping[str, Any]],
 ) -> dict[str, tuple[int, ...]]:
     """Телефоны, которые числятся больше чем за одним контактом.
 
-    Такой номер не склеивает, а путает: два разных человека получили бы
-    один ключ. Обе карточки уходят на ``c:``, номер не становится ни ключом,
-    ни псевдонимом — иначе псевдоним привёл бы к одному из двух наугад.
+    Голый факт, без толкования: что он значит — решает ``split_shared``.
 
     Считается только по контактам, которые действительно стоят на карточках
     портфеля. Посторонний контакт, случайно попавший в справочник, не должен
@@ -201,6 +214,154 @@ def phone_conflicts(
     }
 
 
+def split_shared(
+    shared: Mapping[str, tuple[int, ...]],
+    contacts: Mapping[int, Mapping[str, Any]],
+) -> tuple[dict[str, tuple[int, ...]], dict[str, tuple[int, ...]]]:
+    """Разделить общие номера на склейку и конфликт. Возвращает ``(merged, conflicts)``.
+
+    Склейка — когда все контакты на номере названы одинаково: один человек,
+    заведённый дважды. Конфликт — всё остальное; обе карточки уходят на
+    ``c:``, номер не становится ни ключом, ни псевдонимом, иначе псевдоним
+    привёл бы к одному из двух наугад.
+
+    Одно и то же имя, встреченное в РАЗНЫХ группах карточек, склейки не даёт
+    ни одной из них. Такое имя — не человек, а заполнитель: карточки,
+    заведённые автоматом, получают одинаковую подпись, и склейка по ней
+    свела бы в одного клиента незнакомых людей с разных номеров. Отказ стоит
+    дёшево (карточки остаются там же, где были до правила), ошибка — дорого.
+
+    Считается именно по группам, а не по номерам: у одного человека бывает
+    три карточки, связанные двумя разными общими номерами, и его имя тогда
+    встречается дважды, оставаясь одним человеком. Счёт по номерам отказал
+    бы ему в склейке — ровно там, где она нужнее всего.
+    """
+    named: dict[str, str] = {}
+    for norm, ids in shared.items():
+        group = [contacts.get(contact_id) for contact_id in ids]
+        if one_person(group):
+            named[norm] = fingerprint(group[0])
+
+    # Группы строятся ДО защиты: именно они и показывают, один это человек
+    # с тремя карточками или разные люди под одной подписью.
+    by_name = {norm: shared[norm] for norm in named}
+    root_of: dict[int, int] = {}
+    for root, members in _components(
+        sorted({i for ids in by_name.values() for i in ids}), by_name,
+    ).items():
+        root_of.update(dict.fromkeys(members, root))
+
+    places: dict[str, set[int]] = {}
+    for norm, mark in named.items():
+        places.setdefault(mark, set()).add(root_of[shared[norm][0]])
+
+    merged: dict[str, tuple[int, ...]] = {}
+    conflicts: dict[str, tuple[int, ...]] = {}
+    for norm, ids in shared.items():
+        # Пустой отпечаток сюда не попадает — `one_person` безымянных не
+        # признаёт, — но проверяется и здесь: он ложен, и без проверки
+        # словарь `places` пришлось бы читать по ключу, которого нет.
+        mark = named.get(norm)
+        target = merged if mark and len(places[mark]) == 1 else conflicts
+        target[norm] = ids
+    return merged, conflicts
+
+
+def _components(
+    used: Iterable[int],
+    merged: Mapping[str, tuple[int, ...]],
+) -> dict[int, list[int]]:
+    """Контакты, признанные одним человеком, — одной группой.
+
+    Группа, а не пара: у контакта бывает несколько номеров, и общий номер с
+    одним соседом плюс общий номер с другим делают всех троих одним
+    человеком. Без сведения в группу правило рассыпалось бы ровно там, где
+    оно нужнее всего — на человеке с тремя карточками.
+    """
+    parent = {contact_id: contact_id for contact_id in used}
+
+    def find(node: int) -> int:
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    for ids in merged.values():
+        first = find(ids[0])
+        for other in ids[1:]:
+            root = find(other)
+            if root != first:
+                parent[root] = first
+
+    groups: dict[int, list[int]] = {}
+    for contact_id in sorted(parent):
+        groups.setdefault(find(contact_id), []).append(contact_id)
+    return groups
+
+
+def _key_phones(
+    used: Iterable[int],
+    contacts: Mapping[int, Mapping[str, Any]],
+    conflicts: Mapping[str, tuple[int, ...]],
+    merged: Mapping[str, tuple[int, ...]],
+    agent_by_contact: Mapping[int, str],
+) -> dict[int, str]:
+    """Контакт → номер, который станет его ключом.
+
+    Номер выбирается на ГРУППУ, а не на контакт, и в этом весь смысл. Пусть
+    у Петрова два номера, A и B, а у его второй карточки только A, и по
+    имени они признаны одним человеком. Выбор «меньший из своих» дал бы
+    первой карточке ключ B, второй — A, и склейка, ради которой всё
+    затевалось, не состоялась бы. Меньший по группе даёт обеим один ключ.
+
+    У группы с признаком агента ключа по телефону нет вовсе: склейка
+    агентов по номеру запрещена, а признак к этому месту уже разошёлся по
+    всей группе.
+    """
+    out: dict[int, str] = {}
+    for members in _components(used, merged).values():
+        if any(contact_id in agent_by_contact for contact_id in members):
+            continue
+        usable = sorted({
+            norm
+            for contact_id in members
+            for norm, _raw in phone_candidates(contacts.get(contact_id))
+            if norm and norm not in conflicts
+        })
+        if usable:
+            out.update(dict.fromkeys(members, usable[0]))
+    return out
+
+
+def _spread_agents(
+    agent_by_contact: dict[int, str],
+    merged: Mapping[str, tuple[int, ...]],
+) -> None:
+    """Признак агента переходит на все карточки одного человека.
+
+    Решение агентства — «одна сделка назвала агентом, значит агент» — про
+    человека, а не про строку справочника. Если две карточки признаны одним
+    человеком, агент по одной из них агент и по второй; иначе один и тот же
+    человек оказался бы наполовину агентом, и половина его сделок склеилась
+    бы по телефону, а половина нет.
+
+    Повторяется до неподвижности: контакт бывает в двух общих номерах сразу,
+    и признак обязан пройти по цепочке целиком. Набор конечен и только
+    растёт, поэтому цикл заканчивается.
+    """
+    changed = True
+    while changed:
+        changed = False
+        for ids in merged.values():
+            why = next((agent_by_contact[i] for i in ids if i in agent_by_contact), "")
+            if not why:
+                continue
+            for contact_id in ids:
+                if contact_id not in agent_by_contact:
+                    agent_by_contact[contact_id] = why
+                    changed = True
+
+
 def assign_keys(
     cards: Sequence[Card],
     contacts: Mapping[int, Mapping[str, Any]],
@@ -214,7 +375,7 @@ def assign_keys(
     См. модульный докстринг.
     """
     ordered = sorted(cards, key=lambda card: card.deal_id)
-    conflicts = phone_conflicts(ordered, contacts)
+    merged, conflicts = split_shared(shared_phones(ordered, contacts), contacts)
 
     # Проход первый: кто агент. Порядок по номеру сделки, чтобы причина,
     # попавшая в карточку клиента, не зависела от порядка выдачи портала.
@@ -228,30 +389,46 @@ def assign_keys(
         if card.contact_id:
             agent_by_contact.setdefault(card.contact_id, why)
 
+    _spread_agents(agent_by_contact, merged)
+
     if agent_by_contact:
         logger.info("Агентских контактов: %d", len(agent_by_contact))
+    if merged:
+        logger.info(
+            "Номеров, склеенных по совпавшему имени: %d — контактов %d",
+            len(merged), len({i for ids in merged.values() for i in ids}),
+        )
     if conflicts:
         logger.warning(
-            "Телефонов за двумя контактами: %d — склейка по ним запрещена",
+            "Телефонов за разными людьми: %d — склейка по ним запрещена",
             len(conflicts),
         )
+
+    key_phones = _key_phones(
+        sorted({card.contact_id for card in ordered if card.contact_id}),
+        contacts, conflicts, merged, agent_by_contact,
+    )
 
     decisions: dict[int, Decision] = {}
     for card in ordered:
         decisions[card.deal_id] = _decide(
-            card, contacts, conflicts, agent_by_deal, agent_by_contact,
+            card, contacts, conflicts, key_phones,
+            {i for ids in merged.values() for i in ids},
+            agent_by_deal, agent_by_contact,
         )
-    return Assignment(decisions=decisions, conflicts=conflicts)
+    return Assignment(decisions=decisions, conflicts=conflicts, merged=merged)
 
 
 def _decide(
     card: Card,
     contacts: Mapping[int, Mapping[str, Any]],
     conflicts: Mapping[str, tuple[int, ...]],
+    key_phones: Mapping[int, str],
+    merged_contacts: AbstractSet[int],
     agent_by_deal: Mapping[int, str],
     agent_by_contact: Mapping[int, str],
 ) -> Decision:
-    """Ключ одной карточки при уже известных агентах и конфликтах."""
+    """Ключ одной карточки при уже известных агентах и разобранных номерах."""
     contact_id = card.contact_id or None
     # Контакт берётся по идентификатору с карточки, а не по тому, отдал ли
     # его портал: удалённый контакт всё ещё группирует свои сделки, и
@@ -270,14 +447,29 @@ def _decide(
     if contact_id:
         aliases.append((ALIAS_CONTACT, str(contact_id)))
 
-    if usable and not is_agent:
-        phone_norm, phone_raw = usable[0]
+    # Номер ключа выбран на группу, а не на контакт: см. _key_phones.
+    key_phone = key_phones.get(contact_id or 0, "")
+    own = dict(usable)
+
+    if key_phone and not is_agent:
+        phone_norm = key_phone
+        # На экране — СВОЙ номер карточки, даже когда ключ взят от соседней
+        # карточки того же человека: брокер звонит по тому, что записано у
+        # него, а не по тому, что выиграло сортировку.
+        phone_raw = own.get(key_phone) or (usable[0][1] if usable else "")
         key = f"{KEY_PHONE}:{phone_norm}"
-        reason = WHY_PHONE
+        # Причина смотрит на КАРТОЧКУ, а не на номер: клиент, собранный по
+        # совпавшему имени, мог уехать ключом на второй телефон, который сам
+        # ни за кем больше не числится. Сказать про него «склейка по
+        # телефону» значит не ответить на вопрос, ради которого причину и
+        # завели, — почему эти две карточки оказались одним человеком.
+        reason = WHY_PHONE_SHARED if contact_id in merged_contacts else WHY_PHONE
         # Остальные пригодные номера ведут к тому же клиенту. Телефоны
         # агента и спорные номера не попадают сюда никогда: псевдоним —
         # это «искать клиента по этому номеру», а по ним искать нельзя.
-        aliases.extend((ALIAS_PHONE, norm) for norm, _ in usable[1:])
+        aliases.extend(
+            (ALIAS_PHONE, norm) for norm, _ in usable if norm != key_phone
+        )
     else:
         phone_norm = None
         phone_raw = valid[0][1] if valid else (candidates[0][1] if candidates else "")

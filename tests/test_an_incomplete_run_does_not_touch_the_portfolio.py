@@ -12,6 +12,7 @@ V13), — и для клиентского слоя этого мало. Кон�
 остальное, что делает прогон целиком.
 """
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -340,9 +341,156 @@ def test_the_client_belongs_to_the_broker_of_his_newest_deal(book, portfolio, po
     assert row["assignee_id"] == 20, "сделка двухдневной давности свежее сорокадневной"
     assert row["assignee_name"] == "Новикова Анна"
     assert row["department_id"] == 9, "отдел берётся у того же человека"
+    assert row["assignee_count"] == 2, (
+        "рядом с «кто ведёт сейчас» стоит «сколько их всего»: одного поля мало,"
+        " когда клиента ведут двое"
+    )
     links = _rows(book, "SELECT entity_id FROM client_links"
                         " WHERE client_key = 'p:+79001112233' ORDER BY entity_id")
     assert [row["entity_id"] for row in links] == [7, 12], "обе сделки у одного клиента"
+
+
+def test_a_client_led_by_one_broker_counts_one(book, portfolio, portal):
+    """Обратная половина счётчика: один брокер — единица, а не пусто.
+
+    Пусто означало бы «не считали»: остальные счётчики книги живут по этому
+    правилу, и брокеры обязаны жить по нему же, иначе фильтр «у кого больше
+    одного» молча пропустит тех, кого ещё не считали.
+    """
+    build_mod.build(now=NOW)
+
+    row = _rows(book, "SELECT * FROM clients WHERE client_key = 'p:+79001112233'")[0]
+    assert row["assignee_count"] == 1
+
+
+def test_two_cards_of_one_person_become_one_client_with_two_brokers(
+    book, portfolio, portal,
+):
+    """Сквозная проверка всей правки: дубль склеивается, брокеры считаются.
+
+    Один человек заведён дважды — один номер, одно имя, две карточки, два
+    разных брокера. До исправления правила такой номер объявлялся спорным и
+    давал двух клиентов; брокер видел одного покупателя дважды и звонил ему
+    дважды. Теперь это один клиент, и рядом с ответственным честно стоит,
+    что ведут его двое.
+    """
+    with analytics_session() as conn:
+        conn.execute(
+            "INSERT INTO dim_user(user_id, name, last_name, department_id,"
+            " synced_at) VALUES (20, 'Анна', 'Новикова', 9, ?)", (SYNCED,),
+        )
+        conn.execute(
+            "INSERT INTO fact_deal(deal_id, title, category_id, stage_id,"
+            " assigned_by_id, contact_id, date_create, is_deleted, synced_at)"
+            " VALUES (13, 'он же, второй картой', 18, 'C18:NEW', 20, 99, ?, 0, ?)",
+            (_at(1), SYNCED),
+        )
+    twin = dict(CONTACTS)
+    twin[99] = {"ID": "99", "NAME": "Пётр", "LAST_NAME": "Сидоров",
+                "PHONE": [{"VALUE": "8 900 111 22 33"}]}
+    portal(twin)
+
+    build_mod.build(now=NOW)
+
+    rows = _rows(book, "SELECT * FROM clients WHERE contact_id IN (77, 99)")
+    assert len(rows) == 1, "две карточки одного человека — один клиент"
+    assert rows[0]["client_key"] == "p:+79001112233"
+    assert rows[0]["key_reason"] == "склейка по телефону: имя совпало"
+    assert rows[0]["assignee_count"] == 2
+    assert rows[0]["assignee_id"] == 20, "ведёт тот, у кого свежая сделка"
+    links = _rows(book, "SELECT entity_id FROM client_links"
+                        " WHERE client_key = 'p:+79001112233' ORDER BY entity_id")
+    assert [row["entity_id"] for row in links] == [7, 13]
+
+
+def _conflicted(portal):
+    """Посадить два разных человека на один номер и пересобрать."""
+    both = dict(CONTACTS)
+    both[88] = dict(CONTACTS[88], PHONE=[{"VALUE": "+79001112233"}])
+    portal(both)
+
+
+def test_a_contested_number_is_written_down_and_not_only_logged(
+    book, portfolio, portal,
+):
+    """Спорный номер остаётся в базе, а не только в ночном логе.
+
+    Лог ротируется, а вопрос «этот номер давно так или со вчера» задаёт тот,
+    кто разбирается с конкретным клиентом, — и задаёт его днём. Таблица
+    `merge_conflicts` заведена схемой ровно под это; пустая, она делала бы
+    вид, что спорных номеров в портфеле нет.
+    """
+    _conflicted(portal)
+
+    build_mod.build(now=NOW)
+
+    rows = _rows(book, "SELECT * FROM merge_conflicts")
+    assert len(rows) == 1
+    assert rows[0]["phone_norm"] == "+79001112233"
+    assert json.loads(rows[0]["contact_ids_json"]) == [77, 88]
+    assert rows[0]["detected_at"] == rows[0]["last_seen_at"] == NOW.isoformat()
+
+
+def test_an_old_conflict_keeps_the_day_it_was_first_seen(book, portfolio, portal):
+    """Второй прогон обновляет «видели», но не «обнаружили».
+
+    Иначе конфликт, живущий полгода, каждую ночь выглядел бы свежим, и
+    отличить застарелую путаницу от вчерашней опечатки стало бы нечем.
+    """
+    _conflicted(portal)
+    build_mod.build(now=NOW)
+    later = NOW + timedelta(days=3)
+
+    build_mod.build(now=later)
+
+    rows = _rows(book, "SELECT * FROM merge_conflicts")
+    assert len(rows) == 1, "ключ по номеру: таблица не растёт с каждым прогоном"
+    assert rows[0]["detected_at"] == NOW.isoformat()
+    assert rows[0]["last_seen_at"] == later.isoformat()
+
+
+def test_a_conflict_that_went_away_is_not_erased(book, portfolio, portal):
+    """Разошедшийся конфликт остаётся строкой со старым «видели».
+
+    Удалить её значит стереть единственную запись о том, что эти два
+    контакта когда-то делили номер. Прогон, который его не встретил, о нём
+    молчит — этим молчанием конфликт и «рассасывается».
+    """
+    _conflicted(portal)
+    build_mod.build(now=NOW)
+    portal(CONTACTS)
+
+    build_mod.build(now=NOW + timedelta(days=3))
+
+    rows = _rows(book, "SELECT * FROM merge_conflicts")
+    assert len(rows) == 1
+    assert rows[0]["last_seen_at"] == NOW.isoformat(), "видели в прошлый раз, не сейчас"
+
+
+def test_a_night_without_the_portal_wakes_the_admin(book, portfolio, portal, monkeypatch):
+    """Прогон, не тронувший портфель, выходит с ненулевым кодом.
+
+    Правильно не писать — половина дела; вторая половина сказать, что не
+    писал. `scripts/cron_job.sh` шлёт админу алерт по ненулевому коду, и
+    только он отличает «портал не ответил одну ночь» от «портфель замёрз
+    неделю назад, а список выглядит живым».
+    """
+    portal(CONTACTS, fail={88})
+    monkeypatch.setattr("sys.argv", ["build"])
+
+    assert build_mod.main() == 1
+    assert _rows(book, "SELECT * FROM clients") == []
+
+
+def test_a_dry_run_that_wrote_nothing_is_not_a_failure(portfolio, portal, monkeypatch):
+    """Сухой прогон не пишет нарочно — будить админа не за что.
+
+    Без этой половины проверки диагностический прогон слал бы админу алерт
+    каждый раз, и алерты перестали бы читать — вместе с настоящими.
+    """
+    monkeypatch.setattr("sys.argv", ["build", "--dry-run"])
+
+    assert build_mod.main() == 0
 
 
 def test_a_dry_run_leaves_no_file_behind(tmp_path, portfolio, portal, monkeypatch):
