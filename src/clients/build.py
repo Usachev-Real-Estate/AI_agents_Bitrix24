@@ -44,9 +44,15 @@ from analytics.schema import analytics_session  # noqa: E402
 from clients import census  # noqa: E402
 from clients.contacts import fetch_contacts  # noqa: E402
 from clients.events import Event, Totals, build_events, totals  # noqa: E402
+from clients.facts import collect as collect_facts  # noqa: E402
+from clients.facts import coverage as call_coverage  # noqa: E402
 from clients.keys import Decision, assign_keys  # noqa: E402
 from clients.mart import Portfolio, read_portfolio  # noqa: E402
+from clients.transcripts import DEGRADED_NAME as TRANSCRIPTS_DEGRADED  # noqa: E402
+from clients.transcripts import calls_with_refusal, transcribed_calls  # noqa: E402
+from clients.triage import decide as decide_triage  # noqa: E402
 from clients.merges import apply_migrations, current_links, plan_migrations  # noqa: E402
+from clients.schema import EVENT_CALL  # noqa: E402
 from clients.schema import (  # noqa: E402
     ALIAS_CONTACT, ALIAS_PHONE, ENTITY_DEAL, clients_session, init_clients_db,
 )
@@ -98,6 +104,8 @@ UPDATE clients SET
     comments_by_assignee = :comments_by_assignee,
     comments_by_assignee_30d = :comments_by_assignee_30d,
     calls_total = :calls_total,
+    triage_state = :triage_state,
+    triage_reason = :triage_reason,
     next_step_at = :next_step_at,
     next_step_overdue = :next_step_overdue,
     aggregates_run_id = :run_id
@@ -402,6 +410,24 @@ def build(*, now: datetime | None = None, dry_run: bool = False,
     events = build_events(portfolio, {d: v.key for d, v in decisions.items()},
                           key_by_contact)
 
+    # Расшифровки — третий источник и единственный необязательный. Идём в
+    # него ПОСЛЕ портала и до записи: он в своей базе, и держать его
+    # открытым во время похода в портал незачем.
+    markers = tuple(settings.refusal_markers)
+    if not markers:
+        degraded.append("маркеры отказа")
+    call_ids = [int(e.source_id) for e in events if e.kind == EVENT_CALL]
+    transcribed = transcribed_calls(call_ids)
+    # Маркеров нет — правило 2 выключено, и искать нечего. Недоступный кэш
+    # функция отработает сама и вернёт None: разбирать этот случай здесь
+    # значило бы держать вторую копию того же знания.
+    refused_calls = calls_with_refusal(call_ids, markers) if markers else None
+    if transcribed is None:
+        degraded.append(TRANSCRIPTS_DEGRADED)
+    reach = call_coverage(events)
+    logger.info("Звонки: %s, с расшифровкой %s", reach.as_dict(),
+                "—" if transcribed is None else len(transcribed))
+
     # Разбор портфеля числами. Считается всегда, а не только на сухом
     # прогоне: вопрос «верно ли задумано правило ключа» задаёт живой
     # портфель, и ответ на него должен быть в логе каждого прогона, а не
@@ -474,7 +500,11 @@ def build(*, now: datetime | None = None, dry_run: bool = False,
         write_aliases(conn, decisions)
         write_conflicts(conn, assignment.conflicts, at=moment.isoformat())
         write_events(conn, events, assignee_by_key)
-        _write_totals(conn, events, rows, run_id, moment)
+        by_state = _write_totals(
+            conn, events, rows, run_id, moment,
+            decisions=decisions, deals=portfolio.deals,
+            transcribed=transcribed, refused_calls=refused_calls, markers=markers,
+        )
 
         close_run(
             conn, run_id, now=moment, cards=len(cards), errors=0, complete=True,
@@ -482,6 +512,7 @@ def build(*, now: datetime | None = None, dry_run: bool = False,
         )
 
     summary["written"] = True
+    summary["states"] = by_state
     summary["migrations"] = len(plan.migrations)
     summary["split"] = len(plan.split)
     logger.info("Клиентский слой пересобран: %s", summary)
@@ -489,16 +520,48 @@ def build(*, now: datetime | None = None, dry_run: bool = False,
 
 
 def _write_totals(conn, events: Sequence[Event], rows: Mapping[str, dict],
-                  run_id: int, now: datetime) -> None:
-    """Пересчитать числа списка. Только на полном прогоне."""
+                  run_id: int, now: datetime, *,
+                  decisions: Mapping[int, Decision],
+                  deals: Mapping[int, dict],
+                  transcribed: set[int] | None,
+                  refused_calls: set[int] | None,
+                  markers: Sequence[str]) -> dict[str, int]:
+    """Пересчитать числа списка и состояние. Только на полном прогоне.
+
+    Числа и состояние считаются одним проходом: оба идут по клиентам и по
+    одной и той же ленте, и второй проход означал бы второе место, где
+    ленту надо сгруппировать — и разойтись с первым.
+
+    Возвращает раскладку по состояниям: она уходит в лог прогона. Без неё
+    «кого смотреть первым» проверялось бы открыванием базы, а список,
+    съехавший весь разом, виден только числом.
+    """
     by_key: dict[str, list[Event]] = {}
     for event in events:
         by_key.setdefault(event.client_key, []).append(event)
+
+    deals_by_key: dict[str, list[int]] = {}
+    for deal_id, decision in sorted(decisions.items()):
+        deals_by_key.setdefault(decision.key, []).append(deal_id)
+
+    by_state: dict[str, int] = {}
     payload = []
     for key, row in rows.items():
-        summary: Totals = totals(
-            by_key.get(key, ()), assignee_id=row["assignee_id"], now=now,
+        lane = by_key.get(key, ())
+        summary: Totals = totals(lane, assignee_id=row["assignee_id"], now=now)
+        verdict = decide_triage(
+            collect_facts(
+                lane, deals_by_key.get(key, ()),
+                deals=deals,
+                last_touch_at=summary.last_touch_at,
+                next_step_at=summary.next_step_at,
+                transcribed=transcribed,
+                refused_calls=refused_calls,
+                markers=markers,
+            ),
+            now=now,
         )
+        by_state[verdict.state] = by_state.get(verdict.state, 0) + 1
         payload.append({
             "client_key": key,
             "run_id": run_id,
@@ -511,6 +574,8 @@ def _write_totals(conn, events: Sequence[Event], rows: Mapping[str, dict],
             "comments_by_assignee": summary.comments_by_assignee,
             "comments_by_assignee_30d": summary.comments_by_assignee_30d,
             "calls_total": summary.calls_total,
+            "triage_state": verdict.state,
+            "triage_reason": verdict.reason,
             "next_step_at": summary.next_step_at,
             "next_step_overdue": (
                 None if summary.next_step_overdue is None
@@ -518,6 +583,7 @@ def _write_totals(conn, events: Sequence[Event], rows: Mapping[str, dict],
             ),
         })
     conn.executemany(_TOTALS_UPDATE, payload)
+    return dict(sorted(by_state.items(), key=lambda pair: -pair[1]))
 
 
 def _key_by_contact(decisions: Mapping[int, Decision]) -> dict[int, str]:

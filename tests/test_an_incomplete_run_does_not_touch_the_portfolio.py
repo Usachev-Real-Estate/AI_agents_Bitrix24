@@ -467,6 +467,77 @@ def test_a_conflict_that_went_away_is_not_erased(book, portfolio, portal):
     assert rows[0]["last_seen_at"] == NOW.isoformat(), "видели в прошлый раз, не сейчас"
 
 
+def test_a_whole_run_gives_every_client_a_state(book, portfolio, portal):
+    """После полного прогона состояние есть у каждого клиента.
+
+    Колонка `NOT NULL DEFAULT 'unknown'`, и незаполненная она читается как
+    «не считали». Список «кого смотреть первым», где половина строк не
+    посчитана, отвечает не на тот вопрос, ради которого его открыли.
+    """
+    build_mod.build(now=NOW)
+
+    rows = _rows(book, "SELECT triage_state, triage_reason FROM clients")
+    assert rows
+    assert all(row["triage_state"] != "unknown" for row in rows)
+    assert all(row["triage_reason"] for row in rows), "причина обязана называть правило"
+
+
+def test_a_closed_deal_makes_a_closed_client(book, portfolio, portal):
+    """Карточка закрыта — клиент закрыт, правило 1."""
+    with analytics_session() as conn:
+        conn.execute("UPDATE fact_deal SET is_closed = 1 WHERE deal_id = 7")
+
+    build_mod.build(now=NOW)
+
+    row = _rows(book, "SELECT * FROM clients WHERE client_key = 'p:+79001112233'")[0]
+    assert row["triage_state"] == "closed"
+    assert row["triage_reason"].startswith("1:")
+
+
+def test_a_run_says_how_many_clients_landed_in_each_state(book, portfolio, portal):
+    """Раскладка по состояниям уходит в итог прогона.
+
+    Без неё список, съехавший весь разом в одно состояние, заметил бы
+    только тот, кто открыл базу руками.
+    """
+    summary = build_mod.build(now=NOW)
+
+    assert summary["states"]
+    assert sum(summary["states"].values()) == summary["clients"]
+
+
+def test_a_missing_transcript_cache_is_written_down_as_degraded(
+    book, portfolio, portal, monkeypatch,
+):
+    """Недоступный кэш расшифровок попадает в журнал прогона.
+
+    Правила 2 и 3 при этом молчат, и молчат ЧЕСТНО: иначе назавтра никто
+    не поймёт, почему «нет данных» исчезло из списка — потому что дыр не
+    стало или потому что их перестали искать.
+    """
+    monkeypatch.setattr(build_mod, "transcribed_calls", lambda ids: None)
+    monkeypatch.setattr(build_mod, "calls_with_refusal", lambda ids, markers: None)
+
+    summary = build_mod.build(now=NOW)
+
+    assert "расшифровки звонков" in summary["degraded"]
+    assert summary["written"] is True, "правило гаснет, прогон идёт"
+
+
+def test_empty_markers_switch_off_the_refusal_rule_out_loud(
+    book, portfolio, portal, monkeypatch,
+):
+    """Пустой список маркеров тоже попадает в degraded."""
+    monkeypatch.setenv("REFUSAL_MARKERS_JSON", "[]")
+    from config import get_settings
+
+    get_settings.cache_clear()
+
+    summary = build_mod.build(now=NOW)
+
+    assert "маркеры отказа" in summary["degraded"]
+
+
 def test_a_night_without_the_portal_wakes_the_admin(book, portfolio, portal, monkeypatch):
     """Прогон, не тронувший портфель, выходит с ненулевым кодом.
 
