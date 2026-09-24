@@ -86,14 +86,41 @@ def test_a_name_in_one_field_is_still_a_name():
     assert got.merged_phones == 1
 
 
-def test_one_name_on_many_numbers_is_a_placeholder_not_a_person():
-    """Одно имя на разных общих номерах — заполнитель, и склейки не даёт.
+def test_one_name_on_many_groups_is_a_placeholder_not_a_person():
+    """Одно имя на слишком многих группах — заполнитель, и склейки не даёт.
 
     Карточки, заведённые автоматом, получают одну и ту же подпись. Склейка
     по ней собрала бы в одного клиента незнакомых людей с разных номеров —
     самую дорогую из возможных ошибок. Защита видна в разборе: такие номера
     остаются спорными с вердиктом «тот же человек», и цена её известна
-    числом в каждом прогоне.
+    числом в каждом прогоне, а рядом стоит её причина — разброс.
+    """
+    cards = [Card(i, contact_id=70 + i) for i in range(1, 9)]
+    contacts = {
+        71: _contact(phone="+79001110001"), 72: _contact(phone="+79001110001"),
+        73: _contact(phone="+79001110002"), 74: _contact(phone="+79001110002"),
+        75: _contact(phone="+79001110003"), 76: _contact(phone="+79001110003"),
+        77: _contact(phone="+79001110004"), 78: _contact(phone="+79001110004"),
+    }
+
+    got = _take(cards, contacts)
+
+    assert got.merged_phones == 0
+    assert got.conflicts.total == 4
+    assert _verdicts(got)[census.SAME_PERSON] == 4
+    assert got.clients == 8
+    assert got.namesake_spread == {4: 1}, (
+        "рядом с ценой защиты стоит её причина: одно имя на двух-трёх группах —"
+        " это тёзки, на четырёх и больше — заполнитель, а отказ у них один и тот же"
+    )
+
+
+def test_namesakes_are_glued_and_still_counted_in_the_spread():
+    """Тёзки склеиваются, но из разброса не исчезают.
+
+    Разброс считается независимо от порога — иначе по нему нельзя было бы
+    порог и выбирать: он показывал бы только те повторы, которые уже
+    наказаны, и следующий замер видел бы ровно то, что решило прошлое.
     """
     cards = [Card(i, contact_id=70 + i) for i in range(1, 5)]
     contacts = {
@@ -103,14 +130,9 @@ def test_one_name_on_many_numbers_is_a_placeholder_not_a_person():
 
     got = _take(cards, contacts)
 
-    assert got.merged_phones == 0
-    assert got.conflicts.total == 2
-    assert _verdicts(got)[census.SAME_PERSON] == 2
-    assert got.clients == 4
-    assert got.namesake_spread == {2: 1}, (
-        "рядом с ценой защиты стоит её причина: одно имя на двух группах —"
-        " это тёзки, на десятке — заполнитель, и отказ у них один и тот же"
-    )
+    assert got.merged_phones == 2
+    assert got.clients == 2
+    assert got.namesake_spread == {2: 1}
 
 
 def test_a_nameless_stub_against_a_living_card_is_told_apart():
