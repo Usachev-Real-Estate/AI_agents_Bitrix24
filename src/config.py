@@ -544,6 +544,18 @@ class Settings(BaseSettings):
         default="data/clients.db",
         validation_alias="CLIENTS_DB_PATH",
     )
+    # Через сколько часов спрашивать портал о расшифровке ЗАНОВО. Своя
+    # настройка, а не CLIENT_STATE_TRANSCRIPT_RETRY_HOURS: у той значение
+    # час, и оно верное для своей задачи — досье спрашивает о звонке,
+    # который состоялся только что, и Битрикс его ещё расшифровывает.
+    # Догрузка идёт по истории портфеля, и звонок с прошлой весны, текста
+    # по которому нет, не обзаведётся им через час. С часовым порогом
+    # прогон каждую ночь спрашивал бы портал об одних и тех же тысячах
+    # звонков и никогда не доходил бы до тех, о ком не спрашивали.
+    clients_transcript_retry_hours: float = Field(
+        default=720.0,
+        validation_alias="CLIENTS_TRANSCRIPT_RETRY_HOURS",
+    )
     refusal_markers_json: str = Field(
         default=json.dumps(list(REFUSAL_MARKERS), ensure_ascii=False),
         validation_alias="REFUSAL_MARKERS_JSON",
