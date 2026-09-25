@@ -215,9 +215,16 @@ def _payload(raw: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def pull(*, dry_run: bool = False, budget: int | None = None,
+def pull(*, dry_run: bool = False, budget: int | None = DEFAULT_BUDGET,
          now: datetime | None = None) -> dict[str, Any]:
-    """Спросить у портала расшифровки по звонкам без текста."""
+    """Спросить у портала расшифровки по звонкам без текста.
+
+    ``budget`` передаётся в `plan` КАК ЕСТЬ, а умолчание стоит прямо в
+    подписи. Пока оно подставлялось внутри, ``None`` значил здесь «не
+    задан», а там «без предела» — и `--budget 0`, обещавший снять предел,
+    молча возвращал те же четыреста. Одно значение с двумя смыслами
+    находится не чтением кода, а прогоном на живом портфеле.
+    """
     from config import get_settings
 
     settings = get_settings()
@@ -235,7 +242,7 @@ def pull(*, dry_run: bool = False, budget: int | None = None,
 
     made = plan(calls, cached, now=moment,
                 retry_hours=float(settings.clients_transcript_retry_hours),
-                budget=DEFAULT_BUDGET if budget is None else budget)
+                budget=budget)
     summary = made.as_dict()
     if dry_run:
         summary["сухой прогон"] = True
@@ -297,7 +304,14 @@ def main() -> int:
     # Иначе каждый из четырёхсот запросов нарисует в cron.log полосу
     # прогресса и строку INFO. Выключатель общий с досье — см. tools.
     quiet_the_portal_client()
-    budget = None if args.budget == 0 else args.budget
+    # Ноль и меньше — «без предела». Отрицательное число иначе доехало бы
+    # до среза `candidates[:budget]` и молча отрезало бы с конца.
+    if args.budget is None:
+        budget = DEFAULT_BUDGET
+    elif args.budget <= 0:
+        budget = None
+    else:
+        budget = args.budget
     summary = pull(dry_run=args.dry_run, budget=budget)
     logger.info("Готово: %s", summary)
     return 1 if summary.get("кэш") == "недоступен" else 0
