@@ -282,6 +282,7 @@ def _ask(candidates: Iterable[Call], cached: Mapping[int, Cached], *,
 
 def main() -> int:
     from config import get_settings, setup_logging
+    from tools import quiet_the_portal_client
 
     parser = argparse.ArgumentParser(
         description="Догрузить расшифровки по звонкам книги клиентов")
@@ -293,6 +294,9 @@ def main() -> int:
     args = parser.parse_args()
 
     setup_logging(get_settings().log_level)
+    # Иначе каждый из четырёхсот запросов нарисует в cron.log полосу
+    # прогресса и строку INFO. Выключатель общий с досье — см. tools.
+    quiet_the_portal_client()
     budget = None if args.budget == 0 else args.budget
     summary = pull(dry_run=args.dry_run, budget=budget)
     logger.info("Готово: %s", summary)
