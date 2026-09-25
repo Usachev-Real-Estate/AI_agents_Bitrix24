@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
@@ -170,6 +171,63 @@ def calls_with_refusal(
                     haystack = normalize(text)
                     if any(needle in haystack for needle in needles):
                         out.add(int(activity_id))
+    except sqlite3.Error as error:
+        logger.warning("Кэш расшифровок недоступен (%s): %s", path, error)
+        return None
+    return out
+
+
+@dataclass(frozen=True)
+class Cached:
+    """Что кэш уже знает о звонке, кроме самого текста.
+
+    Текст сюда не попадает намеренно: догрузке он не нужен — ей нужно
+    решить, спрашивать ли портал заново, — а модуль, который текста не
+    видит, не может его напечатать.
+    """
+
+    status: str
+    fetched_at: str
+    # Сделка, к которой звонок привязан в кэше. Ноль — звонок висит на
+    # контакте либо привязку не записали. Нужен ровно затем, чтобы
+    # перезапись строки не стёрла известную привязку.
+    deal_id: int = 0
+
+
+def cache_state(
+    activity_ids: Iterable[int],
+    *,
+    db_path: str | Path | None = None,
+) -> dict[int, Cached] | None:
+    """Состояние кэша по звонкам. ``None`` — кэш недоступен.
+
+    Отдельно от `transcribed_calls`, потому что отвечает на другой вопрос.
+    Тому нужен один бит «текст есть»; догрузке нужно отличить «не
+    спрашивали ни разу» от «спросили час назад и получили пусто» — иначе
+    каждый прогон дёргал бы портал по одним и тем же звонкам, у которых
+    расшифровки не появится никогда.
+    """
+    wanted = sorted({int(value) for value in activity_ids})
+    if not wanted:
+        return {}
+
+    path = Path(db_path or DEFAULT_DB_PATH)
+    out: dict[int, Cached] = {}
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+            for chunk in _chunks(wanted):
+                marks = ", ".join("?" * len(chunk))
+                rows = conn.execute(
+                    "SELECT activity_id, status, fetched_at, deal_id"
+                    f" FROM call_transcripts WHERE activity_id IN ({marks})",
+                    chunk,
+                ).fetchall()
+                for activity_id, status, fetched_at, deal_id in rows:
+                    out[int(activity_id)] = Cached(
+                        status=str(status or ""),
+                        fetched_at=str(fetched_at or ""),
+                        deal_id=int(deal_id or 0),
+                    )
     except sqlite3.Error as error:
         logger.warning("Кэш расшифровок недоступен (%s): %s", path, error)
         return None

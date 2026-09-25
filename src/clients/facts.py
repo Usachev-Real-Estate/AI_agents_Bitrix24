@@ -86,6 +86,25 @@ def coverage(events: Iterable[Any]) -> Coverage:
     return Coverage(calls=calls, measurable=measurable, meaningful=meaningful)
 
 
+def calls_with_text(events: Iterable[Any], transcribed: set[int] | None) -> int | None:
+    """Сколько звонков клиента расшифровано. ``None`` — кэш недоступен.
+
+    Длительность здесь НЕ смотрится, в отличие от правила 3. Тому нужен
+    разговор, по которому текст обязан быть, и сорокасекундный недозвон в
+    счёт не идёт. Этому числу нужен материал, который можно прочитать, — а
+    короткий звонок с расшифровкой читается не хуже трёхминутного.
+
+    ``None``, а не ноль: колонка `calls_with_transcript` объявлена
+    NULL-умеющей ровно затем, чтобы «не считано» отличалось от «нет ни
+    одной». Ночь, в которую база аудита оказалась не на месте, не должна
+    выглядеть как ночь, в которую у клиентов пропали расшифровки.
+    """
+    if transcribed is None:
+        return None
+    return sum(1 for event in events
+               if event.kind == EVENT_CALL and int(event.source_id) in transcribed)
+
+
 def collect(
     events: Sequence[Any],
     deal_ids: Iterable[int],

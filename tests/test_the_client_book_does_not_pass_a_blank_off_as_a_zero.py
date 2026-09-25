@@ -13,8 +13,12 @@
 """
 
 import sqlite3
+from datetime import datetime, timezone
 
 import pytest
+
+from clients.build import _write_totals
+from clients.events import Event
 
 from clients.schema import (
     CLIENT_CHILD_TABLES,
@@ -264,3 +268,82 @@ def test_a_run_that_did_not_finish_is_not_complete(book):
 
     assert row["complete"] == 0
     assert row["finished_at"] is None
+
+
+# ── счётчик расшифровок: сколько у клиента есть что читать ────────────
+#
+# Колонка заполняется полным прогоном и уходит в разбор моделью: прежде
+# чем спрашивать «что с клиентом», надо знать, на чём отвечать.
+
+RUN_AT = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+KEY = "p:+79000000001"
+OTHER = "p:+79000000002"
+
+
+def _call(key: str, source_id: int) -> Event:
+    at = RUN_AT.replace(hour=9).isoformat()
+    end = RUN_AT.replace(hour=9, minute=2).isoformat()
+    return Event(key, at, "call", str(source_id), "deal", 1, 10, False,
+                 {"direction": 2, "start_time": at, "end_time": end})
+
+
+def _totals(book, events, transcribed):
+    """Прогнать запись агрегатов по двум заведённым клиентам.
+
+    Клиентов именно два, и у обоих есть расшифрованные звонки. На одном
+    клиенте лента портфеля совпадает с лентой клиента, и перепутать их в
+    коде можно было бы незаметно — а цена ошибки в том, что каждому в
+    книге достался бы счётчик всей компании.
+    """
+    with clients_session(book) as conn:
+        conn.executemany("INSERT INTO clients(client_key) VALUES (?)",
+                         [(KEY,), (OTHER,)])
+        _write_totals(
+            conn, events,
+            {KEY: {"assignee_id": 10}, OTHER: {"assignee_id": 11}},
+            run_id=1, now=RUN_AT,
+            decisions={}, deals={}, transcribed=transcribed,
+            refused_calls=set(), markers=("передумал",),
+        )
+    with clients_session(book, readonly=True) as conn:
+        return {
+            row["client_key"]: row for row in conn.execute(
+                "SELECT client_key, calls_total, calls_with_transcript FROM clients"
+            )
+        }
+
+
+def test_a_full_run_fills_in_how_many_calls_were_transcribed(book):
+    """Колонка объявлена давно, а заполнять её стало чем только сейчас.
+
+    Сборка уже ходит за расшифровками ради правил 2 и 3, и множество
+    расшифрованных лежит у неё в руках, пока она идёт по клиентам. Оставь
+    колонку пустой — и разбор моделью, которому она и нужна, начнётся с
+    отдельного похода в ту же базу за тем же самым.
+
+    Числа у двух клиентов разные и оба меньше портфельного: проверяется,
+    что каждому досталась его лента, а не общая.
+    """
+    events = [_call(KEY, 101), _call(KEY, 102), _call(KEY, 103),
+              _call(OTHER, 201), _call(OTHER, 202)]
+
+    rows = _totals(book, events, {101, 103, 201, 202})
+
+    assert rows[KEY]["calls_total"] == 3
+    assert rows[KEY]["calls_with_transcript"] == 2, "свои два, а не четыре по портфелю"
+    assert rows[OTHER]["calls_with_transcript"] == 2
+
+
+def test_a_run_without_the_transcript_cache_leaves_the_counter_unknown(book):
+    """База аудита не открылась — колонка остаётся пустой, а не нулевой.
+
+    Ноль тут читался бы как «у клиента нет ни одной расшифровки», и разбор
+    сказал бы про живого клиента с десятью записанными разговорами, что
+    отвечать по нему не на чем. Прогон при этом идёт: расшифровки —
+    довесок к портфелю, а не портфель.
+    """
+    rows = _totals(book, [_call(KEY, 101), _call(OTHER, 201)], None)
+
+    assert rows[KEY]["calls_total"] == 1
+    assert rows[KEY]["calls_with_transcript"] is None
+    assert rows[OTHER]["calls_with_transcript"] is None

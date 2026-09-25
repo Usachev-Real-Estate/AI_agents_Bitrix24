@@ -14,6 +14,10 @@ logs/cron.log вместе с выводом всех остальных зад�
 Проверка нужна потому, что выключатель легко потерять при следующей правке
 клиента: пропажа не роняет ничего, лог просто снова начинает расти, и
 замечают это через месяцы.
+
+Выключатель один на всех и живёт рядом с флагом, в tools. Задач, которым
+он нужен, теперь две — выгрузка досье и догрузка расшифровок, — и у каждой
+проверено, что она его зовёт.
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ if str(_SRC) not in sys.path:
 
 import dossier  # noqa: E402
 import tools  # noqa: E402
+from clients import pull_transcripts  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -46,21 +51,21 @@ def restore_globals(monkeypatch):
     logger.setLevel(level)
 
 
-def test_the_export_turns_the_progress_bars_off():
-    dossier._quiet_the_portal_client()
+def test_the_switch_turns_the_progress_bars_off():
+    tools.quiet_the_portal_client()
 
     assert tools.BX_VERBOSE is False
 
 
-def test_the_export_turns_the_per_request_lines_off():
-    dossier._quiet_the_portal_client()
+def test_the_switch_turns_the_per_request_lines_off():
+    tools.quiet_the_portal_client()
 
     assert logging.getLogger("fast_bitrix24").level == logging.WARNING
 
 
 def test_portal_errors_still_reach_the_log():
     """Гасится шум, а не диагностика. WARNING остаётся видимым."""
-    dossier._quiet_the_portal_client()
+    tools.quiet_the_portal_client()
 
     assert logging.getLogger("fast_bitrix24").isEnabledFor(logging.WARNING)
     assert logging.getLogger("fast_bitrix24").isEnabledFor(logging.ERROR)
@@ -86,3 +91,39 @@ def test_other_jobs_keep_their_progress_bars():
     """
     assert tools.BX_VERBOSE is True
     assert tools._get_bitrix().verbose is True
+
+
+def test_the_transcript_backfill_turns_them_off_too(monkeypatch):
+    """Догрузка расшифровок — вторая задача с тем же прогрессбаром.
+
+    До четырёхсот запросов за ночь, по паре строк на каждый. Проверяется
+    не сам выключатель — он проверен выше, — а что задача его зовёт:
+    пропажа этой строки ничего не уронит, и заметят её по размеру лога
+    через месяцы.
+
+    Работа подменена: гасить клиент надо ДО первого запроса, и тест об
+    этом не узнал бы, если бы ждал конца настоящего прогона.
+    """
+    monkeypatch.setattr(pull_transcripts, "pull", lambda **kwargs: {})
+    monkeypatch.setattr(sys, "argv", ["pull_transcripts", "--dry-run"])
+
+    assert pull_transcripts.main() == 0
+    assert tools.BX_VERBOSE is False
+    assert logging.getLogger("fast_bitrix24").level == logging.WARNING
+
+
+def test_the_dossier_export_turns_them_off_too(monkeypatch):
+    """Задача, ради которой выключатель и заводили.
+
+    Две с половиной тысячи запросов за полный прогон. Проверка была на
+    сам выключатель, но не на то, что выгрузка его зовёт, — и переживала
+    бы его пропажу молча.
+
+    Выгрузка подменена целиком: она ходит в портал и пишет на диск, а
+    проверить надо один вызов, который делается до всего этого.
+    """
+    monkeypatch.setattr(dossier, "run", lambda *args, **kwargs: None)
+
+    assert dossier.main([]) == 0
+    assert tools.BX_VERBOSE is False
+    assert logging.getLogger("fast_bitrix24").level == logging.WARNING
