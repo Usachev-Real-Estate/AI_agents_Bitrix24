@@ -22,9 +22,15 @@
 будет отдавать расшифровку по клику (раздел 9) — то есть слой и экран
 говорят об одном и том же, а не о двух похожих.
 
-**Текст наружу не выходит.** Правило 2 возвращает только номера звонков, в
-которых маркер нашёлся, и `triage_reason` называет правило, а не цитату.
-Разговор с клиентом остаётся в базе.
+**Текст наружу не выходит — из правил.** Правило 2 возвращает только
+номера звонков, в которых маркер нашёлся, и `triage_reason` называет
+правило, а не цитату. Состояние клиента на экране не цитирует разговор.
+
+Исключение ровно одно и названо вслух: `texts_of` отдаёт текст целиком, и
+зовёт её разбор клиента моделью (`clients.review`), которому читать нечего
+без слов клиента. Оно живёт здесь, а не отдельным модулем, чтобы всё
+чтение `call_transcripts` оставалось в одном месте: разъехавшихся
+читателей одной таблицы потом не сведёшь.
 
 База недоступна — правила гаснут и попадают в `degraded_rules`. Падать
 нельзя: расшифровки это довесок к портфелю, а не портфель.
@@ -231,4 +237,47 @@ def cache_state(
     except sqlite3.Error as error:
         logger.warning("Кэш расшифровок недоступен (%s): %s", path, error)
         return None
+    return out
+
+
+def texts_of(
+    activity_ids: Iterable[int],
+    *,
+    db_path: str | Path | None = None,
+) -> dict[int, str]:
+    """Тексты разговоров пачкой. Пустой словарь — кэш недоступен.
+
+    **Единственная функция модуля, отдающая сам разговор.** Нужна разбору
+    клиента моделью: сказать, что с человеком происходит, не читая его
+    слов, — это пересказ дат, а не разбор.
+
+    В лог отсюда не попадает ни строчки текста: только числа. Логи уходят
+    в общий `cron.log`, а разговор с клиентом там не нужен никому.
+
+    Пустой словарь и недоступный кэш не различаются намеренно, в отличие
+    от `transcribed_calls`. Там разница меняла решение правила 3; здесь —
+    нет: выписка в обоих случаях собирается без текстов и честно помечает
+    себя `enough_data = false`.
+    """
+    wanted = sorted({int(value) for value in activity_ids})
+    if not wanted:
+        return {}
+
+    path = Path(db_path or DEFAULT_DB_PATH)
+    out: dict[int, str] = {}
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+            for chunk in _chunks(wanted):
+                marks = ", ".join("?" * len(chunk))
+                rows = conn.execute(
+                    "SELECT activity_id, text FROM call_transcripts"
+                    f" WHERE status = ? AND text != '' AND activity_id IN ({marks})",
+                    (TRANSCRIBED, *chunk),
+                ).fetchall()
+                for activity_id, text in rows:
+                    out[int(activity_id)] = str(text)
+    except sqlite3.Error as error:
+        logger.warning("Кэш расшифровок недоступен (%s): %s", path, error)
+        return {}
+    logger.info("Расшифровок прочитано: %d из %d запрошенных", len(out), len(wanted))
     return out
