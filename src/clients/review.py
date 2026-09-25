@@ -10,6 +10,12 @@
 отказавшихся — незачем, «в работе» и так движется. Остальные 1 450
 клиентов стоили бы денег и не сказали бы ничего нового.
 
+Поверх состояний — список стадий, которые разбор не трогает
+(`CLIENTS_REVIEW_SKIP_STAGES_JSON`). Заведён под «Продавцы / Поиск
+клиента»: там карточка живёт до появления покупателя, и работа идёт с
+объектом, а не с человеком. Пропускается ЭТАП, а не человек: клиент с
+живой сделкой в другой воронке разбирается как обычно.
+
 **Разбор не переписывается, а дописывается.** `client_reviews` —
 единственная таблица книги, которую нельзя пересобрать: всё остальное
 выводится из витрины и портала, а это написала модель или человек. Новый
@@ -102,6 +108,11 @@ SYSTEM_PROMPT = """\
   за кадром. Если там не нули, оговори это в summary.
 - Если "есть на чём отвечать" равно false, начни summary со слов
   "Данных мало:" — брокер должен увидеть это первым.
+- Закрыта карточка или нет, сказано полем "closed": 1 — закрыта, 0 — в
+  работе. Название стадии этого НЕ означает. Например «Закрытая продажа
+  (На сайт)» — рабочая стадия: объект продают без публичной рекламы, и
+  задача брокера как раз довести клиента до выставления на ЦИАН. Никогда
+  не выводи закрытие сделки из названия стадии.
 - Не советуй того, чего клиент уже просил не делать.
 - Пиши по-русски, без воды и без обращений к читателю.
 """
@@ -191,12 +202,28 @@ LEFT JOIN (
 ) r ON r.client_key = c.client_key
 WHERE c.triage_state IN ({states})
   AND (r.seen IS NULL OR r.seen < c.last_event_at)
+  {skip}
 ORDER BY (COALESCE(c.calls_with_transcript, 0) > 0) DESC,
          c.silence_days DESC, c.client_key
 """
 
+# Пропуск стадии — про ЭТАП, а не про человека. Клиент выпадает из
+# разбора, только если ни одной живой карточки вне пропускаемых стадий у
+# него нет; рядом стоящая сделка в другой воронке возвращает его обратно.
+#
+# Первое условие держит в очереди клиента без единой открытой карточки:
+# у него нечему быть вне списка, и без оговорки он выпал бы заодно.
+_SKIP_STAGES = """
+  AND (NOT EXISTS (SELECT 1 FROM client_links o
+                   WHERE o.client_key = c.client_key AND o.closed = 0)
+       OR EXISTS (SELECT 1 FROM client_links l
+                  WHERE l.client_key = c.client_key AND l.closed = 0
+                    AND l.stage_id NOT IN ({stages})))
+"""
 
-def pending(conn: sqlite3.Connection, *, states: Sequence[str] = SCOPE) -> list[str]:
+
+def pending(conn: sqlite3.Connection, *, states: Sequence[str] = SCOPE,
+            skip_stages: Sequence[str] = ()) -> list[str]:
     """Кого разбирать. Первыми — те, у кого есть что читать.
 
     Порядок стоил боевого прогона. Сначала очередь шла по одной тишине, и
@@ -223,7 +250,12 @@ def pending(conn: sqlite3.Connection, *, states: Sequence[str] = SCOPE) -> list[
     сравнение оживёт само: пустая строка меньше любой даты.
     """
     marks = ", ".join("?" * len(states))
-    rows = conn.execute(_PENDING.format(states=marks), tuple(states)).fetchall()
+    # Пустой список — никакой оговорки в запросе вовсе. `NOT IN ()` SQLite
+    # понимает, но читающему запрос пришлось бы вспоминать, как именно.
+    skip = _SKIP_STAGES.format(stages=", ".join("?" * len(skip_stages))) \
+        if skip_stages else ""
+    sql = _PENDING.format(states=marks, skip=skip)
+    rows = conn.execute(sql, (*states, *skip_stages)).fetchall()
     return [str(row[0]) for row in rows]
 
 
@@ -319,13 +351,19 @@ def ask(llm: Any, found: Brief) -> tuple[Review | None, dict[str, int]]:
 
 def run(*, dry_run: bool = False, budget: int | None = DEFAULT_BUDGET,
         states: Sequence[str] = SCOPE, now: datetime | None = None,
-        llm: Any = None) -> dict[str, Any]:
+        llm: Any = None, skip_stages: Sequence[str] | None = None) -> dict[str, Any]:
     """Разобрать тех, кому это нужно, и записать выводы."""
     moment = now or datetime.now(timezone.utc)
     summary: dict[str, Any] = {"охват": list(states)}
 
+    if skip_stages is None:
+        from config import get_settings
+        skip_stages = get_settings().review_skip_stages
+    if skip_stages:
+        summary["пропускаем стадии"] = list(skip_stages)
+
     with clients_session(readonly=True) as conn:
-        queue = pending(conn, states=states)
+        queue = pending(conn, states=states, skip_stages=skip_stages)
     keys = queue if budget is None else queue[:budget]
     # Два числа, а не одно. «К разбору 150» при очереди в семьсот человек
     # читается как «их всего сто пятьдесят», и по такому отчёту нельзя

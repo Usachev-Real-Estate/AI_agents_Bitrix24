@@ -20,6 +20,7 @@ import pytest
 from clients import review as review_mod
 from clients.review import SCOPE, VERDICTS, Review, parse, pending, run
 from clients.schema import clients_session, init_clients_db
+from config import get_settings
 
 ANSWER = {
     "summary": "Клиент просил перезвонить после майских, никто не перезвонил.",
@@ -61,6 +62,13 @@ def _client(conn, key, *, state="cooling", last_event="2026-09-01T10:00:00+00:00
         "INSERT INTO clients(client_key, triage_state, last_event_at, silence_days,"
         " calls_with_transcript, updated_at) VALUES (?, ?, ?, ?, ?, '')",
         (key, state, last_event, silence, talks),
+    )
+
+
+def _card(conn, key, entity_id, *, stage="C18:NEW", closed=0):
+    conn.execute(
+        "INSERT INTO client_links(client_key, entity_type, entity_id, stage_id,"
+        " closed) VALUES (?, 'deal', ?, ?, ?)", (key, entity_id, stage, closed),
     )
 
 
@@ -334,3 +342,100 @@ def test_an_empty_review_is_not_a_review():
     assert parse(json.dumps({"verdict": VERDICTS[0]})) is None
     assert parse("вообще не json") is None
     assert Review().summary == ""
+
+
+# ── стадии, которые разбор не трогает ─────────────────────────────────
+#
+# «Продавцы / Поиск клиента»: карточка живёт там до появления покупателя,
+# и работа идёт с объектом, а не с человеком. Пропускается ЭТАП, а не
+# человек — это и есть главное, что здесь проверяется.
+
+SKIP = ("C20:SEARCH",)
+
+
+def test_a_client_who_only_sits_on_a_skipped_stage_is_left_alone(book):
+    with clients_session(book) as conn:
+        _client(conn, "p:+79001112233")
+        _card(conn, "p:+79001112233", 1, stage="C20:SEARCH")
+
+    with clients_session(book, readonly=True) as conn:
+        assert pending(conn, skip_stages=SKIP) == []
+
+
+def test_a_live_deal_elsewhere_brings_the_client_back(book):
+    """Пропускается этап, а не человек.
+
+    У продавца рядом бывает сделка покупателя, и молчание по ней —
+    полноценный повод для разбора. Выбросив клиента целиком, мы потеряли
+    бы ровно ту половину, ради которой список и заводили.
+    """
+    with clients_session(book) as conn:
+        _client(conn, "p:+79001112233")
+        _card(conn, "p:+79001112233", 1, stage="C20:SEARCH")
+        _card(conn, "p:+79001112233", 2, stage="C18:NEW")
+
+    with clients_session(book, readonly=True) as conn:
+        assert pending(conn, skip_stages=SKIP) == ["p:+79001112233"]
+
+
+def test_a_closed_card_elsewhere_does_not_bring_him_back(book):
+    """Закрытая карточка — не повод разбирать: работы по ней больше нет."""
+    with clients_session(book) as conn:
+        _client(conn, "p:+79001112233")
+        _card(conn, "p:+79001112233", 1, stage="C20:SEARCH")
+        _card(conn, "p:+79001112233", 2, stage="C18:WON", closed=1)
+
+    with clients_session(book, readonly=True) as conn:
+        assert pending(conn, skip_stages=SKIP) == []
+
+
+def test_a_client_without_cards_stays_in_the_queue(book):
+    """Вне списка у него быть нечему, и без оговорки он выпал бы заодно."""
+    with clients_session(book) as conn:
+        _client(conn, "p:+79001112233")
+
+    with clients_session(book, readonly=True) as conn:
+        assert pending(conn, skip_stages=SKIP) == ["p:+79001112233"]
+
+
+def test_without_a_skip_list_nobody_is_skipped(book):
+    with clients_session(book) as conn:
+        _client(conn, "p:+79001112233")
+        _card(conn, "p:+79001112233", 1, stage="C20:SEARCH")
+
+    with clients_session(book, readonly=True) as conn:
+        assert pending(conn) == ["p:+79001112233"]
+
+
+def test_the_sellers_search_stage_is_skipped_out_of_the_box(book, monkeypatch):
+    """Умолчание — боевой идентификатор, а не пустота.
+
+    Значение портальное и непрозрачное, и держать его только в `.env`
+    значит однажды выкатиться без него и молча вернуть в очередь триста
+    пятьдесят карточек, которые разбирать не просили.
+    """
+    monkeypatch.delenv("CLIENTS_REVIEW_SKIP_STAGES_JSON", raising=False)
+    get_settings.cache_clear()
+    with clients_session(book) as conn:
+        _client(conn, "p:+79001112233")
+        _card(conn, "p:+79001112233", 1, stage="UC_FADPBF")
+
+    summary = run(llm=_Model(), dry_run=True, budget=None)
+    get_settings.cache_clear()
+
+    assert summary["в очереди"] == 0
+
+
+def test_the_run_takes_the_skip_list_from_the_settings(book, monkeypatch):
+    """Список живёт в настройке: этап меняют в портале, а не в коде."""
+    monkeypatch.setenv("CLIENTS_REVIEW_SKIP_STAGES_JSON", '["C20:SEARCH"]')
+    get_settings.cache_clear()
+    with clients_session(book) as conn:
+        _client(conn, "p:+79001112233")
+        _card(conn, "p:+79001112233", 1, stage="C20:SEARCH")
+
+    summary = run(llm=_Model(), dry_run=True, budget=None)
+    get_settings.cache_clear()
+
+    assert summary["в очереди"] == 0
+    assert summary["пропускаем стадии"] == ["C20:SEARCH"]

@@ -556,6 +556,24 @@ class Settings(BaseSettings):
         default=720.0,
         validation_alias="CLIENTS_TRANSCRIPT_RETRY_HOURS",
     )
+    # Стадии, клиентов которых разбор моделью НЕ трогает. Списком
+    # идентификаторов (`C18:NEW`), а не названий: имя стадии меняют в
+    # портале мышкой, и список бы тихо перестал совпадать. Идентификатор
+    # несёт в себе и воронку, так что одинаковые названия в разных
+    # воронках не путаются.
+    #
+    # `UC_FADPBF` — «Поиск клиента» в воронке продавцов (351 открытая
+    # карточка на 25.09). Там карточка живёт до появления покупателя, и
+    # разбирать её нечего: работа идёт с объектом, а не с человеком.
+    #
+    # Значение портальное и непрозрачное: пересоберут воронку — Битрикс
+    # выдаст другой идентификатор, список тихо перестанет совпадать, и
+    # заметить это можно будет только по выросшей очереди разбора.
+    # Поэтому оно переопределяется переменной, а не правится в коде.
+    clients_review_skip_stages_json: str = Field(
+        default='["UC_FADPBF"]',
+        validation_alias="CLIENTS_REVIEW_SKIP_STAGES_JSON",
+    )
     refusal_markers_json: str = Field(
         default=json.dumps(list(REFUSAL_MARKERS), ensure_ascii=False),
         validation_alias="REFUSAL_MARKERS_JSON",
@@ -903,6 +921,23 @@ class Settings(BaseSettings):
     def exclusive_notify_webhook(self) -> str:
         """Webhook used to send chat messages (must belong to FROM user)."""
         return (self.exclusive_notify_webhook_url or self.b24_webhook_url).strip()
+
+    @property
+    def review_skip_stages(self) -> tuple[str, ...]:
+        """Стадии, которые разбор пропускает. Пустой кортеж — не пропускать.
+
+        Разбор пропускает клиента, только если ВСЕ его открытые карточки
+        стоят на таких стадиях. Человек, у которого рядом живая сделка в
+        другой воронке, разбирается как обычно: пропускается этап, а не
+        человек.
+        """
+        try:
+            values = json.loads(self.clients_review_skip_stages_json)
+        except (TypeError, ValueError):
+            return ()
+        if not isinstance(values, list):
+            return ()
+        return tuple(str(item).strip() for item in values if str(item).strip())
 
     @property
     def refusal_markers(self) -> tuple[str, ...]:
