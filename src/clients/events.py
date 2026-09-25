@@ -19,9 +19,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
-from clients.mart import CALL_PROVIDER, OWNER_TYPE_CONTACT, OWNER_TYPE_DEAL, Portfolio
+from clients.mart import (
+    CALL_PROVIDER, OWNER_TYPE_CONTACT, OWNER_TYPE_DEAL, OWNER_TYPE_LEAD, Portfolio,
+)
 from clients.schema import EVENT_ACTIVITY, EVENT_CALL, EVENT_COMMENT, EVENT_STAGE
-from clients.schema import OWNER_CONTACT, OWNER_DEAL
+from clients.schema import OWNER_CONTACT, OWNER_DEAL, OWNER_LEAD
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +84,36 @@ def stage_source_id(entity_type: str, entity_id: int, at: str,
     """
     raw = "|".join((entity_type, str(entity_id), at, stage_from, stage_to))
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _key_of_lead(
+    portfolio: Portfolio,
+    lead_id: int,
+    key_by_deal: Mapping[int, str],
+    key_by_contact: Mapping[int, str],
+) -> str | None:
+    """Чей это лид. ``None`` — лид не наш, дело не берём.
+
+    Сначала сделка, в которую лид превратился: связь прямая, её проставил
+    сам портал. Контакт — запасной путь, для лида, конвертированного в
+    чужую воронку или не конвертированного вовсе; человек тот же, раз
+    контакт тот же.
+
+    Порядок именно такой, и он не косметический. Контакт бывает общим —
+    агентским или служебным, — и через него звонок уехал бы к тому
+    клиенту, который на этом контакте оказался первым. Сделка такой
+    двусмысленности не знает: она одна.
+    """
+    lead = portfolio.leads.get(lead_id)
+    if not lead:
+        return None
+    deal_id = _int(lead.get("converted_deal_id"))
+    if deal_id:
+        found = key_by_deal.get(deal_id)
+        if found:
+            return found
+    contact_id = _int(lead.get("contact_id"))
+    return key_by_contact.get(contact_id) if contact_id else None
 
 
 def _int(value: Any) -> int | None:
@@ -147,6 +179,9 @@ def _activity_events(
             key, entity_type = key_by_deal.get(owner_id), OWNER_DEAL
         elif owner_type == OWNER_TYPE_CONTACT:
             key, entity_type = key_by_contact.get(owner_id), OWNER_CONTACT
+        elif owner_type == OWNER_TYPE_LEAD:
+            key, entity_type = _key_of_lead(portfolio, owner_id,
+                                            key_by_deal, key_by_contact), OWNER_LEAD
         else:
             continue
         if not key:
