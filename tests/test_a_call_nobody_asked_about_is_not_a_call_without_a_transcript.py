@@ -9,11 +9,16 @@
 повтор не вытесняет нетронутых.
 """
 
+import sys
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from clients.pull_transcripts import Call, _ask, plan, read_calls
+from clients import pull_transcripts
+from clients.pull_transcripts import (
+    DEFAULT_BUDGET, Call, Plan, _ask, plan, read_calls,
+)
 from clients.schema import OWNER_CONTACT, OWNER_DEAL, clients_session, init_clients_db
 from clients.transcripts import Cached
 from clients.triage import MEANINGFUL_CALL_SEC
@@ -240,3 +245,62 @@ def test_the_call_list_comes_from_the_book_and_not_from_the_portal(tmp_path):
     assert {call.activity_id for call in calls} == {101, 202}, "встреча и письмо не звонки"
     assert {call.seconds for call in calls} == {120}
     assert {call.deal_id for call in calls} == {777, 0}
+
+
+# ── предел прогона доезжает от ключа до среза ─────────────────────────
+#
+# Проверяется проводка, а не сама отсечка: та закреплена выше. Цена
+# обрыва — прогон, который обещал снять предел и тихо оставил его на
+# месте, а заметить это можно только по числу запросов на живом портале.
+
+def _budget_reaching_pull(monkeypatch, argv) -> dict:
+    seen: dict = {}
+    monkeypatch.setattr(pull_transcripts, "pull", lambda **kw: seen.update(kw) or {})
+    monkeypatch.setattr(sys, "argv", ["pull_transcripts", *argv])
+
+    assert pull_transcripts.main() == 0
+    return seen
+
+
+def test_asking_for_no_limit_really_removes_the_limit(monkeypatch):
+    """`--budget 0` обязан снять предел, а не вернуть умолчание.
+
+    Так и было: `None` означал «вызывающий не сказал» в одном месте и «без
+    предела» в другом, и прогон с `--budget 0` спросил ровно четыреста
+    звонков вместо всех четырёхсот двадцати.
+    """
+    assert _budget_reaching_pull(monkeypatch, ["--budget", "0"])["budget"] is None
+
+
+def test_a_negative_budget_does_not_quietly_cut_from_the_end(monkeypatch):
+    """`candidates[:-5]` отрезал бы пятерых с конца и никому не сказал."""
+    assert _budget_reaching_pull(monkeypatch, ["--budget", "-5"])["budget"] is None
+
+
+def test_a_run_without_the_flag_keeps_the_nightly_budget(monkeypatch):
+    """Умолчание — обещание не занимать ночь целиком, и оно обязано жить."""
+    assert _budget_reaching_pull(monkeypatch, [])["budget"] == DEFAULT_BUDGET
+
+
+def test_the_budget_reaches_the_plan_unchanged(monkeypatch):
+    """Между ключом и отсечкой значение не подменяется по дороге.
+
+    Подменялось ровно здесь, внутри `pull`, и предыдущие три теста этого
+    бы не увидели: они смотрят на вход в `pull`, а терялось значение
+    после него.
+    """
+    seen: dict = {}
+
+    @contextmanager
+    def _no_book(*args, **kwargs):
+        yield None
+
+    monkeypatch.setattr(pull_transcripts, "clients_session", _no_book)
+    monkeypatch.setattr(pull_transcripts, "read_calls", lambda conn: [])
+    monkeypatch.setattr(pull_transcripts, "cache_state", lambda ids: {})
+    monkeypatch.setattr(pull_transcripts, "plan",
+                        lambda *args, **kw: seen.update(kw) or Plan())
+
+    pull_transcripts.pull(dry_run=True, budget=None)
+
+    assert seen["budget"] is None
