@@ -153,6 +153,12 @@ def test_a_whole_run_fills_the_book(book, portfolio, portal, monkeypatch):
     assert first["calls_total"] == 1, "звонок на контакте обязан дойти до клиента"
     assert first["calls_with_transcript"] == 1, "расшифровка обязана дойти до колонки"
 
+    # Никто не помечен ушедшим: прогон видел всех. Проверка держит
+    # ПОРЯДОК — пометка опознаёт ушедших по aggregates_run_id, который
+    # проставляет _write_totals. Позови её раньше — и полный прогон
+    # объявил бы ушедшим весь портфель, не уронив при этом ничего.
+    assert [row["left_at"] for row in clients] == [None, None]
+
     run = _rows(book, "SELECT * FROM client_runs")[0]
     assert run["complete"] == 1 and run["finished_at"] is not None
     assert run["cards"] == 2

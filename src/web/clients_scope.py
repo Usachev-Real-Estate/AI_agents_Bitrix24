@@ -58,16 +58,22 @@ def apply_scope(conn: sqlite3.Connection, scope: Scope) -> None:
     if not _book_is_there(conn):
         raise BookMissing("в книге клиентов нет таблицы clients")
     conn.execute("CREATE TEMP TABLE scope_department (department_id INTEGER PRIMARY KEY)")
+    # Ушедшие из портфеля отсекаются ЗДЕСЬ, а не в каждом запросе. Через
+    # это представление дашборд видит книгу целиком — список, счётчики,
+    # карточку и всех спутников, — и отфильтровав один раз, забыть об
+    # этом в четвёртом месте уже нельзя. Состояние у такой строки
+    # заморожено на последнем видевшем её прогоне, и показывать его —
+    # значит звать брокера к человеку, которого в портфеле нет.
+    conditions = ["left_at IS NULL"]
     if not scope.unrestricted:
         conn.executemany(
             "INSERT INTO scope_department(department_id) VALUES (?)",
             [(int(value),) for value in scope.department_ids],
         )
-        where = (
-            " WHERE department_id IN (SELECT department_id FROM scope_department)"
+        conditions.append(
+            "department_id IN (SELECT department_id FROM scope_department)"
         )
-    else:
-        where = ""
+    where = " WHERE " + " AND ".join(conditions)
 
     conn.execute(f"CREATE TEMP VIEW v_client AS SELECT * FROM clients{where}")
     # Спутники сужаются ЧЕРЕЗ клиента, а не своим полем отдела: у них его

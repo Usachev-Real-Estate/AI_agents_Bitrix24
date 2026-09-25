@@ -509,6 +509,9 @@ def build(*, now: datetime | None = None, dry_run: bool = False,
             decisions=decisions, deals=portfolio.deals,
             transcribed=transcribed, refused_calls=refused_calls, markers=markers,
         )
+        # После _write_totals: она и проставляет aggregates_run_id, по
+        # которому здесь опознаются те, кого прогон не видел.
+        departed = mark_departed(conn, run_id, at=moment.isoformat())
 
         close_run(
             conn, run_id, now=moment, cards=len(cards), errors=0, complete=True,
@@ -517,6 +520,7 @@ def build(*, now: datetime | None = None, dry_run: bool = False,
 
     summary["written"] = True
     summary["states"] = by_state
+    summary["портфель"] = departed
     summary["migrations"] = len(plan.migrations)
     summary["split"] = len(plan.split)
     logger.info("Клиентский слой пересобран: %s", summary)
@@ -589,6 +593,49 @@ def _write_totals(conn, events: Sequence[Event], rows: Mapping[str, dict],
         })
     conn.executemany(_TOTALS_UPDATE, payload)
     return dict(sorted(by_state.items(), key=lambda pair: -pair[1]))
+
+
+# Кто пропал из портфеля и кто вернулся. Опознаются по `aggregates_run_id`:
+# полный прогон только что проставил его каждому, кого видел, так что
+# «не этот прогон» и значит «не видели». Список ключей для `IN (...)` тут
+# не нужен вовсе — а он был бы на две с половиной тысячи параметров.
+_MARK_DEPARTED = """
+UPDATE clients SET left_at = :at
+WHERE left_at IS NULL
+  AND (aggregates_run_id IS NULL OR aggregates_run_id != :run_id)
+"""
+
+_MARK_RETURNED = """
+UPDATE clients SET left_at = NULL
+WHERE left_at IS NOT NULL AND aggregates_run_id = :run_id
+"""
+
+
+def mark_departed(conn, run_id: int, *, at: str) -> dict[str, int]:
+    """Пометить ушедших из портфеля и снять пометку с вернувшихся.
+
+    Клиент пропадает, когда его сделку удалили или увели в чужую воронку.
+    Строку при этом НЕ удаляем: на неё ссылаются разборы (`client_reviews`
+    — единственная таблица книги, которую нельзя пересобрать) и журнал
+    переездов ключа. Но из списка «кого смотреть первым» и из очереди
+    разбора она уходит.
+
+    Без пометки такой клиент оставался бы там навсегда с состоянием,
+    замороженным на последнем видевшем его прогоне: прогон обновляет
+    только тех, кого видит. Расхождение уже было видно числом — 710 по
+    состояниям против 715 строк в таблице, и за сутки оно выросло с
+    одного до пяти.
+
+    Зовётся ТОЛЬКО на полном прогоне: неполный портфель не трогает вовсе
+    ([V20]), и пометить по нему ушедшими полпортфеля было бы худшим из
+    возможных способов это нарушить.
+    """
+    params = {"at": at, "run_id": run_id}
+    gone = conn.execute(_MARK_DEPARTED, params).rowcount
+    back = conn.execute(_MARK_RETURNED, params).rowcount
+    if gone or back:
+        logger.info("Из портфеля ушло %d, вернулось %d", gone, back)
+    return {"ушли": gone, "вернулись": back}
 
 
 def _key_by_contact(decisions: Mapping[int, Decision]) -> dict[int, str]:

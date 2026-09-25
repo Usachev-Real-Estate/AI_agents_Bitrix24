@@ -201,6 +201,11 @@ LEFT JOIN (
     FROM client_reviews GROUP BY client_key
 ) r ON r.client_key = c.client_key
 WHERE c.triage_state IN ({states})
+  -- Ушедшего из портфеля разбирать нечего: сделку удалили или увели в
+  -- чужую воронку, и состояние у строки заморожено на последнем прогоне,
+  -- который её видел. Дашборд отсекает таких представлением `v_client`,
+  -- но прогон читает книгу напрямую, и своя оговорка ему нужна.
+  AND c.left_at IS NULL
   AND (r.seen IS NULL OR r.seen < c.last_event_at)
   {skip}
 ORDER BY (COALESCE(c.calls_with_transcript, 0) > 0) DESC,
