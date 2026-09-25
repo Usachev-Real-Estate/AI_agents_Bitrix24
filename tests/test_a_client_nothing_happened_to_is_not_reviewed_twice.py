@@ -56,10 +56,11 @@ def book(tmp_path, monkeypatch):
 
 
 def _client(conn, key, *, state="cooling", last_event="2026-09-01T10:00:00+00:00",
-            silence=10):
+            silence=10, talks=0):
     conn.execute(
         "INSERT INTO clients(client_key, triage_state, last_event_at, silence_days,"
-        " updated_at) VALUES (?, ?, ?, ?, '')", (key, state, last_event, silence),
+        " calls_with_transcript, updated_at) VALUES (?, ?, ?, ?, ?, '')",
+        (key, state, last_event, silence, talks),
     )
 
 
@@ -162,9 +163,66 @@ def test_the_budget_caps_who_is_taken(book):
         for number in range(1, 6):
             _client(conn, f"p:+7900000000{number}", silence=number)
 
+    summary = run(llm=_Model(), budget=2)
+
+    assert summary["к разбору"] == 2
+    assert len(_rows(book, "SELECT * FROM client_reviews")) == 2, "остальные ждут ночи"
+
+
+def test_a_dry_run_names_the_whole_queue_and_not_just_its_slice(book):
+    """«К разбору 150» при очереди в семьсот читается как «их всего 150».
+
+    По такому отчёту нельзя понять, разгребается очередь или стоит на
+    месте, — а это единственный вопрос, ради которого сухой прогон и
+    запускают.
+    """
+    with clients_session(book) as conn:
+        for number in range(1, 8):
+            _client(conn, f"p:+7900000000{number}", silence=number)
+
+    summary = run(llm=_Model(), dry_run=True, budget=3)
+
+    assert summary["в очереди"] == 7
+    assert summary["к разбору"] == 3
+
+
+def test_the_clients_with_something_to_read_go_first(book):
+    """Порядок стоил боевого прогона: пять «данных мало» подряд.
+
+    Очередь шла по одной тишине, и первые разборы достались карточкам без
+    единого разговора. Вывод по такой карточке уже сделан правилом, и
+    пересказывать его моделью — платить за имитацию разбора.
+    """
+    with clients_session(book) as conn:
+        _client(conn, "p:+79000000001", silence=90, talks=0)
+        _client(conn, "p:+79000000002", silence=5, talks=3)
+
     with clients_session(book, readonly=True) as conn:
-        assert len(pending(conn, budget=2)) == 2
-        assert len(pending(conn, budget=None)) == 5
+        assert pending(conn) == ["p:+79000000002", "p:+79000000001"]
+
+
+def test_an_empty_card_is_moved_back_and_not_thrown_out(book):
+    """Дойдёт бюджет — разберём и их, но после тех, где есть слова."""
+    with clients_session(book) as conn:
+        _client(conn, "p:+79000000001", talks=0)
+        _client(conn, "p:+79000000002", talks=None)
+        _client(conn, "p:+79000000003", talks=2)
+
+    with clients_session(book, readonly=True) as conn:
+        found = pending(conn)
+
+    assert found[0] == "p:+79000000003"
+    assert set(found) == {"p:+79000000001", "p:+79000000002", "p:+79000000003"}
+
+
+def test_the_longest_silence_still_wins_among_equals(book):
+    """Внутри группы с материалом порядок прежний."""
+    with clients_session(book) as conn:
+        _client(conn, "p:+79000000001", silence=5, talks=1)
+        _client(conn, "p:+79000000002", silence=90, talks=1)
+
+    with clients_session(book, readonly=True) as conn:
+        assert pending(conn)[0] == "p:+79000000002"
 
 
 # ── что записывается ──────────────────────────────────────────────────
