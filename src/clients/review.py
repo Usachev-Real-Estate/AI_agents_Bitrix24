@@ -191,13 +191,25 @@ LEFT JOIN (
 ) r ON r.client_key = c.client_key
 WHERE c.triage_state IN ({states})
   AND (r.seen IS NULL OR r.seen < c.last_event_at)
-ORDER BY c.silence_days DESC, c.client_key
+ORDER BY (COALESCE(c.calls_with_transcript, 0) > 0) DESC,
+         c.silence_days DESC, c.client_key
 """
 
 
-def pending(conn: sqlite3.Connection, *, states: Sequence[str] = SCOPE,
-            budget: int | None = None) -> list[str]:
-    """Кого разбирать. Первыми — те, с кем дольше всего ничего не было.
+def pending(conn: sqlite3.Connection, *, states: Sequence[str] = SCOPE) -> list[str]:
+    """Кого разбирать. Первыми — те, у кого есть что читать.
+
+    Порядок стоил боевого прогона. Сначала очередь шла по одной тишине, и
+    первые пять разборов достались клиентам без единого разговора и без
+    единой записи человека: модель честно ответила «данных мало» пять раз
+    подряд. Вывод по такой карточке уже сделан правилом — «завели и ни
+    разу не коснулись», — и пересказывать его моделью значит платить за
+    имитацию разбора.
+
+    Пустые карточки из очереди не выброшены: они в конце. Дойдёт бюджет —
+    разберём и их, но после тех, где есть слова клиента.
+
+    Внутри каждой группы порядок прежний: дольше всего молчавшие первыми.
 
     Клиента без единого события берёт `r.seen IS NULL` — разбора у него
     ещё нет, а «завели и забыли» это самый повод. Но берёт ОДИН раз:
@@ -212,8 +224,7 @@ def pending(conn: sqlite3.Connection, *, states: Sequence[str] = SCOPE,
     """
     marks = ", ".join("?" * len(states))
     rows = conn.execute(_PENDING.format(states=marks), tuple(states)).fetchall()
-    keys = [str(row[0]) for row in rows]
-    return keys if budget is None else keys[:budget]
+    return [str(row[0]) for row in rows]
 
 
 def load(conn: sqlite3.Connection, client_key: str) -> tuple[dict, list[dict], list[FeedEvent]]:
@@ -314,7 +325,12 @@ def run(*, dry_run: bool = False, budget: int | None = DEFAULT_BUDGET,
     summary: dict[str, Any] = {"охват": list(states)}
 
     with clients_session(readonly=True) as conn:
-        keys = pending(conn, states=states, budget=budget)
+        queue = pending(conn, states=states)
+    keys = queue if budget is None else queue[:budget]
+    # Два числа, а не одно. «К разбору 150» при очереди в семьсот человек
+    # читается как «их всего сто пятьдесят», и по такому отчёту нельзя
+    # понять, разгребается очередь или стоит на месте.
+    summary["в очереди"] = len(queue)
     summary["к разбору"] = len(keys)
 
     if dry_run:
