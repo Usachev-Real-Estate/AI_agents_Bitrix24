@@ -32,6 +32,7 @@ def _portfolio(**over):
         deals={7: {"deal_id": 7, "title": "2-к", "category_id": 18,
                    "stage_id": "C18:NEW", "assigned_by_id": 10, "contact_id": 77,
                    "date_create": _at(60), "is_closed": 0}},
+        leads={},
         comments=(),
         activities=(),
         moves=(),

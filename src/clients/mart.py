@@ -29,6 +29,12 @@ logger = logging.getLogger(__name__)
 # кто звонил.
 OWNER_TYPE_DEAL = 2
 OWNER_TYPE_CONTACT = 3
+# Лид. Замер боевой витрины: 7 326 дел висят на лидах — почти четверть
+# портала. Из них 1 936 звонков принадлежат людям, которые уже стали
+# клиентами, и 497 таких клиентов книга считала не звонившими НИ РАЗУ.
+# Это не косметика: молчащий клиент, которому звонили, получает и неверное
+# состояние, и пустой разбор, и не то место в очереди у РОПа.
+OWNER_TYPE_LEAD = 1
 
 ENTITY_DEAL = "deal"
 
@@ -53,6 +59,10 @@ class Portfolio:
     deals: dict[int, dict[str, Any]]
     comments: tuple[dict[str, Any], ...]
     activities: tuple[dict[str, Any], ...]
+    # Лид → во что он превратился. Не карточки, а справочник: дело,
+    # висящее на лиде, иначе некуда деть — у события есть только
+    # `owner_id`, а он про лид, которого книга не знает.
+    leads: dict[int, dict[str, Any]]
     moves: tuple[dict[str, Any], ...]
     users: dict[int, dict[str, Any]]
     stages: dict[tuple[str, int], str]
@@ -126,16 +136,52 @@ def read_comments(conn, deal_ids: Sequence[int]) -> list[dict[str, Any]]:
     )
 
 
+def read_leads(
+    conn,
+    deal_ids: Sequence[int],
+    contact_ids: Sequence[int],
+) -> dict[int, dict[str, Any]]:
+    """Лиды, ставшие нашими клиентами.
+
+    Два пути, и оба про одного человека. Лид, превратившийся в сделку
+    портфеля, указывает на неё сам — `converted_deal_id`, точная связь,
+    подбирать по телефону не нужно. Лид, у которого проставлен наш контакт,
+    это тот же человек, даже если конвертировали его в другую воронку или
+    не конвертировали вовсе.
+
+    Берём ради дел: до конвертации звонки висят на лиде, и после неё туда
+    же и остаются. Клиент, с которым разговаривали трижды, пока он был
+    лидом, выглядел в книге не звонившим ни разу.
+    """
+    columns = (
+        "SELECT lead_id, title, status_id, converted_deal_id, contact_id,"
+        " date_create, is_converted FROM fact_lead WHERE is_deleted = 0"
+    )
+    rows = _fetch_in(
+        conn, columns + " AND converted_deal_id IN ({placeholders})", deal_ids,
+    )
+    rows.extend(_fetch_in(
+        conn, columns + " AND contact_id IN ({placeholders})", contact_ids,
+    ))
+    # Лид, пришедший обоими путями, — один лид. Ключ словаря их и сводит:
+    # без этого его звонки легли бы в ленту дважды.
+    return {int(row["lead_id"]): row for row in rows}
+
+
 def read_activities(
     conn,
     deal_ids: Sequence[int],
     contact_ids: Sequence[int],
+    lead_ids: Sequence[int] = (),
 ) -> list[dict[str, Any]]:
-    """Дела по сделкам И по их контактам (раздел 4.1 ТЗ).
+    """Дела по сделкам, по их контактам И по их лидам (раздел 4.1 ТЗ).
 
     Вторая половина не доборка, а большая часть: звонок в портале
     привязывают к контакту, а сделка ссылается на тот же контакт своим
     полем. Взяв только сделки, отчёт назвал бы молчащими тех, кто звонил.
+
+    Третья — то же самое про лидов, и цена у неё измерена: 1 936 звонков
+    у 846 клиентов, из которых 497 числились не звонившими ни разу.
     """
     columns = (
         "SELECT activity_id, owner_type_id, owner_id, provider_type_id, direction,"
@@ -153,6 +199,12 @@ def read_activities(
         columns + " WHERE owner_type_id = ? AND owner_id IN ({placeholders})",
         contact_ids,
         extra=(OWNER_TYPE_CONTACT,),
+    ))
+    rows.extend(_fetch_in(
+        conn,
+        columns + " WHERE owner_type_id = ? AND owner_id IN ({placeholders})",
+        lead_ids,
+        extra=(OWNER_TYPE_LEAD,),
     ))
     return rows
 
@@ -230,19 +282,25 @@ def read_portfolio(conn, categories: Iterable[int]) -> Portfolio:
         for deal_id in deal_ids
     )
 
+    # Лиды известны после сделок и контактов: находят их по обоим.
+    leads = read_leads(conn, deal_ids, contact_ids)
+    lead_ids = tuple(sorted(leads))
+
     portfolio = Portfolio(
         cards=cards,
         deals=deals,
+        leads=leads,
         comments=tuple(read_comments(conn, deal_ids)),
-        activities=tuple(read_activities(conn, deal_ids, contact_ids)),
+        activities=tuple(read_activities(conn, deal_ids, contact_ids, lead_ids)),
         moves=tuple(read_moves(conn, deal_ids)),
         users=read_users(conn),
         stages=read_stages(conn),
         mart_full_sync_at=last_full_sync(conn),
     )
     logger.info(
-        "Из витрины: сделок %d, контактов %d, комментариев %d, дел %d, движений %d",
-        len(deals), len(contact_ids), len(portfolio.comments),
+        "Из витрины: сделок %d, контактов %d, лидов %d, комментариев %d, "
+        "дел %d, движений %d",
+        len(deals), len(contact_ids), len(leads), len(portfolio.comments),
         len(portfolio.activities), len(portfolio.moves),
     )
     return portfolio
