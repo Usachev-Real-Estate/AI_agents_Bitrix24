@@ -10,6 +10,8 @@
 """
 
 import json
+import os
+import re
 import sqlite3
 
 import pytest
@@ -40,11 +42,13 @@ def app(tmp_path, analytics_db, monkeypatch):
     with clients_session(book) as conn:
         conn.executemany(
             "INSERT INTO clients(client_key, department_id, name, phone_norm,"
-            " phone_raw, triage_state, updated_at) VALUES (?, ?, ?, ?, ?, ?, '')",
+            " phone_raw, triage_state, calls_total, calls_with_transcript,"
+            " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '')",
             [
                 ("p:+79001112233", DEPT_A, "Свой", "+79001112233",
-                 "+7 900 111-22-33 (жена Ольга)", "abandoned"),
-                ("c:88", DEPT_B, "Чужой", None, "", "moving"),
+                 "+7 900 111-22-33 (жена Ольга)", "abandoned", 4, 1),
+                # Чужой не считан ни разу: у него колонки пустые.
+                ("c:88", DEPT_B, "Чужой", None, "", "moving", None, None),
             ],
         )
         conn.executemany(
@@ -78,6 +82,16 @@ def app(tmp_path, analytics_db, monkeypatch):
     store.create_user("rop_a", PASSWORD, "РОП А", role="rop", department_ids=[DEPT_A])
     yield application
     get_settings.cache_clear()
+
+
+def _screen(response) -> str:
+    """Текст страницы так, как его увидит человек: без тегов и переносов.
+
+    Проверять вёрстку подстрокой — значит ломать тест каждым переносом
+    строки в шаблоне и каждым `<span>`, добавленным ради оформления.
+    Утверждение должно держаться за фразу, а не за разметку вокруг неё.
+    """
+    return " ".join(re.sub(r"<[^>]+>", " ", response.text).lower().split())
 
 
 def _login(app, username: str) -> TestClient:
@@ -369,3 +383,47 @@ def test_the_menu_has_the_clients_tab(admin):
     body = admin.get(f"{BASE}/clients").text
 
     assert f'href="{BASE}/clients' in body
+
+
+def test_the_client_screen_says_how_much_there_is_to_read(admin):
+    """«Расшифровано 1 из 4 звонков» — прежде, чем верить любому разбору.
+
+    Число стоит рядом с состоянием не для красоты: разбор клиента, у
+    которого не записано ни одного разговора, опирается на даты и чужие
+    пометки, и отличить такой разбор от опирающегося на слова клиента
+    брокер обязан с первого взгляда.
+    """
+    page = _screen(admin.get(f"{BASE}/clients/p:+79001112233"))
+
+    assert "расшифровано 1 из 4 звонков" in page
+
+
+def test_a_client_nobody_counted_does_not_claim_to_have_no_calls(admin):
+    """Пустая колонка читается как «не считано», а не как «звонков нет».
+
+    Ноль на экране у неподсчитанного клиента — это приглашение закрыть
+    карточку, не открывая ленту. Между «мы не смотрели» и «смотреть нечего»
+    разница в решении брокера, а не в оформлении.
+    """
+    page = _screen(admin.get(f"{BASE}/clients/c:88"))
+
+    assert "не считано" in page
+    assert "расшифровано 0" not in page
+
+
+def test_a_run_that_could_not_read_the_cache_does_not_report_zero(admin):
+    """Прогон был, база аудита не открылась — «расшифровки не считаны».
+
+    Третий случай колонки, и единственный, в котором число звонков уже
+    известно, а число расшифровок ещё нет. Свести его к нулю значило бы
+    объявить, что у клиента с четырьмя разговорами читать нечего, — и
+    разбор, и брокер сделали бы из этого один и тот же неверный вывод.
+    """
+    with clients_session(os.environ["CLIENTS_DB_PATH"]) as conn:
+        conn.execute("UPDATE clients SET calls_with_transcript = NULL"
+                     " WHERE client_key = ?", ("p:+79001112233",))
+
+    page = _screen(admin.get(f"{BASE}/clients/p:+79001112233"))
+
+    assert "4 звонка, расшифровки не считаны" in page
+    assert "расшифровано" not in page

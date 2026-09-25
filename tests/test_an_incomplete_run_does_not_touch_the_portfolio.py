@@ -109,6 +109,14 @@ def portfolio(analytics_db):
 def portal(monkeypatch):
     holder = {}
 
+    # Кэш расшифровок подменяется ПО УМОЛЧАНИЮ, а не только там, где тест
+    # про него. Без этого прогон открывает настоящую data/violations.db из
+    # рабочего дерева: на машине разработчика она есть и отвечает пустотой,
+    # в чистой выкладке её нет — и та же проверка читает «кэш недоступен».
+    # Один и тот же тест не может зависеть от того, что лежит рядом.
+    monkeypatch.setattr(build_mod, "transcribed_calls", lambda ids: set())
+    monkeypatch.setattr(build_mod, "calls_with_refusal", lambda ids, markers: set())
+
     def _make(contacts=None, *, fail=()):
         made = _Portal(contacts if contacts is not None else CONTACTS, fail=fail)
         holder["portal"] = made
@@ -125,8 +133,11 @@ def _rows(path, sql, params=()):
         return [dict(row) for row in conn.execute(sql, params)]
 
 
-def test_a_whole_run_fills_the_book(book, portfolio, portal):
+def test_a_whole_run_fills_the_book(book, portfolio, portal, monkeypatch):
     """Полный прогон заводит клиентов, карточки, псевдонимы, ленту и журнал."""
+    # Все звонки расшифрованы: проверяется, что число доходит до колонки,
+    # а не что кэш пуст. Пустой кэш дал бы ноль и при оборванной проводке.
+    monkeypatch.setattr(build_mod, "transcribed_calls", lambda ids: set(ids))
     summary = build_mod.build(now=NOW)
 
     assert summary["written"] is True and summary["complete"] is True
@@ -140,7 +151,7 @@ def test_a_whole_run_fills_the_book(book, portfolio, portal):
     assert first["silence_days"] == 2, "касание — комментарий двухдневной давности"
     assert first["comments_by_assignee"] == 1
     assert first["calls_total"] == 1, "звонок на контакте обязан дойти до клиента"
-    assert first["calls_with_transcript"] is None, "расшифровки — следующий шаг"
+    assert first["calls_with_transcript"] == 1, "расшифровка обязана дойти до колонки"
 
     run = _rows(book, "SELECT * FROM client_runs")[0]
     assert run["complete"] == 1 and run["finished_at"] is not None

@@ -30,6 +30,23 @@
         {% endif %}</dd>
       <dt>Тишина</dt>
       <dd>{{ client.silence_days | days if client.silence_days is not none else 'не считалась' }}</dd>
+      <dt>Разговоры</dt>
+      {# Сколько у клиента есть что читать. Нужно и брокеру, и разбору
+         моделью: «ни одной расшифровки» разобраться не запрещает, но
+         означает, что отвечать придётся по датам и комментариям, а не по
+         разговорам, — и знать это надо до того, как поверишь ответу.
+
+         Три случая, а не два: полного прогона ещё не было, прогон был, но
+         кэш расшифровок не открылся, и посчитано. Слить второй с третьим в
+         ноль значило бы сказать про клиента с десятью записанными
+         разговорами, что читать у него нечего. #}
+      <dd>{% if client.calls_total is none %}<span class="muted">не считано</span>
+        {% elif client.calls_with_transcript is none %}{{ client.calls_total | int_ru }}
+          {{ client.calls_total | plural('звонок', 'звонка', 'звонков') }},
+          <span class="muted">расшифровки не считаны</span>
+        {% else %}расшифровано {{ client.calls_with_transcript | int_ru }} из
+          {{ client.calls_total | int_ru }}
+          {{ client.calls_total | plural('звонка', 'звонков', 'звонков') }}{% endif %}</dd>
       <dt>Следующий шаг</dt>
       <dd>{% if client.next_step_at %}{{ client.next_step_at | date_ru }}
           {% if client.next_step_overdue %}<span class="badge badge-lost">просрочен</span>{% endif %}

@@ -17,11 +17,13 @@
 обращение к порталу. Здесь оно даже проще — портал вызывается ровно один
 раз и до начала записи.
 
-Чего этот шаг НЕ делает, чтобы не искать потом: не считает ``triage_state``
-(раздел 6, отдельный пункт плана), не ходит за расшифровками (раздел 5) и
-не встраивается в прогон ``dossier`` (шаги 1–2 раздела 4). Поэтому
-``calls_with_transcript`` и ``calls_pending`` остаются NULL — «не считано»,
-а не ноль.
+Чего этот шаг НЕ делает, чтобы не искать потом: не встраивается в прогон
+``dossier`` (шаги 1–2 раздела 4) и не заглядывает в очередь расшифровок
+``transcript_launches``. Поэтому ``calls_pending`` остаётся NULL — «не
+считано», а не ноль: постановок со значениями ``queued | deferred |
+absent`` в той таблице не бывает ни одной `[V27]`, а выдумать число по
+нерасшифрованным звонкам значило бы сказать экрану, что очередь их взяла,
+когда о ней ничего не известно.
 """
 
 from __future__ import annotations
@@ -46,6 +48,7 @@ from clients.contacts import fetch_contacts  # noqa: E402
 from clients.events import Event, Totals, build_events, totals  # noqa: E402
 from clients.facts import collect as collect_facts  # noqa: E402
 from clients.facts import coverage as call_coverage  # noqa: E402
+from clients.facts import calls_with_text  # noqa: E402
 from clients.keys import Decision, assign_keys  # noqa: E402
 from clients.mart import Portfolio, read_portfolio  # noqa: E402
 from clients.transcripts import DEGRADED_NAME as TRANSCRIPTS_DEGRADED  # noqa: E402
@@ -104,6 +107,7 @@ UPDATE clients SET
     comments_by_assignee = :comments_by_assignee,
     comments_by_assignee_30d = :comments_by_assignee_30d,
     calls_total = :calls_total,
+    calls_with_transcript = :calls_with_transcript,
     triage_state = :triage_state,
     triage_reason = :triage_reason,
     next_step_at = :next_step_at,
@@ -574,6 +578,7 @@ def _write_totals(conn, events: Sequence[Event], rows: Mapping[str, dict],
             "comments_by_assignee": summary.comments_by_assignee,
             "comments_by_assignee_30d": summary.comments_by_assignee_30d,
             "calls_total": summary.calls_total,
+            "calls_with_transcript": calls_with_text(lane, transcribed),
             "triage_state": verdict.state,
             "triage_reason": verdict.reason,
             "next_step_at": summary.next_step_at,
