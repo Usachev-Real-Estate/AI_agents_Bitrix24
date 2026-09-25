@@ -272,12 +272,31 @@ def read_client(conn: sqlite3.Connection, client_key: str) -> dict[str, Any] | N
             )
         ],
         "reviews": [
-            dict(item) for item in conn.execute(
+            _review(item) for item in conn.execute(
                 "SELECT * FROM v_client_review WHERE client_key = ?"
                 " ORDER BY created_at DESC", (client_key,),
             )
         ],
     }
+
+
+def _review(row: sqlite3.Row) -> dict[str, Any]:
+    """Разбор с разобранным списком проблем.
+
+    В базе он строкой JSON — той же причины ради, что и payload события:
+    колонок под заранее неизвестный список не бывает. Читателю нужен
+    список, а не строка со списком внутри: разбирать её второй раз
+    пришлось бы и экрану, и ручке, и они разошлись бы на первом же
+    кривом значении.
+    """
+    item = dict(row)
+    raw = item.pop("issues_json", "") or "[]"
+    try:
+        found = json.loads(raw)
+    except (TypeError, ValueError):
+        found = []
+    item["issues"] = [str(value) for value in found] if isinstance(found, list) else []
+    return item
 
 
 def _event(row: sqlite3.Row) -> dict[str, Any]:

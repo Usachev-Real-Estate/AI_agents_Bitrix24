@@ -87,11 +87,21 @@
   {% for review in reviews %}
   <div class="review">
     <p class="muted">{{ review.created_at | date_ru }} · {{ review.author or 'без автора' }}
+      {% if review.verdict %}<span class="badge">{{ review.verdict }}</span>{% endif %}
+      {# Разбор по датам и чужим пометкам и разбор по словам клиента — разные
+         вещи, и отличать их брокер должен раньше, чем прочтёт вывод. #}
+      {% if not review.enough_data %}
+        <span class="badge badge-lost" title="Ни расшифровок, ни записей человека">
+          данных мало</span>
+      {% endif %}
       {% if client.last_event_at and review.reviewed_through
             and client.last_event_at > review.reviewed_through %}
         <span class="badge">устарел: с тех пор были события</span>
       {% endif %}</p>
     <p>{{ review.summary }}</p>
+    {% if review.issues %}
+      <p class="muted">{{ review.issues | join(' · ') }}</p>
+    {% endif %}
     {% if review.recommendation %}<p><b>Что делать:</b> {{ review.recommendation }}</p>{% endif %}
   </div>
   {% endfor %}

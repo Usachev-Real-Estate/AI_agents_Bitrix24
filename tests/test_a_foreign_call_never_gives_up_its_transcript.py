@@ -427,3 +427,71 @@ def test_a_run_that_could_not_read_the_cache_does_not_report_zero(admin):
 
     assert "4 звонка, расшифровки не считаны" in page
     assert "расшифровано" not in page
+
+
+def test_the_review_reaches_the_card_with_its_verdict_and_issues(admin):
+    """Разбор без вердикта и списка проблем — это просто абзац текста.
+
+    Вердикт стоит рядом с датой, потому что по нему решают, читать ли
+    дальше; проблемы — потому что их будет считать справочник раздела 8.
+    """
+    with clients_session(os.environ["CLIENTS_DB_PATH"]) as conn:
+        conn.execute(
+            "INSERT INTO client_reviews(client_key, created_at, reviewed_through,"
+            " summary, verdict, issues_json, recommendation, enough_data, author)"
+            " VALUES (?, '2026-09-25T09:00:00+00:00', '2026-09-24T00:00:00+00:00',"
+            " ?, ?, ?, ?, 1, 'модель')",
+            ("p:+79001112233", "Клиент просил перезвонить после майских.",
+             "нужен звонок", '["обещали и не перезвонили", "нет следующего шага"]',
+             "Позвонить и предложить два варианта"),
+        )
+
+    page = _screen(admin.get(f"{BASE}/clients/p:+79001112233"))
+
+    assert "клиент просил перезвонить после майских" in page
+    assert "нужен звонок" in page
+    assert "обещали и не перезвонили · нет следующего шага" in page
+    assert "позвонить и предложить два варианта" in page
+    assert "данных мало" not in page
+
+
+def test_a_review_made_out_of_dates_says_so_on_the_card(admin):
+    """Вывод по датам и вывод по словам клиента — разные вещи.
+
+    Различать их брокер должен раньше, чем прочтёт сам вывод, иначе
+    «клиент остыл» из пустой карточки читается так же уверенно, как то же
+    самое из расшифровки разговора.
+    """
+    with clients_session(os.environ["CLIENTS_DB_PATH"]) as conn:
+        conn.execute(
+            "INSERT INTO client_reviews(client_key, created_at, reviewed_through,"
+            " summary, verdict, issues_json, enough_data, author)"
+            " VALUES (?, '2026-09-25T09:00:00+00:00', '2026-09-24T00:00:00+00:00',"
+            " ?, ?, '[]', 0, 'модель')",
+            ("p:+79001112233", "Данных мало: ни одного записанного разговора.",
+             "скорее потерян"),
+        )
+
+    page = _screen(admin.get(f"{BASE}/clients/p:+79001112233"))
+
+    assert "данных мало" in page
+
+
+def test_a_broken_issues_list_does_not_break_the_card(admin):
+    """В колонке лежит JSON, и однажды там окажется не список.
+
+    Уронить карточку из-за кривой строки, которую написала модель, —
+    значит отдать ей право гасить экран.
+    """
+    with clients_session(os.environ["CLIENTS_DB_PATH"]) as conn:
+        conn.execute(
+            "INSERT INTO client_reviews(client_key, created_at, reviewed_through,"
+            " summary, issues_json, enough_data, author)"
+            " VALUES (?, '2026-09-25T09:00:00+00:00', '', ?, ?, 1, 'модель')",
+            ("p:+79001112233", "Вывод есть.", "не json вовсе"),
+        )
+
+    response = admin.get(f"{BASE}/clients/p:+79001112233")
+
+    assert response.status_code == 200
+    assert "вывод есть." in _screen(response)
