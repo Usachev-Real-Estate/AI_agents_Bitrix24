@@ -6,9 +6,14 @@
 программа-читатель вместо отказа получила бы HTML и разбирала бы его как
 данные.
 
-Все три ручки читают только через область видимости (`clients_scope`): на
-соединении без неё запрос упадёт на отсутствующем `v_client`, а не покажет
-РОПу всю компанию.
+Право на клиента спрашивается через область видимости (`clients_scope`):
+на соединении без неё запрос упадёт на отсутствующем `v_client`, а не
+покажет РОПу всю компанию.
+
+Две ручки — расшифровка звонка и выписка — читают потом НЕ через неё:
+тексты лежат в базе аудита, где области видимости нет вовсе, а выписку
+собирает `clients.review` по таблицам напрямую. Поэтому порядок в них
+обратить нельзя: сначала «твой ли это клиент», и только потом текст.
 
 Отдельным файлом, а не в `routes_api.py`: тот про витрину, эти про книгу, и
 общего у них — только префикс.
@@ -23,10 +28,13 @@ from datetime import datetime, timezone
 from typing import Any, Iterator
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (
+    HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse,
+)
 
 import clients_read as read
-from clients.review import parse_issues, valid_through
+from clients.brief import as_text
+from clients.review import make_brief, parse_issues, valid_through
 from clients.schema import (
     ISSUE_LABELS, ISSUE_ORDER, TRIAGE_LABELS, TRIAGE_ORDER, clients_session,
 )
@@ -105,11 +113,57 @@ async def api_clients(request: Request) -> StreamingResponse | JSONResponse:
                                          cursor=cursor):
                 yield (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
 
+    # `format=text` меняет ТОЛЬКО тип ответа: строки те же, ни одной
+    # лишней и ни одной другой. Нужен потому, что `application/x-ndjson`
+    # браузер скачивает файлом, а не показывает, — и читатель, который
+    # видит страницу, а не поток, получил бы вместо книги пустоту.
+    as_page = request.query_params.get("format") == "text"
     return StreamingResponse(
         lines(),
-        media_type="application/x-ndjson",
+        media_type="text/plain" if as_page else "application/x-ndjson",
         headers={"Cache-Control": "no-store"},
     )
+
+
+@router.get("/clients/{client_key:path}/brief", response_model=None)
+async def api_client_brief(
+    request: Request, client_key: str,
+) -> PlainTextResponse | JSONResponse:
+    """Выписка по клиенту словами — ровно то, что видит разбирающая модель.
+
+    Объявлена ВЫШЕ `/clients/{client_key:path}`, и это не вкусовщина. Ключ
+    объявлен `:path`, то есть забирает и слэши: стоя ниже, этот адрес
+    целиком достался бы той ручке — она пошла бы искать клиента с ключом
+    `p:+7…/brief`, не нашла и ответила 404. Выглядело бы это как опечатка в
+    ключе, а не как перекрытый маршрут, и искали бы не там. Порядок
+    закреплён тестом.
+
+    Отдаётся текстом, а не JSON, хотя JSON браузер тоже показывает:
+    выписка с расшифровками в JSON — одна строка на мегабайт, где переводы
+    строк записаны как `\n`. Читать её глазами нельзя, а читателю здесь
+    именно читать.
+
+    Право спрашивается У КНИГИ в области видимости, и только потом читается
+    выписка — тем же порядком, что и расшифровка одного звонка ниже.
+    `make_brief` читает таблицы напрямую, области видимости на них нет:
+    обратный порядок отдал бы РОПу чужого клиента целиком, с разговорами.
+    """
+    try:
+        with scoped_clients(scope_for(request)) as conn:
+            conn.row_factory = sqlite3.Row
+            mine = read.read_client(conn, client_key) is not None
+    except BookMissing:
+        return _book_missing()
+
+    if not mine:
+        # Чужой и несуществующий отвечают одинаково — по той же причине,
+        # что и в ручке клиента: разные ответы превратили бы адрес в
+        # перечислитель ключей.
+        raise HTTPException(status_code=404, detail="Клиент не найден")
+
+    with clients_session(readonly=True) as conn:
+        found = make_brief(conn, client_key)
+    return PlainTextResponse(as_text(found), headers={"Cache-Control": "no-store"})
 
 
 @router.get("/clients/{client_key:path}", response_model=None)
