@@ -46,7 +46,7 @@ BUSY_TIMEOUT_MS = 10_000
 
 # 2: колонка key_reason в clients — почему ключ получился таким.
 # 3: колонка assignee_count — сколько брокеров ведёт клиента на самом деле.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # --------------------------------------------------------------------------
 # словарь значений
@@ -128,6 +128,37 @@ OWNER_LEAD = "lead"
 ENTITY_DEAL = "deal"
 ENTITY_LEAD = "lead"
 
+# Коды проблем раздела 8. Кодом, как и triage_state, и по той же причине:
+# значение уходит в `?issue=...`, в фильтр и в выгрузку, а кириллица там
+# превращается в проценты.
+#
+# В отличие от состояния, проблем у клиента может быть несколько сразу:
+# состояние отвечает «кого смотреть первым», а это — «что именно не так».
+# Один человек бывает и брошен, и без комментария ответственного.
+ISSUE_NO_ASSIGNEE_COMMENT = "no_assignee_comment"
+ISSUE_PROMISE_OVERDUE = "promise_overdue"
+ISSUE_REFUSAL_NOT_REFLECTED = "refusal_not_reflected"
+ISSUE_ABANDONED = "abandoned"
+ISSUE_MISSING_TRANSCRIPTS = "missing_transcripts"
+
+# Порядок на вкладке «Исключения»: сначала то, что требует разговора с
+# брокером, потом то, что требует разговора с клиентом, потом дыры в данных.
+ISSUE_ORDER: tuple[str, ...] = (
+    ISSUE_REFUSAL_NOT_REFLECTED,
+    ISSUE_PROMISE_OVERDUE,
+    ISSUE_NO_ASSIGNEE_COMMENT,
+    ISSUE_ABANDONED,
+    ISSUE_MISSING_TRANSCRIPTS,
+)
+
+ISSUE_LABELS: dict[str, str] = {
+    ISSUE_REFUSAL_NOT_REFLECTED: "отказ не отражён в карточке",
+    ISSUE_PROMISE_OVERDUE: "обещание просрочено",
+    ISSUE_NO_ASSIGNEE_COMMENT: "ответственный ни разу не написал",
+    ISSUE_ABANDONED: "брошен дольше порога",
+    ISSUE_MISSING_TRANSCRIPTS: "разговоры без расшифровки",
+}
+
 ALIAS_PHONE = "phone"
 ALIAS_CONTACT = "contact"
 ALIAS_KEY = "key"
@@ -144,6 +175,18 @@ CLIENT_CHILD_TABLES: tuple[str, ...] = (
     "client_aliases",
     "client_events",
     "client_reviews",
+)
+
+# Таблицы, которые при переезде ключа НЕ перенацеливают, а пересобирают.
+# Разница не в аккуратности, а в природе данных: эти строки выводятся из
+# портфеля целиком каждым полным прогоном, и переезд им не нужен — он
+# случился бы за секунды до `DELETE`.
+#
+# Хуже того, он опасен. Ключ у `client_issues` составной (клиент + код), и
+# `UPDATE SET client_key = ...` при совпадении кода у прежнего и нового
+# клиента упёрся бы в уникальность и уронил ночной прогон целиком.
+CLIENT_REBUILT_TABLES: tuple[str, ...] = (
+    "client_issues",
 )
 
 _DDL: tuple[str, ...] = (
@@ -262,6 +305,25 @@ _DDL: tuple[str, ...] = (
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_client_events_feed ON client_events(client_key, at);
+    """,
+    # ---------- проблемы (раздел 8) ----------
+    #
+    # Таблицей, а не колонками: кодов пять сегодня и шесть завтра, и каждый
+    # следующий стоил бы миграции. Считать по ней тоже проще — счётчики
+    # вкладки «Исключения» это один GROUP BY, а не пять SUM.
+    #
+    # Пересобирается целиком каждым полным прогоном: проблема выводится из
+    # портфеля, а не пишется человеком, и хранить её историю незачем —
+    # история лежит в самом портфеле.
+    """
+    CREATE TABLE IF NOT EXISTS client_issues (
+        client_key  TEXT NOT NULL,
+        code        TEXT NOT NULL,
+        PRIMARY KEY (client_key, code)
+    );
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_client_issues_code ON client_issues(code);
     """,
     # ---------- разборы ----------
     #

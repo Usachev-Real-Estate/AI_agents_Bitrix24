@@ -145,6 +145,7 @@ def _portfolio(leads, activities):
         cards=(Card(7, "2-к", "C18:NEW", 77),),
         deals={7: {"deal_id": 7, "contact_id": 77, "date_create": _at(60)}},
         leads=leads,
+        promises={},
         comments=(),
         activities=activities,
         moves=(),

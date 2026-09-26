@@ -28,6 +28,7 @@ EXPECTED_TABLES = {
     "client_aliases",
     "client_events",
     "client_reviews",
+    "client_issues",
     "client_merges",
     "merge_conflicts",
     "client_runs",

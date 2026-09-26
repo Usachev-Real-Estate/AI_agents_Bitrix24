@@ -63,6 +63,10 @@ class Portfolio:
     # висящее на лиде, иначе некуда деть — у события есть только
     # `owner_id`, а он про лид, которого книга не знает.
     leads: dict[int, dict[str, Any]]
+    # Сделка → её действующее обещание и срок законного молчания.
+    # Справочник раздела 8 спрашивает «просрочено ли», и ответ живёт не в
+    # ленте, а в прочитанных комментариях.
+    promises: dict[int, dict[str, Any]]
     moves: tuple[dict[str, Any], ...]
     users: dict[int, dict[str, Any]]
     stages: dict[tuple[str, int], str]
@@ -209,6 +213,33 @@ def read_activities(
     return rows
 
 
+def read_promises(conn, deal_ids: Sequence[int]) -> dict[int, dict[str, Any]]:
+    """Обещания брокеров по карточкам — то, что назвал он сам.
+
+    `fact_comment_read` — это прочитанные моделью комментарии таймлайна:
+    что брокер обещал сделать и к какому сроку. Срок в прошлом — самый
+    надёжный сигнал из всех, потому что его назвал сам исполнитель.
+
+    Запись на карточку РОВНО ОДНА: `PRIMARY KEY (entity_type, entity_id)`.
+    Читаются все комментарии карточки сразу, и строка перезаписывается по
+    мере того, как появляются новые, — так что «самое позднее обещание»
+    выбирать не из чего, оно там уже лежит. Группировка была бы лишней и
+    сообщала бы читателю неправду об устройстве данных.
+
+    `wait_until` — «до какой даты молчание законно»: «созвонимся в конце
+    осени». Без него отчёт ругал бы за правильную работу, поэтому едет
+    рядом.
+    """
+    rows = _fetch_in(
+        conn,
+        "SELECT entity_id, promised_at, wait_until FROM fact_comment_read"
+        " WHERE entity_type = ? AND entity_id IN ({placeholders})",
+        deal_ids,
+        extra=(ENTITY_DEAL,),
+    )
+    return {int(row["entity_id"]): row for row in rows}
+
+
 def read_moves(conn, deal_ids: Sequence[int]) -> list[dict[str, Any]]:
     """Движение сделок по стадиям, по порядку внутри карточки."""
     rows = _fetch_in(
@@ -290,6 +321,7 @@ def read_portfolio(conn, categories: Iterable[int]) -> Portfolio:
         cards=cards,
         deals=deals,
         leads=leads,
+        promises=read_promises(conn, deal_ids),
         comments=tuple(read_comments(conn, deal_ids)),
         activities=tuple(read_activities(conn, deal_ids, contact_ids, lead_ids)),
         moves=tuple(read_moves(conn, deal_ids)),

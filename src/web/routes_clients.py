@@ -25,7 +25,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 import clients_read as read
-from clients.schema import TRIAGE_LABELS, TRIAGE_ORDER
+from clients.schema import (
+    ISSUE_LABELS, ISSUE_ORDER, TRIAGE_LABELS, TRIAGE_ORDER,
+)
 from clients_scope import BookMissing, scoped_clients
 from context import base_context, scope_for
 from transcripts_read import read_transcript
@@ -46,7 +48,7 @@ PAGE_SIZE = 100
 # адресной строки попадает в запрос.
 FILTER_PARAMS = (
     "triage_state", "assignee_id", "department_id", "category_id",
-    "stage_id", "silence_gt", "is_agent", "reviewed",
+    "stage_id", "silence_gt", "is_agent", "reviewed", "issue",
 )
 
 
@@ -180,6 +182,8 @@ def _page_context(request: Request, active: str) -> dict[str, Any]:
     context = base_context(request, active=active)
     context["triage_labels"] = TRIAGE_LABELS
     context["triage_order"] = TRIAGE_ORDER
+    context["issue_labels"] = ISSUE_LABELS
+    context["issue_order"] = ISSUE_ORDER
     return context
 
 
@@ -204,7 +208,13 @@ def _no_book(request: Request) -> HTMLResponse:
         "clients": [], "total": 0, "counts": {}, "filters": {},
         "page": 1, "pages": 1,
     })
-    return _render(request, "clients.html", context)
+    # Шаблон берётся по тому, куда человек шёл: «Исключения» не знают про
+    # список и фильтры, а список — про счётчики проблем, и подставив не
+    # тот, экран «книги нет» упал бы в пятисотку ровно там, где он и
+    # заводился, чтобы этого не случилось.
+    template = "exceptions.html" if context.get("active") == "exceptions" \
+        else "clients.html"
+    return _render(request, template, context)
 
 
 @pages.get("/clients", response_class=HTMLResponse)
@@ -231,6 +241,26 @@ async def clients_page(request: Request) -> HTMLResponse:
         "pages": max(1, -(-total // PAGE_SIZE)),
     })
     return _render(request, "clients.html", context)
+
+
+@pages.get("/exceptions", response_class=HTMLResponse)
+async def exceptions_page(request: Request) -> HTMLResponse:
+    """Вкладка «Исключения»: пять счётчиков раздела 8 ТЗ.
+
+    Каждый ведёт в список клиентов, отфильтрованный по этой проблеме — на
+    ту же вкладку «Клиенты». Отдельного списка здесь нет намеренно: два
+    списка клиентов с разными колонками разошлись бы в первый же день,
+    когда в один добавят столбец.
+    """
+    context = _page_context(request, "exceptions")
+    try:
+        with scoped_clients(scope_for(request)) as conn:
+            counts = read.counts_by_issue(conn)
+    except BookMissing:
+        return _no_book(request)
+
+    context.update({"counts": counts, "total": sum(counts.values())})
+    return _render(request, "exceptions.html", context)
 
 
 @pages.get("/clients/{client_key:path}", response_class=HTMLResponse)

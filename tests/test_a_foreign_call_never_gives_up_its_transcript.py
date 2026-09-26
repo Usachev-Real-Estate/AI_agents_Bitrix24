@@ -20,7 +20,12 @@ from fastapi.testclient import TestClient
 
 import store
 from app import create_app
-from clients.schema import clients_session, init_clients_db
+import clients_read
+from clients.schema import (
+    ISSUE_ORDER, clients_session, init_clients_db,
+)
+from clients_scope import scoped_clients
+from context import Scope
 from config import get_settings
 
 BASE = "/dashboard"
@@ -238,7 +243,7 @@ def test_the_whole_client_carries_his_history(admin):
     """Ручка для машины отдаёт клиента, карточки, ленту и разборы."""
     got = admin.get(f"{BASE}/api/clients/p:+79001112233").json()
 
-    assert set(got) == {"client", "cards", "events", "reviews"}
+    assert set(got) == {"client", "cards", "events", "reviews", "issues"}
     assert got["events"][0]["payload"] == {"direction": 1}
 
 
@@ -495,3 +500,118 @@ def test_a_broken_issues_list_does_not_break_the_card(admin):
 
     assert response.status_code == 200
     assert "вывод есть." in _screen(response)
+
+
+# ── вкладка «Исключения» (раздел 8) ───────────────────────────────────
+
+def _issue(conn, key, code):
+    conn.execute("INSERT INTO client_issues(client_key, code) VALUES (?, ?)",
+                 (key, code))
+
+
+def test_the_exceptions_tab_counts_people_not_rows(admin):
+    """У одного человека бывает несколько претензий сразу.
+
+    Сумма счётчиков поэтому больше числа клиентов — и это правда, которую
+    экран говорит вслух. Считать строками значило бы обещать РОПу, что
+    работы вдвое больше, чем людей.
+    """
+    with clients_session(os.environ["CLIENTS_DB_PATH"]) as conn:
+        _issue(conn, "p:+79001112233", "abandoned")
+        _issue(conn, "p:+79001112233", "no_assignee_comment")
+        _issue(conn, "c:88", "abandoned")
+
+    page = _screen(admin.get(f"{BASE}/exceptions"))
+
+    assert "брошен дольше порога" in page
+    assert "ответственный ни разу не написал" in page
+    assert "всего претензий 3" in page
+
+
+def test_the_counter_names_all_five_codes_even_at_zero(app):
+    """Проверяется у функции, а не по экрану: шаблон терпелив.
+
+    Он перебирает ISSUE_ORDER и берёт число через `get(code, 0)`, так что
+    пропавший ключ на экране незаметен. А наружу, в выгрузку и в ручку,
+    уйдёт именно то, что вернула функция, — и там пропажа означала бы
+    «такой проблемы у нас не бывает».
+    """
+    with scoped_clients(Scope.everything()) as conn:
+        counts = clients_read.counts_by_issue(conn)
+
+    assert list(counts) == list(ISSUE_ORDER)
+    assert set(counts.values()) == {0}
+
+
+def test_a_counter_at_zero_stays_on_the_screen(admin):
+    """Пропавшая строка читается как «такой проблемы не бывает».
+
+    А правда в том, что сегодня её нет ни у кого, — и это хорошая
+    новость, которую видно только если строка на месте.
+    """
+    page = _screen(admin.get(f"{BASE}/exceptions"))
+
+    assert "обещание просрочено" in page
+    assert "никого" in page
+
+
+def test_a_head_of_department_counts_only_his_own(rop_a):
+    """Счётчик суживается тем же представлением, что и список."""
+    with clients_session(os.environ["CLIENTS_DB_PATH"]) as conn:
+        _issue(conn, "p:+79001112233", "abandoned")   # свой отдел
+        _issue(conn, "c:88", "abandoned")             # чужой
+
+    page = _screen(rop_a.get(f"{BASE}/exceptions"))
+
+    assert "всего претензий 1" in page
+
+
+def test_the_counter_leads_to_the_filtered_list(admin):
+    """Счётчик без ссылки — это число, по которому нечего сделать."""
+    with clients_session(os.environ["CLIENTS_DB_PATH"]) as conn:
+        _issue(conn, "p:+79001112233", "abandoned")
+
+    assert "/clients?issue=abandoned" in admin.get(f"{BASE}/exceptions").text
+
+
+def test_the_issue_filter_narrows_the_client_list(admin):
+    with clients_session(os.environ["CLIENTS_DB_PATH"]) as conn:
+        _issue(conn, "p:+79001112233", "promise_overdue")
+
+    page = _screen(admin.get(f"{BASE}/clients?issue=promise_overdue"))
+    other = _screen(admin.get(f"{BASE}/clients?issue=abandoned"))
+
+    assert "свой" in page
+    assert "под фильтр никто не подошёл" in other
+
+
+def test_a_client_with_two_issues_appears_in_the_list_once(admin):
+    """EXISTS, а не соединение: иначе страница на сто строк — это шестьдесят
+    человек, и «всего» врёт."""
+    with clients_session(os.environ["CLIENTS_DB_PATH"]) as conn:
+        _issue(conn, "p:+79001112233", "abandoned")
+        _issue(conn, "p:+79001112233", "no_assignee_comment")
+
+    page = _screen(admin.get(f"{BASE}/clients?issue=abandoned"))
+
+    assert page.count("(без имени)") == 0
+    assert "всего 1 по фильтру" in page
+
+
+def test_the_card_carries_the_codes(admin):
+    """Ручка отдаёт их списком: фильтр и карточка читают одно и то же."""
+    with clients_session(os.environ["CLIENTS_DB_PATH"]) as conn:
+        _issue(conn, "p:+79001112233", "abandoned")
+
+    got = admin.get(f"{BASE}/api/clients/p:+79001112233").json()
+
+    assert got["issues"] == ["abandoned"]
+
+
+def test_the_exceptions_tab_explains_itself_without_a_book(app_without_book):
+    """Экран «книги нет» не должен падать на чужом шаблоне."""
+    session = _login(app_without_book, "boss")
+    response = session.get(f"{BASE}/exceptions")
+
+    assert response.status_code == 200
+    assert "книга клиентов ещё не собрана" in _screen(response)

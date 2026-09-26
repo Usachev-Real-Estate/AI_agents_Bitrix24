@@ -600,3 +600,92 @@ def test_a_dry_run_leaves_no_file_behind(tmp_path, portfolio, portal, monkeypatc
 
     assert summary["written"] is False
     assert not path.exists(), "сухой прогон оставил за собой файл базы"
+
+
+# ── проблемы раздела 8 пересобираются прогоном ────────────────────────
+
+def _promise(deal_id, *, promised, wait=None):
+    with analytics_session() as conn:
+        conn.execute(
+            "INSERT INTO fact_comment_read(entity_type, entity_id, source_hash,"
+            " promised_at, wait_until, read_at) VALUES ('deal', ?, 'h', ?, ?, ?)",
+            (deal_id, promised, wait, promised),
+        )
+
+
+def test_a_broken_promise_becomes_a_complaint(book, portfolio, portal, monkeypatch):
+    """Обещание с истёкшим сроком — код `promise_overdue` в книге.
+
+    Источник у него отдельный от ленты: прочитанные моделью комментарии
+    таймлайна. Без этого чтения справочник раздела 8 остался бы на четырёх
+    кодах из пяти, и самый конкретный сигнал — названный самим брокером
+    срок — не попал бы никуда.
+    """
+    monkeypatch.setattr(build_mod, "transcribed_calls", lambda ids: set(ids))
+    _promise(7, promised=_at(10))
+
+    build_mod.build(now=NOW)
+
+    # Именно у этого клиента: у второй сделки фикстуры нет комментариев,
+    # и своя, законная претензия у неё тоже есть.
+    rows = _rows(book, "SELECT code FROM client_issues WHERE client_key = ?",
+                 ("p:+79001112233",))
+    assert [row["code"] for row in rows] == ["promise_overdue"]
+
+
+def test_a_card_nobody_ever_touched_gets_the_abandoned_complaint(
+        book, portfolio, portal, monkeypatch):
+    """Правило зовёт его брошенным — претензия обязана согласиться.
+
+    Вторая сделка фикстуры заведена сорок дней назад и не тронута ни разу:
+    касаний нет, и `Totals.silence_days` у неё пусто. Правило 5
+    откатывается на дату заведения и объявляет «брошен». Считай претензию
+    по `summary.silence_days` — и тот же человек оказался бы брошенным в
+    списке и без претензии в исключениях.
+    """
+    monkeypatch.setattr(build_mod, "transcribed_calls", lambda ids: set(ids))
+
+    build_mod.build(now=NOW)
+
+    rows = _rows(
+        book,
+        "SELECT c.triage_state, i.code FROM clients c"
+        " JOIN client_issues i ON i.client_key = c.client_key"
+        " WHERE c.triage_state = 'abandoned'",
+    )
+    assert "abandoned" in [row["code"] for row in rows], (
+        "брошенный по правилу обязан получить и претензию"
+    )
+
+
+def test_agreed_silence_is_not_a_complaint(book, portfolio, portal, monkeypatch):
+    """«Созвонимся в конце осени» — договорённость, а не просрочка."""
+    monkeypatch.setattr(build_mod, "transcribed_calls", lambda ids: set(ids))
+    _promise(7, promised=_at(10), wait=_at(-10))
+
+    build_mod.build(now=NOW)
+
+    assert _rows(book, "SELECT * FROM client_issues WHERE client_key = ?",
+                 ("p:+79001112233",)) == []
+
+
+def test_the_complaints_are_rebuilt_and_not_piled_up(book, portfolio, portal,
+                                                     monkeypatch):
+    """Строка, пережившая исчезновение своей причины, — счёт за исправленное.
+
+    Проблемы выводятся из портфеля, а не пишутся человеком: прогон сносит
+    таблицу целиком и заполняет заново. Иначе брокер отвечал бы за
+    претензию, которую он снял неделю назад.
+    """
+    monkeypatch.setattr(build_mod, "transcribed_calls", lambda ids: set(ids))
+    with clients_session(book) as conn:
+        conn.execute("INSERT INTO clients(client_key) VALUES ('p:+70000000000')")
+        conn.execute(
+            "INSERT INTO client_issues(client_key, code)"
+            " VALUES ('p:+70000000000', 'abandoned')"
+        )
+
+    build_mod.build(now=NOW)
+
+    keys = {row["client_key"] for row in _rows(book, "SELECT * FROM client_issues")}
+    assert "p:+70000000000" not in keys, "прошлая претензия не пережила прогон"

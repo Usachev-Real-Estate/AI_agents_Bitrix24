@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Исключения{% endblock %}
+
+{# Фильтры периода и воронки здесь не при чём: претензия либо есть сейчас,
+   либо нет. «Ни одного комментария ответственного за август» — это не
+   претензия, а способ найти её там, где её нет. #}
+{% block filters %}{% endblock %}
+
+{% block content %}
+<h1 class="section-title">Исключения · что именно не так</h1>
+
+{% if book_missing %}
+  <div class="card empty"><p>{{ book_missing }}</p></div>
+{% else %}
+
+<div class="card">
+  <div class="card-head">
+    <div>
+      <h2>Счётчики</h2>
+      <p class="card-sub">
+        Считаются по людям, не по строкам. У одного человека бывает
+        несколько претензий сразу, поэтому сумма больше числа клиентов —
+        так и задумано.
+      </p>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Претензия</th><th class="num">Клиентов</th><th></th></tr></thead>
+      <tbody>
+        {% for code in issue_order %}
+        <tr>
+          <td>{{ issue_labels[code] }}
+            <span class="muted nowrap">{{ code }}</span></td>
+          <td class="num">{{ counts.get(code, 0) | int_ru }}</td>
+          <td class="nowrap">
+            {# Ноль никуда не ведёт: ссылка на пустой список выглядит как
+               поломка, а не как хорошая новость. #}
+            {% if counts.get(code) %}
+              <a href="{{ base_path }}/clients?issue={{ code }}">показать →</a>
+            {% else %}
+              <span class="muted">никого</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{# Нулевые счётчики остаются на экране: пропавшая строка читается как
+   «такой проблемы у нас не бывает», а правда в том, что сегодня её нет ни
+   у кого, — и это хорошая новость, которую видно только если строка есть. #}
+<p class="muted">
+  Всего претензий {{ total | int_ru }}. Порог тишины и правила — раздел 8 ТЗ;
+  претензии считаются только по клиентам с хотя бы одной незакрытой карточкой.
+</p>
+
+{% endif %}
+{% endblock %}

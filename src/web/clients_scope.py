@@ -35,7 +35,8 @@ from clients.schema import clients_session
 # Представления, которые создаёт область видимости. Обработчики читают
 # только их; список нужен тесту, который сверяет, что ни одно не осталось
 # без ограничения.
-SCOPED_VIEWS = ("v_client", "v_client_link", "v_client_event", "v_client_review")
+SCOPED_VIEWS = ("v_client", "v_client_link", "v_client_event", "v_client_review",
+                "v_client_issue")
 
 
 class BookMissing(RuntimeError):
@@ -84,6 +85,7 @@ def apply_scope(conn: sqlite3.Connection, scope: Scope) -> None:
         ("v_client_link", "client_links"),
         ("v_client_event", "client_events"),
         ("v_client_review", "client_reviews"),
+        ("v_client_issue", "client_issues"),
     ):
         conn.execute(
             f"CREATE TEMP VIEW {view} AS SELECT * FROM {table}"

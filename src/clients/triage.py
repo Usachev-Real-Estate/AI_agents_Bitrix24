@@ -110,7 +110,7 @@ class Facts:
     # Когда завели самую старую карточку. Нужен ровно одному случаю —
     # клиенту, которого не касались НИ РАЗУ: тишину ему считать не от чего,
     # а объявить «в работе» значило бы соврать про заведённую и забытую
-    # карточку. См. _silence_days.
+    # карточку. См. silence_days.
     oldest_card_at: str | None = None
 
 
@@ -136,7 +136,7 @@ def decide(facts: Facts, *, now: datetime) -> Verdict:
     if _waiting_us(facts):
         return Verdict(TRIAGE_WAITING_US, WHY_WAITING_US)
 
-    silence = _silence_days(facts, now=now)
+    silence = silence_days(facts, now=now)
     if silence is not None:
         if silence > ABANDONED_DAYS:
             return Verdict(TRIAGE_ABANDONED, WHY_ABANDONED)
@@ -161,8 +161,13 @@ def _waiting_us(facts: Facts) -> bool:
     return not facts.last_outgoing_at or facts.last_outgoing_at < facts.last_incoming_call_at
 
 
-def _silence_days(facts: Facts, *, now: datetime) -> int | None:
+def silence_days(facts: Facts, *, now: datetime) -> int | None:
     """Сколько дней с последнего касания. ``None`` — измерить нечем.
+
+    Публичная намеренно: тем же числом считает претензию `abandoned`
+    справочника раздела 8. Своя копия там разошлась бы с правилом ровно на
+    клиенте, которого не касались ни разу, — и он оказался бы «брошен» в
+    списке и без претензии в исключениях. Одна мера, одно место.
 
     Касания не было ни разу — тишина считается от заведения самой старой
     карточки. Без этого клиент, которого завели и забыли, проваливался бы
