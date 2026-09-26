@@ -46,6 +46,11 @@ class SecurityConfig:
     session_idle_hours: int = 2
     login_max_attempts: int = 5
     login_lockout_minutes: int = 15
+    # Машинный доступ к книге клиентов (раздел 7.1 ТЗ). Пустая строка —
+    # ветка выключена; проверка это учитывает отдельно, иначе запрос с
+    # пустым Bearer прошёл бы на непрописанном токене.
+    read_token: str = ""
+    write_token: str = ""
 
     @classmethod
     def from_settings(cls, settings) -> "SecurityConfig":
@@ -58,6 +63,19 @@ class SecurityConfig:
                 "Сгенерируйте: python -c \"import secrets; print(secrets.token_urlsafe(48))\" "
                 "и положите в .env"
             )
+        read_token = (settings.dossier_read_token or "").strip()
+        write_token = (settings.dossier_write_token or "").strip()
+        if read_token and read_token == write_token:
+            # Один и тот же ключ на чтение и запись отобрать порознь нельзя:
+            # сняв право записи, снимаешь и чтение у всех. Падать внятно
+            # лучше, чем выбирать за администратора, каким из двух прав
+            # считать этот токен, — тем же решением, что и с коротким
+            # DASHBOARD_SECRET_KEY выше.
+            raise RuntimeError(
+                "DOSSIER_READ_TOKEN и DOSSIER_WRITE_TOKEN совпадают. "
+                "Право записи тогда не отозвать, не отозвав чтение — "
+                "задайте разные значения."
+            )
         return cls(
             base_path=(settings.dashboard_base_path or "/dashboard").rstrip("/") or "/dashboard",
             secret_key=secret,
@@ -66,6 +84,8 @@ class SecurityConfig:
             session_idle_hours=int(settings.dashboard_session_idle_hours),
             login_max_attempts=int(settings.dashboard_login_max_attempts),
             login_lockout_minutes=int(settings.dashboard_login_lockout_minutes),
+            read_token=read_token,
+            write_token=write_token,
         )
 
     @property
@@ -183,15 +203,71 @@ def read_sid(request: Request, config: SecurityConfig) -> str | None:
         return None
 
 
-def authenticate(request: Request, config: SecurityConfig) -> dict | None:
-    """Вернуть пользователя сессии или None."""
-    sid = read_sid(request, config)
-    if not sid:
+# Синтетические «пользователи» машинного доступа. Роль администратора не
+# щедрость, а следствие: `Scope.for_user` выдаёт полный доступ только ей, а
+# токен по ТЗ и есть доступ ко всему портфелю — наружу читает модель, а не
+# человек.
+#
+# `sid` нет намеренно: сессии у токена не существует, и всё, что её ждёт
+# (продление, выход, журнал посещений), обязано об этом узнать по
+# отсутствию ключа, а не по совпадению имени.
+TOKEN_READER = {"username": "token:read", "role": "admin",
+                "department_ids": [], "is_token": True, "can_write": False}
+TOKEN_WRITER = {"username": "token:write", "role": "admin",
+                "department_ids": [], "is_token": True, "can_write": True}
+
+
+def bearer_user(request: Request, config: SecurityConfig) -> dict | None:
+    """Пользователь по заголовку `Authorization: Bearer`. None — не он.
+
+    Только под `{base_path}/api`. Токен, впускающий на HTML-страницы, — это
+    токен, которым однажды откроют дашборд в браузере и оставят вкладку
+    незакрытой; а ручки под /api на отказ отвечают 401, а не редиректом на
+    форму входа, то есть машина получит код, а не разметку.
+
+    Пустая настройка выключает ветку. Без этой проверки запрос с пустым
+    Bearer совпал бы с непрописанным токеном — и книга оказалась бы
+    открытой у всех, кто не заполнил `.env`.
+
+    Сравнение постоянного времени и на БАЙТАХ: `hmac.compare_digest` на
+    строках с не-ASCII падает TypeError, и подставленный в заголовок
+    кириллический мусор давал бы не отказ, а пятисотую. Проект на этом уже
+    обжигался в проверке CSRF.
+    """
+    if not request.url.path.startswith(f"{config.base_path}/api"):
         return None
-    user = store.touch_session(sid, idle_hours=config.session_idle_hours)
-    if user is not None:
-        user = dict(user, sid=sid)
-    return user
+    header = request.headers.get("authorization") or ""
+    scheme, _, value = header.partition(" ")
+    token = value.strip()
+    if scheme.lower() != "bearer" or not token:
+        return None
+    given = token.encode("utf-8", "ignore")
+    # Порядок в этой паре не значит ничего: совпасть с обоими токен не
+    # может — одинаковые значения `SecurityConfig.from_settings`
+    # отвергает на старте. Проверка `known and` тоже страховочная: пустой
+    # токен отсеян выше, и с пустой настройкой ему не совпасть. Оба
+    # оставлены на случай, если верхнюю проверку однажды ослабят.
+    for known, user in ((config.write_token, TOKEN_WRITER),
+                        (config.read_token, TOKEN_READER)):
+        if known and hmac.compare_digest(given, known.encode("utf-8", "ignore")):
+            return dict(user)
+    return None
+
+
+def authenticate(request: Request, config: SecurityConfig) -> dict | None:
+    """Вернуть пользователя сессии, машинного пользователя или None.
+
+    Кука проверяется ПЕРВОЙ: человек, открывший дашборд в браузере, должен
+    остаться собой со своей областью видимости, даже если в запросе почему-то
+    оказался заголовок с токеном.
+    """
+    sid = read_sid(request, config)
+    if sid:
+        user = store.touch_session(sid, idle_hours=config.session_idle_hours)
+        if user is not None:
+            return dict(user, sid=sid)
+        return None
+    return bearer_user(request, config)
 
 
 # --------------------------------------------------------------------------
@@ -298,6 +374,11 @@ class RequireAuthMiddleware(BaseHTTPMiddleware):
         статика и проверка живости к делу не относятся.
         """
         if request.method != "GET" or response.status_code != 200:
+            return
+        # След посещений — про людей. Машина читает книгу пачками, и её
+        # строки затопили бы журнал, по которому смотрят, кто чем
+        # пользуется; учётки `token:read` в базе нет вовсе.
+        if user.get("is_token"):
             return
         section = section_of(request.url.path, self.config.base_path)
         if not section:

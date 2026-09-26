@@ -19,14 +19,16 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from datetime import datetime, timezone
 from typing import Any, Iterator
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 import clients_read as read
+from clients.review import parse_issues, valid_through
 from clients.schema import (
-    ISSUE_LABELS, ISSUE_ORDER, TRIAGE_LABELS, TRIAGE_ORDER,
+    ISSUE_LABELS, ISSUE_ORDER, TRIAGE_LABELS, TRIAGE_ORDER, clients_session,
 )
 from clients_scope import BookMissing, scoped_clients
 from context import base_context, scope_for
@@ -172,6 +174,84 @@ async def api_call_transcript(request: Request, activity_id: int) -> JSONRespons
         {"activity_id": activity_id, "client_key": owner, "text": text},
         headers={"Cache-Control": "no-store"},
     )
+
+
+@router.get("/exceptions", response_model=None)
+async def api_exceptions(request: Request) -> JSONResponse:
+    """Счётчики справочника проблем (раздел 7.2 ТЗ).
+
+    Нулевые коды остаются в ответе: пропавший ключ читается как «такой
+    проблемы у нас не бывает», а правда в том, что сегодня её нет ни у
+    кого. Машине это различие нужно не меньше, чем человеку.
+    """
+    try:
+        with scoped_clients(scope_for(request)) as conn:
+            counts = read.counts_by_issue(conn)
+    except BookMissing:
+        return _book_missing()
+
+    return JSONResponse({"issues": counts, "total": sum(counts.values())},
+                        headers={"Cache-Control": "no-store"})
+
+
+@router.post("/clients/{client_key:path}/review", response_model=None)
+async def api_add_review(request: Request, client_key: str) -> JSONResponse:
+    """Дописать разбор. Требует токен записи (раздел 7.2 ТЗ).
+
+    ДОПИСЫВАЕТ, не перезаписывает: `client_reviews` — единственная таблица
+    книги, которую нельзя пересобрать из витрины.
+
+    Право проверяется здесь, а не в middleware: та отвечает на вопрос «кто
+    ты», и ответ у неё один для всех ручек. «Можно ли тебе писать» — вопрос
+    этой ручки, и единственной.
+    """
+    user = getattr(request.state, "user", None) or {}
+    if not user.get("can_write"):
+        # 403, а не 401: кто ты — установлено, не хватает права. Ответив
+        # 401, мы предложили бы читающей модели ещё раз предъявить тот же
+        # токен, и она бы честно попробовала.
+        raise HTTPException(status_code=403, detail="Нужен токен записи")
+
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 — тело прислали не JSON, и это отказ, а не сбой
+        raise HTTPException(status_code=400, detail="Тело запроса — не JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Ожидается объект JSON")
+
+    summary = " ".join(str(body.get("summary") or "").split())
+    if not summary:
+        raise HTTPException(status_code=400, detail="summary обязателен")
+    issues, why = parse_issues(body.get("issues"))
+    if why:
+        raise HTTPException(status_code=400, detail=why)
+    through, why = valid_through(body.get("reviewed_through"))
+    if why:
+        raise HTTPException(status_code=400, detail=why)
+
+    try:
+        with scoped_clients(scope_for(request)) as conn:
+            known = read.read_client(conn, client_key) is not None
+    except BookMissing:
+        return _book_missing()
+    if not known:
+        raise HTTPException(status_code=404, detail="Клиент не найден")
+
+    with clients_session() as conn:
+        conn.execute(
+            "INSERT INTO client_reviews(client_key, created_at, reviewed_through,"
+            " summary, verdict, issues_json, recommendation, enough_data, author)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (client_key, datetime.now(timezone.utc).isoformat(), through, summary,
+             " ".join(str(body.get("verdict") or "").split()),
+             json.dumps(list(issues), ensure_ascii=False),
+             " ".join(str(body.get("recommendation") or "").split()),
+             int(bool(body.get("enough_data", True))),
+             str(body.get("author") or "модель")[:64]),
+        )
+
+    return JSONResponse({"client_key": client_key, "written": True},
+                        status_code=201, headers={"Cache-Control": "no-store"})
 
 
 # --------------------------------------------------------------------------

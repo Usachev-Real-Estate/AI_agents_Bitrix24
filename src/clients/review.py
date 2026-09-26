@@ -53,8 +53,8 @@ if __package__ in (None, ""):  # запуск как `python src/clients/review.
 from clients import brief as brief_mod  # noqa: E402
 from clients.brief import Brief, FeedEvent  # noqa: E402
 from clients.schema import (  # noqa: E402
-    TRIAGE_ABANDONED, TRIAGE_COOLING, TRIAGE_NO_PLAN, TRIAGE_WAITING_US,
-    clients_session,
+    ISSUE_ORDER, TRIAGE_ABANDONED, TRIAGE_COOLING, TRIAGE_NO_PLAN,
+    TRIAGE_WAITING_US, clients_session,
 )
 from clients.transcripts import texts_of  # noqa: E402
 
@@ -187,6 +187,57 @@ def _issues(value: Any) -> tuple[str, ...]:
         return ()
     found = [_text(item) for item in value]
     return tuple(item for item in found if item)[:5]
+
+
+# --------------------------------------------------------------------------
+# приём разбора извне (раздел 7.2 ТЗ)
+# --------------------------------------------------------------------------
+
+def parse_issues(value: Any) -> tuple[tuple[str, ...], str]:
+    """Коды проблем из тела запроса. Второе — причина отказа или пусто.
+
+    Словарь закрыт: вкладка «Исключения» считает по нему, и код вне
+    словаря не появился бы там никогда. Приняв такой молча, ручка сказала
+    бы отправителю «записал», а записи не было бы — худший из отказов,
+    потому что он не выглядит отказом.
+    """
+    if value is None:
+        return (), ""
+    if not isinstance(value, list):
+        return (), "issues — массив кодов раздела 8"
+    codes = tuple(dict.fromkeys(str(item).strip() for item in value if str(item).strip()))
+    unknown = [code for code in codes if code not in ISSUE_ORDER]
+    if unknown:
+        return (), f"неизвестные коды проблем: {', '.join(unknown)}"
+    return codes, ""
+
+
+def valid_through(value: Any, *, now: datetime | None = None) -> tuple[str, str]:
+    """Проверить `reviewed_through`. Второе — причина отказа или пусто.
+
+    **Смещение обязательно.** Витрина хранит UTC, портал отдаёт +03:00, и
+    разбор, отправленный вечером без смещения, оказался бы «из будущего» —
+    а по этому сравнению карточка решает, свежий он или устарел.
+
+    **Будущее не принимается.** Отметка вперёд означала бы «прочитано то,
+    чего ещё не было», и такой разбор навсегда остался бы свежим: ни одно
+    настоящее событие его уже не догонит.
+
+    Пустое значение — тоже отказ. Без него `stale` не считается вовсе, и
+    разбор притворялся бы актуальным до конца времён.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return "", "reviewed_through обязателен"
+    try:
+        moment = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return "", "reviewed_through — не ISO-8601"
+    if moment.tzinfo is None:
+        return "", "reviewed_through без смещения: нужен +03:00 или Z"
+    if moment > (now or datetime.now(timezone.utc)):
+        return "", "reviewed_through в будущем"
+    return text, ""
 
 
 # --------------------------------------------------------------------------
