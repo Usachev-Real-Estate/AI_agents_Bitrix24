@@ -9,6 +9,12 @@
 <h1 class="section-title">
   {{ client.name or '(без имени)' }}
   {% if client.is_agent %}<span class="badge" title="{{ client.agent_reason }}">агент</span>{% endif %}
+  {# Выписка одним текстом — то же, что видит разбирающая модель. Ссылка
+     нужна не для красоты: без неё адрес выписки надо знать наизусть, а
+     читатель, которому она и предназначена, ходит по ссылкам. #}
+  <a class="muted" href="{{ base_path }}/api/clients/{{ client.client_key }}/brief"
+     target="_blank" rel="noopener"
+     title="Карточки, лента и разговоры одним текстом — то же, что видит разбор">выписка ↗</a>
 </h1>
 
 <div class="grid grid-2">

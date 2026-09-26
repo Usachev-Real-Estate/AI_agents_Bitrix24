@@ -22,7 +22,7 @@ import json
 import sqlite3
 from typing import Any, Iterator
 
-from clients.schema import TRIAGE_ORDER
+from clients.schema import ISSUE_ORDER, TRIAGE_ORDER
 
 # Потолок страницы из раздела 7.2. Читатель просит сколько хочет, отдаётся
 # не больше: ручка отдаёт поток, и страница в десять тысяч строк держала бы
@@ -140,6 +140,18 @@ def _conditions(filters: dict[str, Any], cursor: str | None) -> tuple[str, list[
         clauses.append("c.silence_days IS NOT NULL AND c.silence_days > ?")
         params.append(int(silence))
 
+    # Проблема тоже не у клиента, а рядом: их у него бывает несколько
+    # сразу. EXISTS по той же причине, что и у карточек — соединение
+    # размножило бы клиента по числу его проблем, и страница на сто строк
+    # показала бы шестьдесят человек.
+    issue = filters.get("issue")
+    if issue not in (None, ""):
+        clauses.append(
+            "EXISTS (SELECT 1 FROM v_client_issue i"
+            " WHERE i.client_key = c.client_key AND i.code = ?)"
+        )
+        params.append(issue)
+
     # Карточка и стадия живут у связей, а не у клиента: у него их
     # несколько. Условие «есть хотя бы одна такая» — это EXISTS, а не
     # соединение: соединение размножило бы клиента по числу карточек.
@@ -243,6 +255,30 @@ def counts_by_state(conn: sqlite3.Connection) -> dict[str, int]:
     return {state: found.get(state, 0) for state in TRIAGE_ORDER if found.get(state)}
 
 
+def counts_by_issue(conn: sqlite3.Connection) -> dict[str, int]:
+    """Сколько клиентов с каждой проблемой — вкладка «Исключения».
+
+    Сумма счётчиков больше числа людей: у человека бывает пять проблем
+    сразу. Так и задумано — счётчик отвечает «сколько таких случаев», а не
+    «сколько людей всего», и экран говорит это вслух.
+
+    Внутри кода дважды один клиент не встретится: `(client_key, code)` —
+    первичный ключ таблицы, и `COUNT(DISTINCT client_key)` здесь дал бы
+    ровно то же, что `COUNT(*)`. Лишнего DISTINCT нет намеренно: он
+    выглядел бы защитой от того, чего схема не допускает.
+
+    Нулевые коды остаются в ответе, в отличие от состояний. Пропавший
+    счётчик читается как «такой проблемы у нас не бывает», а правда в том,
+    что сегодня её нет ни у кого, — и это хорошая новость, которую видно
+    только если строка на месте.
+    """
+    rows = conn.execute(
+        "SELECT i.code, COUNT(*) FROM v_client_issue i GROUP BY i.code"
+    ).fetchall()
+    found = {str(code): int(count) for code, count in rows}
+    return {code: found.get(code, 0) for code in ISSUE_ORDER}
+
+
 def read_client(conn: sqlite3.Connection, client_key: str) -> dict[str, Any] | None:
     """Клиент целиком: он сам, карточки, вся лента и все разборы.
 
@@ -269,6 +305,12 @@ def read_client(conn: sqlite3.Connection, client_key: str) -> dict[str, Any] | N
             _event(item) for item in conn.execute(
                 "SELECT * FROM v_client_event WHERE client_key = ?"
                 " ORDER BY at, id", (client_key,),
+            )
+        ],
+        "issues": [
+            str(row[0]) for row in conn.execute(
+                "SELECT code FROM v_client_issue WHERE client_key = ?"
+                " ORDER BY code", (client_key,),
             )
         ],
         "reviews": [

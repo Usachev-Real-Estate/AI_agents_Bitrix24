@@ -49,11 +49,14 @@ from clients.events import Event, Totals, build_events, totals  # noqa: E402
 from clients.facts import collect as collect_facts  # noqa: E402
 from clients.facts import coverage as call_coverage  # noqa: E402
 from clients.facts import calls_with_text  # noqa: E402
+from clients.issues import detect as detect_issues  # noqa: E402
+from clients.issues import overdue as promise_overdue  # noqa: E402
 from clients.keys import Decision, assign_keys  # noqa: E402
 from clients.mart import Portfolio, read_portfolio  # noqa: E402
 from clients.transcripts import DEGRADED_NAME as TRANSCRIPTS_DEGRADED  # noqa: E402
 from clients.transcripts import calls_with_refusal, transcribed_calls  # noqa: E402
 from clients.triage import decide as decide_triage  # noqa: E402
+from clients.triage import silence_days as triage_silence  # noqa: E402
 from clients.merges import apply_migrations, current_links, plan_migrations  # noqa: E402
 from clients.schema import EVENT_CALL  # noqa: E402
 from clients.schema import (  # noqa: E402
@@ -507,8 +510,12 @@ def build(*, now: datetime | None = None, dry_run: bool = False,
         by_state = _write_totals(
             conn, events, rows, run_id, moment,
             decisions=decisions, deals=portfolio.deals,
+            promises=portfolio.promises,
             transcribed=transcribed, refused_calls=refused_calls, markers=markers,
         )
+        # После _write_totals: она и проставляет aggregates_run_id, по
+        # которому здесь опознаются те, кого прогон не видел.
+        departed = mark_departed(conn, run_id, at=moment.isoformat())
 
         close_run(
             conn, run_id, now=moment, cards=len(cards), errors=0, complete=True,
@@ -517,6 +524,7 @@ def build(*, now: datetime | None = None, dry_run: bool = False,
 
     summary["written"] = True
     summary["states"] = by_state
+    summary["портфель"] = departed
     summary["migrations"] = len(plan.migrations)
     summary["split"] = len(plan.split)
     logger.info("Клиентский слой пересобран: %s", summary)
@@ -527,6 +535,7 @@ def _write_totals(conn, events: Sequence[Event], rows: Mapping[str, dict],
                   run_id: int, now: datetime, *,
                   decisions: Mapping[int, Decision],
                   deals: Mapping[int, dict],
+                  promises: Mapping[int, Mapping[str, Any]],
                   transcribed: set[int] | None,
                   refused_calls: set[int] | None,
                   markers: Sequence[str]) -> dict[str, int]:
@@ -549,12 +558,13 @@ def _write_totals(conn, events: Sequence[Event], rows: Mapping[str, dict],
         deals_by_key.setdefault(decision.key, []).append(deal_id)
 
     by_state: dict[str, int] = {}
+    by_issue: dict[str, int] = {}
+    issue_rows: list[tuple[str, str]] = []
     payload = []
     for key, row in rows.items():
         lane = by_key.get(key, ())
         summary: Totals = totals(lane, assignee_id=row["assignee_id"], now=now)
-        verdict = decide_triage(
-            collect_facts(
+        facts = collect_facts(
                 lane, deals_by_key.get(key, ()),
                 deals=deals,
                 last_touch_at=summary.last_touch_at,
@@ -562,10 +572,32 @@ def _write_totals(conn, events: Sequence[Event], rows: Mapping[str, dict],
                 transcribed=transcribed,
                 refused_calls=refused_calls,
                 markers=markers,
-            ),
-            now=now,
         )
+        verdict = decide_triage(facts, now=now)
         by_state[verdict.state] = by_state.get(verdict.state, 0) + 1
+
+        # Проблемы считаются по ТЕМ ЖЕ фактам, но независимо от цепочки
+        # правил: у клиента с маркером отказа состояние «отказ», правило 3
+        # до него не доходит, а нерасшифрованные разговоры у него всё
+        # равно есть. По состоянию их было бы не видно.
+        found = detect_issues(
+            facts,
+            comments_by_assignee=summary.comments_by_assignee,
+            # Тем же числом, что правило 5, а не `summary.silence_days`: у
+            # того нет отката на дату заведения карточки, и клиент, чью
+            # карточку не касались ни разу, попал бы в «брошен» по правилу
+            # и не попал бы в претензию.
+            silence_days=triage_silence(facts, now=now),
+            promise_overdue=promise_overdue(
+                (promises[deal_id] for deal_id in deals_by_key.get(key, ())
+                 if deal_id in promises),
+                now=now,
+            ),
+        )
+        for code in found:
+            by_issue[code] = by_issue.get(code, 0) + 1
+            issue_rows.append((key, code))
+
         payload.append({
             "client_key": key,
             "run_id": run_id,
@@ -588,7 +620,60 @@ def _write_totals(conn, events: Sequence[Event], rows: Mapping[str, dict],
             ),
         })
     conn.executemany(_TOTALS_UPDATE, payload)
+    # Проблемы пересобираются целиком: они выводятся из портфеля, а не
+    # пишутся человеком, и строка, пережившая исчезновение своей причины,
+    # была бы претензией к брокеру за то, что он уже исправил.
+    conn.execute("DELETE FROM client_issues")
+    conn.executemany(
+        "INSERT INTO client_issues(client_key, code) VALUES (?, ?)", issue_rows,
+    )
+    if by_issue:
+        logger.info("Проблемы: %s",
+                    dict(sorted(by_issue.items(), key=lambda pair: -pair[1])))
     return dict(sorted(by_state.items(), key=lambda pair: -pair[1]))
+
+
+# Кто пропал из портфеля и кто вернулся. Опознаются по `aggregates_run_id`:
+# полный прогон только что проставил его каждому, кого видел, так что
+# «не этот прогон» и значит «не видели». Список ключей для `IN (...)` тут
+# не нужен вовсе — а он был бы на две с половиной тысячи параметров.
+_MARK_DEPARTED = """
+UPDATE clients SET left_at = :at
+WHERE left_at IS NULL
+  AND (aggregates_run_id IS NULL OR aggregates_run_id != :run_id)
+"""
+
+_MARK_RETURNED = """
+UPDATE clients SET left_at = NULL
+WHERE left_at IS NOT NULL AND aggregates_run_id = :run_id
+"""
+
+
+def mark_departed(conn, run_id: int, *, at: str) -> dict[str, int]:
+    """Пометить ушедших из портфеля и снять пометку с вернувшихся.
+
+    Клиент пропадает, когда его сделку удалили или увели в чужую воронку.
+    Строку при этом НЕ удаляем: на неё ссылаются разборы (`client_reviews`
+    — единственная таблица книги, которую нельзя пересобрать) и журнал
+    переездов ключа. Но из списка «кого смотреть первым» и из очереди
+    разбора она уходит.
+
+    Без пометки такой клиент оставался бы там навсегда с состоянием,
+    замороженным на последнем видевшем его прогоне: прогон обновляет
+    только тех, кого видит. Расхождение уже было видно числом — 710 по
+    состояниям против 715 строк в таблице, и за сутки оно выросло с
+    одного до пяти.
+
+    Зовётся ТОЛЬКО на полном прогоне: неполный портфель не трогает вовсе
+    ([V20]), и пометить по нему ушедшими полпортфеля было бы худшим из
+    возможных способов это нарушить.
+    """
+    params = {"at": at, "run_id": run_id}
+    gone = conn.execute(_MARK_DEPARTED, params).rowcount
+    back = conn.execute(_MARK_RETURNED, params).rowcount
+    if gone or back:
+        logger.info("Из портфеля ушло %d, вернулось %d", gone, back)
+    return {"ушли": gone, "вернулись": back}
 
 
 def _key_by_contact(decisions: Mapping[int, Decision]) -> dict[int, str]:

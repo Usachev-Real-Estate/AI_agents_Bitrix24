@@ -6,9 +6,14 @@
 программа-читатель вместо отказа получила бы HTML и разбирала бы его как
 данные.
 
-Все три ручки читают только через область видимости (`clients_scope`): на
-соединении без неё запрос упадёт на отсутствующем `v_client`, а не покажет
-РОПу всю компанию.
+Право на клиента спрашивается через область видимости (`clients_scope`):
+на соединении без неё запрос упадёт на отсутствующем `v_client`, а не
+покажет РОПу всю компанию.
+
+Две ручки — расшифровка звонка и выписка — читают потом НЕ через неё:
+тексты лежат в базе аудита, где области видимости нет вовсе, а выписку
+собирает `clients.review` по таблицам напрямую. Поэтому порядок в них
+обратить нельзя: сначала «твой ли это клиент», и только потом текст.
 
 Отдельным файлом, а не в `routes_api.py`: тот про витрину, эти про книгу, и
 общего у них — только префикс.
@@ -19,13 +24,20 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from datetime import datetime, timezone
 from typing import Any, Iterator
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (
+    HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse,
+)
 
 import clients_read as read
-from clients.schema import TRIAGE_LABELS, TRIAGE_ORDER
+from clients.brief import as_text
+from clients.review import make_brief, parse_issues, valid_through
+from clients.schema import (
+    ISSUE_LABELS, ISSUE_ORDER, TRIAGE_LABELS, TRIAGE_ORDER, clients_session,
+)
 from clients_scope import BookMissing, scoped_clients
 from context import base_context, scope_for
 from transcripts_read import read_transcript
@@ -46,7 +58,7 @@ PAGE_SIZE = 100
 # адресной строки попадает в запрос.
 FILTER_PARAMS = (
     "triage_state", "assignee_id", "department_id", "category_id",
-    "stage_id", "silence_gt", "is_agent", "reviewed",
+    "stage_id", "silence_gt", "is_agent", "reviewed", "issue",
 )
 
 
@@ -101,11 +113,57 @@ async def api_clients(request: Request) -> StreamingResponse | JSONResponse:
                                          cursor=cursor):
                 yield (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
 
+    # `format=text` меняет ТОЛЬКО тип ответа: строки те же, ни одной
+    # лишней и ни одной другой. Нужен потому, что `application/x-ndjson`
+    # браузер скачивает файлом, а не показывает, — и читатель, который
+    # видит страницу, а не поток, получил бы вместо книги пустоту.
+    as_page = request.query_params.get("format") == "text"
     return StreamingResponse(
         lines(),
-        media_type="application/x-ndjson",
+        media_type="text/plain" if as_page else "application/x-ndjson",
         headers={"Cache-Control": "no-store"},
     )
+
+
+@router.get("/clients/{client_key:path}/brief", response_model=None)
+async def api_client_brief(
+    request: Request, client_key: str,
+) -> PlainTextResponse | JSONResponse:
+    """Выписка по клиенту словами — ровно то, что видит разбирающая модель.
+
+    Объявлена ВЫШЕ `/clients/{client_key:path}`, и это не вкусовщина. Ключ
+    объявлен `:path`, то есть забирает и слэши: стоя ниже, этот адрес
+    целиком достался бы той ручке — она пошла бы искать клиента с ключом
+    `p:+7…/brief`, не нашла и ответила 404. Выглядело бы это как опечатка в
+    ключе, а не как перекрытый маршрут, и искали бы не там. Порядок
+    закреплён тестом.
+
+    Отдаётся текстом, а не JSON, хотя JSON браузер тоже показывает:
+    выписка с расшифровками в JSON — одна строка на мегабайт, где переводы
+    строк записаны как `\n`. Читать её глазами нельзя, а читателю здесь
+    именно читать.
+
+    Право спрашивается У КНИГИ в области видимости, и только потом читается
+    выписка — тем же порядком, что и расшифровка одного звонка ниже.
+    `make_brief` читает таблицы напрямую, области видимости на них нет:
+    обратный порядок отдал бы РОПу чужого клиента целиком, с разговорами.
+    """
+    try:
+        with scoped_clients(scope_for(request)) as conn:
+            conn.row_factory = sqlite3.Row
+            mine = read.read_client(conn, client_key) is not None
+    except BookMissing:
+        return _book_missing()
+
+    if not mine:
+        # Чужой и несуществующий отвечают одинаково — по той же причине,
+        # что и в ручке клиента: разные ответы превратили бы адрес в
+        # перечислитель ключей.
+        raise HTTPException(status_code=404, detail="Клиент не найден")
+
+    with clients_session(readonly=True) as conn:
+        found = make_brief(conn, client_key)
+    return PlainTextResponse(as_text(found), headers={"Cache-Control": "no-store"})
 
 
 @router.get("/clients/{client_key:path}", response_model=None)
@@ -172,6 +230,84 @@ async def api_call_transcript(request: Request, activity_id: int) -> JSONRespons
     )
 
 
+@router.get("/exceptions", response_model=None)
+async def api_exceptions(request: Request) -> JSONResponse:
+    """Счётчики справочника проблем (раздел 7.2 ТЗ).
+
+    Нулевые коды остаются в ответе: пропавший ключ читается как «такой
+    проблемы у нас не бывает», а правда в том, что сегодня её нет ни у
+    кого. Машине это различие нужно не меньше, чем человеку.
+    """
+    try:
+        with scoped_clients(scope_for(request)) as conn:
+            counts = read.counts_by_issue(conn)
+    except BookMissing:
+        return _book_missing()
+
+    return JSONResponse({"issues": counts, "total": sum(counts.values())},
+                        headers={"Cache-Control": "no-store"})
+
+
+@router.post("/clients/{client_key:path}/review", response_model=None)
+async def api_add_review(request: Request, client_key: str) -> JSONResponse:
+    """Дописать разбор. Требует токен записи (раздел 7.2 ТЗ).
+
+    ДОПИСЫВАЕТ, не перезаписывает: `client_reviews` — единственная таблица
+    книги, которую нельзя пересобрать из витрины.
+
+    Право проверяется здесь, а не в middleware: та отвечает на вопрос «кто
+    ты», и ответ у неё один для всех ручек. «Можно ли тебе писать» — вопрос
+    этой ручки, и единственной.
+    """
+    user = getattr(request.state, "user", None) or {}
+    if not user.get("can_write"):
+        # 403, а не 401: кто ты — установлено, не хватает права. Ответив
+        # 401, мы предложили бы читающей модели ещё раз предъявить тот же
+        # токен, и она бы честно попробовала.
+        raise HTTPException(status_code=403, detail="Нужен токен записи")
+
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 — тело прислали не JSON, и это отказ, а не сбой
+        raise HTTPException(status_code=400, detail="Тело запроса — не JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Ожидается объект JSON")
+
+    summary = " ".join(str(body.get("summary") or "").split())
+    if not summary:
+        raise HTTPException(status_code=400, detail="summary обязателен")
+    issues, why = parse_issues(body.get("issues"))
+    if why:
+        raise HTTPException(status_code=400, detail=why)
+    through, why = valid_through(body.get("reviewed_through"))
+    if why:
+        raise HTTPException(status_code=400, detail=why)
+
+    try:
+        with scoped_clients(scope_for(request)) as conn:
+            known = read.read_client(conn, client_key) is not None
+    except BookMissing:
+        return _book_missing()
+    if not known:
+        raise HTTPException(status_code=404, detail="Клиент не найден")
+
+    with clients_session() as conn:
+        conn.execute(
+            "INSERT INTO client_reviews(client_key, created_at, reviewed_through,"
+            " summary, verdict, issues_json, recommendation, enough_data, author)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (client_key, datetime.now(timezone.utc).isoformat(), through, summary,
+             " ".join(str(body.get("verdict") or "").split()),
+             json.dumps(list(issues), ensure_ascii=False),
+             " ".join(str(body.get("recommendation") or "").split()),
+             int(bool(body.get("enough_data", True))),
+             str(body.get("author") or "модель")[:64]),
+        )
+
+    return JSONResponse({"client_key": client_key, "written": True},
+                        status_code=201, headers={"Cache-Control": "no-store"})
+
+
 # --------------------------------------------------------------------------
 # экраны
 # --------------------------------------------------------------------------
@@ -180,6 +316,8 @@ def _page_context(request: Request, active: str) -> dict[str, Any]:
     context = base_context(request, active=active)
     context["triage_labels"] = TRIAGE_LABELS
     context["triage_order"] = TRIAGE_ORDER
+    context["issue_labels"] = ISSUE_LABELS
+    context["issue_order"] = ISSUE_ORDER
     return context
 
 
@@ -204,7 +342,13 @@ def _no_book(request: Request) -> HTMLResponse:
         "clients": [], "total": 0, "counts": {}, "filters": {},
         "page": 1, "pages": 1,
     })
-    return _render(request, "clients.html", context)
+    # Шаблон берётся по тому, куда человек шёл: «Исключения» не знают про
+    # список и фильтры, а список — про счётчики проблем, и подставив не
+    # тот, экран «книги нет» упал бы в пятисотку ровно там, где он и
+    # заводился, чтобы этого не случилось.
+    template = "exceptions.html" if context.get("active") == "exceptions" \
+        else "clients.html"
+    return _render(request, template, context)
 
 
 @pages.get("/clients", response_class=HTMLResponse)
@@ -231,6 +375,26 @@ async def clients_page(request: Request) -> HTMLResponse:
         "pages": max(1, -(-total // PAGE_SIZE)),
     })
     return _render(request, "clients.html", context)
+
+
+@pages.get("/exceptions", response_class=HTMLResponse)
+async def exceptions_page(request: Request) -> HTMLResponse:
+    """Вкладка «Исключения»: пять счётчиков раздела 8 ТЗ.
+
+    Каждый ведёт в список клиентов, отфильтрованный по этой проблеме — на
+    ту же вкладку «Клиенты». Отдельного списка здесь нет намеренно: два
+    списка клиентов с разными колонками разошлись бы в первый же день,
+    когда в один добавят столбец.
+    """
+    context = _page_context(request, "exceptions")
+    try:
+        with scoped_clients(scope_for(request)) as conn:
+            counts = read.counts_by_issue(conn)
+    except BookMissing:
+        return _no_book(request)
+
+    context.update({"counts": counts, "total": sum(counts.values())})
+    return _render(request, "exceptions.html", context)
 
 
 @pages.get("/clients/{client_key:path}", response_class=HTMLResponse)

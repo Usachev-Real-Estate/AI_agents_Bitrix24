@@ -53,6 +53,10 @@ def book(tmp_path, monkeypatch):
             " VALUES (?, '', '')",
             [("p:свой",), ("p:чужой",), ("p:ничей",)],
         )
+        conn.executemany(
+            "INSERT INTO client_issues(client_key, code) VALUES (?, 'abandoned')",
+            [("p:свой",), ("p:чужой",), ("p:ничей",)],
+        )
     yield path
     get_settings.cache_clear()
 

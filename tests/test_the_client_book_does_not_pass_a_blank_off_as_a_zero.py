@@ -22,6 +22,7 @@ from clients.events import Event
 
 from clients.schema import (
     CLIENT_CHILD_TABLES,
+    CLIENT_REBUILT_TABLES,
     TRIAGE_LABELS,
     TRIAGE_ORDER,
     TRIAGE_UNKNOWN,
@@ -93,13 +94,20 @@ def test_the_sort_order_covers_every_state():
 
 
 def test_every_table_that_names_a_client_is_on_the_move_list(book):
-    """Список таблиц для переезда ключа выведен из схемы, а не из памяти.
+    """Каждая таблица с client_key либо переезжает, либо пересобирается.
 
     При переезде (раздел 2.5) строка прежнего клиента удаляется, и всё, что
     на неё ссылалось, обязано быть перенацелено. Забытая таблица стоит
     потерянной ленты или потерянного разбора — того самого, который нельзя
     пересобрать. Проверка идёт от схемы: добавили таблицу с client_key и не
-    внесли её в список — тест падает здесь, а не на боевом переезде.
+    внесли её ни в один список — тест падает здесь, а не на боевом
+    переезде.
+
+    Списков два, и третьего пути нет. `client_issues` выводится из
+    портфеля целиком каждым полным прогоном, и переезд ей не нужен — он
+    случился бы за секунды до `DELETE`. Хуже того, он опасен: ключ там
+    составной, и `UPDATE SET client_key` при совпадении кода у прежнего и
+    нового клиента уронил бы прогон уникальностью.
     """
     with clients_session(book, readonly=True) as conn:
         names = [
@@ -118,7 +126,10 @@ def test_every_table_that_names_a_client_is_on_the_move_list(book):
             )
         }
 
-    assert referring - {"clients"} == set(CLIENT_CHILD_TABLES)
+    assert referring - {"clients"} == set(CLIENT_CHILD_TABLES) | set(CLIENT_REBUILT_TABLES)
+    assert not set(CLIENT_CHILD_TABLES) & set(CLIENT_REBUILT_TABLES), (
+        "таблица не может одновременно переезжать и пересобираться"
+    )
 
 
 def test_one_phone_leads_to_one_client(book):
@@ -302,7 +313,7 @@ def _totals(book, events, transcribed):
             conn, events,
             {KEY: {"assignee_id": 10}, OTHER: {"assignee_id": 11}},
             run_id=1, now=RUN_AT,
-            decisions={}, deals={}, transcribed=transcribed,
+            decisions={}, deals={}, promises={}, transcribed=transcribed,
             refused_calls=set(), markers=("передумал",),
         )
     with clients_session(book, readonly=True) as conn:

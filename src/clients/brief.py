@@ -238,3 +238,184 @@ def _source_id(event: FeedEvent) -> int:
         return int(event.source_id)
     except (TypeError, ValueError):
         return 0
+
+
+# Подписи полей клиента для текстовой выписки и их порядок на экране.
+# Отдельно от `CLIENT_FIELDS`, потому что читателю нужны слова, а не имена
+# колонок: `assignee_count` он прочтёт как что угодно, «брокеров на
+# клиенте» — однозначно. Каждое поле выписки обязано быть здесь, и это
+# проверено тестом: иначе колонка, добавленная в `CLIENT_FIELDS`, молча
+# исчезла бы из текстовой формы, оставшись в JSON.
+_CLIENT_LABELS = (
+    ("name", "имя"),
+    ("triage_state", "состояние"),
+    ("triage_reason", "правило"),
+    ("assignee_name", "ответственный"),
+    ("assignee_count", "брокеров на клиенте"),
+    ("is_agent", "агент"),
+    ("silence_days", "дней тишины"),
+    ("last_touch_at", "последнее касание"),
+    ("next_step_at", "следующий шаг"),
+    ("next_step_overdue", "шаг просрочен"),
+    ("calls_total", "звонков"),
+    ("calls_with_transcript", "из них с расшифровкой"),
+    ("comments_total", "записей в карточках"),
+    ("comments_by_assignee", "из них ответственного"),
+)
+
+# Подписи карточек. `closed=0` читатель обязан понять с первого взгляда:
+# на этом уже спотыкалась разбирающая модель — она прочла рабочую стадию
+# «Закрытая продажа (На сайт)» как завершённую сделку. «закрыта: нет»
+# спутать не с чем, «closed=0» приглашает догадываться.
+_CARD_LABELS = (
+    ("title", "название"),
+    ("stage_name", "стадия"),
+    ("stage_id", "код стадии"),
+    ("closed", "закрыта"),
+    ("date_create", "заведена"),
+)
+
+# Поля-признаки: в базе 0/1, на экране «нет»/«да». Ноль в такой колонке
+# читатель переводит сам, и именно на этом переводе разбирающая модель уже
+# ошиблась — прочла рабочую стадию как завершённую сделку. Пусто остаётся
+# прочерком: `next_step_overdue` без значения это «не измерено», а не «нет».
+_FLAGS = frozenset({"closed", "is_agent", "next_step_overdue", "ответственный"})
+
+# Пусто — это «не задано», а не ноль. Прочерк сохраняет разницу, которая в
+# ленте значит буквально разные вещи: `ответственный=0` — запись сделал не
+# ответственный, `ответственный=—` — кто сделал, неизвестно.
+NOT_SET = "—"
+
+
+def as_text(brief: Brief) -> str:
+    """Та же выписка словами — для читателя, который видит страницу.
+
+    Нужна не для красоты. `as_payload` уходит в запрос как JSON, а список
+    книги браузер отдаёт типом `application/x-ndjson` — такой ответ он
+    скачивает файлом, а не показывает, и расширение, читающее
+    отрендеренную страницу, увидело бы пустоту.
+
+    Телефона здесь нет не потому, что его не печатают, а потому, что
+    `CLIENT_FIELDS` его не пускает: текстовая форма берёт данные оттуда же,
+    откуда JSON, и добавить в неё поле мимо этого списка нельзя.
+
+    **Подрезка названа и тут.** Раздел «ВЫПИСКА» идёт вторым, до самих
+    данных: читатель, у которого кончится бюджет, должен узнать про
+    скрытые события раньше, чем начнёт делать по ним выводы.
+
+    **Пустые разделы пишутся вслух.** Раздела нет — читается как «не
+    смотрели»; раздел со словом «нет» — как «смотрели, ничего». Для
+    выписки, по которой решают судьбу человека, это разные вещи.
+    """
+    blocks = [
+        _client_block(brief),
+        _summary_block(brief),
+        _cards_block(brief),
+        _timeline_block(brief),
+        _talks_block(brief),
+    ]
+    return "\n\n".join(blocks) + "\n"
+
+
+def _client_block(brief: Brief) -> str:
+    lines = ["КЛИЕНТ"]
+    lines += [f"  {label}: {_value(name, brief.client.get(name))}"
+              for name, label in _CLIENT_LABELS]
+    return "\n".join(lines)
+
+
+def _labelled(entry: Mapping[str, Any], labels: Sequence[tuple[str, str]]) -> str:
+    """Запись одной строкой по заданным подписям, в их порядке.
+
+    Не `_fields`: там имена приходят из самой записи, и для карточки это
+    были бы имена колонок. `closed=0` читателю ничего не говорит.
+    """
+    return "  ".join(f"{label}: {_value(name, entry.get(name))}"
+                     for name, label in labels)
+
+
+def _summary_block(brief: Brief) -> str:
+    """Что известно о самой выписке: на чём отвечать и чего в ней нет.
+
+    Счётчики берутся из `Trimmed.as_dict`, а не пишутся своими словами:
+    одна формулировка на JSON и на текст — одно место, где её править.
+    """
+    lines = ["ВЫПИСКА",
+             f"  есть на чём отвечать: {_flat(brief.enough_data)}"]
+    lines += [f"  {label}: {count}" for label, count in brief.trimmed.as_dict().items()]
+    return "\n".join(lines)
+
+
+def _cards_block(brief: Brief) -> str:
+    lines = [_head("КАРТОЧКИ", len(brief.cards))]
+    lines += [f"  {_labelled(card, _CARD_LABELS)}" for card in brief.cards]
+    return "\n".join(lines)
+
+
+def _timeline_block(brief: Brief) -> str:
+    """Лента с числом «столько из столького».
+
+    Всего событий — показанные плюс скрытые: своего счётчика у выписки нет
+    и быть не должно, иначе он разойдётся с подрезкой.
+    """
+    shown = len(brief.timeline)
+    total = shown + brief.trimmed.events
+    extra = f" из {total}" if total != shown else ""
+    lines = [_head("ЛЕНТА", shown, extra=extra)]
+    lines += [f"  {_fields(entry)}" for entry in brief.timeline]
+    return "\n".join(lines)
+
+
+def _talks_block(brief: Brief) -> str:
+    """Разговоры: заголовок строкой, текст как есть.
+
+    Единственный раздел, где переводы строк внутри значения сохраняются:
+    это и есть содержание, а не подпись к нему.
+    """
+    lines = [_head("РАЗГОВОРЫ", len(brief.talks))]
+    for talk in brief.talks:
+        # Всё, кроме текста: перечислять поля по именам значило бы завести
+        # второй список, который забудут поправить вместе с `_talks`.
+        head = {name: value for name, value in talk.items() if name != "текст"}
+        lines.append(f"  --- {_fields(head)} ---")
+        lines.append(str(talk.get("текст") or ""))
+    return "\n".join(lines)
+
+
+def _head(title: str, count: int, *, extra: str = "") -> str:
+    """Заголовок раздела с числом. Ноль — словом: «0» ищется глазами хуже."""
+    return f"{title}: {count if count else 'нет'}{extra}"
+
+
+def _fields(entry: Mapping[str, Any]) -> str:
+    """Запись одной строкой: все её поля, в том порядке, в каком положены.
+
+    Перечислять поля по именам нельзя: `_entry` кладёт «стадию» только
+    стадиям, «секунд» только звонкам, и второй список пришлось бы править
+    вместе с первым — а забытое поле пропало бы из выписки молча, оставшись
+    в JSON. Здесь печатается то, что есть.
+    """
+    return "  ".join(f"{name}={_value(name, value)}" for name, value in entry.items())
+
+
+def _value(name: str, value: Any) -> str:
+    """Значение поля с поправкой на признаки."""
+    if name in _FLAGS and value is not None and value != "":
+        return "да" if value else "нет"
+    return _flat(value)
+
+
+def _flat(value: Any) -> str:
+    """Значение в одну строку.
+
+    Перевод строки внутри записи склеил бы два события в одно и сдвинул бы
+    всю ленту: читатель видит текст, а не разметку, и границы записей у
+    него только эти.
+    """
+    if value is None or value == "":
+        return NOT_SET
+    if value is True:
+        return "да"
+    if value is False:
+        return "нет"
+    return " ".join(str(value).split())

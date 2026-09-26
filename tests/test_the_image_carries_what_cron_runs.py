@@ -14,6 +14,12 @@ scripts/ есть всегда, и разницы не видно. Двенад�
 Тест сверяет два файла, которые правятся порознь и никогда вместе:
 crontab.txt и Dockerfile. Пока их связывает только память, они разъедутся
 снова — следующий скрипт вне src/ добавят так же.
+
+Заодно здесь проверяется, что каждое задание идёт через
+scripts/cron_job.sh. Одно однажды прошло мимо — понедельничная уборка
+дашборда, — и стоило это двух предохранителей сразу: падение никого не
+будило, а зависший запуск мог дождаться следующего понедельника и начать
+второй.
 """
 
 from __future__ import annotations
@@ -84,3 +90,20 @@ def test_dockerignore_does_not_undo_the_copy():
         assert top not in ignored, (
             f"{top}/ исключён в .dockerignore, а крон запускает оттуда {entry}"
         )
+
+
+def test_every_scheduled_job_goes_through_the_wrapper():
+    """Обёртка — это flock и алерт. Задание мимо неё лишено обоих.
+
+    Проверяется строкой файла, а не установленным кроном: правят именно
+    файл, и пропажа обнаружилась бы иначе только в тот день, когда
+    что-то упало молча.
+    """
+    lines = [
+        line for line in (_ROOT / "crontab.txt").read_text(encoding="utf-8").splitlines()
+        if line[:1].isdigit() or line.startswith("*")
+    ]
+
+    assert lines, "расписание пустое — тест проверяет не то"
+    missing = [line[:70] for line in lines if "scripts/cron_job.sh" not in line]
+    assert missing == [], f"задания без обёртки: {missing}"
